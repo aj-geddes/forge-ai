@@ -1,26 +1,32 @@
 # Stage 1: Builder
 FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim AS builder
 
-WORKDIR /app
+WORKDIR /build
+
+# Copy agentweave dependency first (referenced as ../agentweave in pyproject.toml)
+# Build context must include agentweave as a sibling directory.
+# Use: docker build -f forge-ai/Dockerfile . (from parent directory)
+# Or the CI workflow handles this via context path.
+COPY agentweave/ /build/agentweave/
+
+# Set the app workdir
+WORKDIR /build/forge-ai
 
 # Copy workspace root and lockfile first for layer caching
-COPY pyproject.toml uv.lock ./
+COPY forge-ai/pyproject.toml forge-ai/uv.lock ./
 
 # Copy all package pyproject.toml files for dependency resolution
-COPY packages/forge-config/pyproject.toml packages/forge-config/pyproject.toml
-COPY packages/forge-security/pyproject.toml packages/forge-security/pyproject.toml
-COPY packages/forge-agent/pyproject.toml packages/forge-agent/pyproject.toml
-COPY packages/forge-gateway/pyproject.toml packages/forge-gateway/pyproject.toml
-
-# Copy agentweave dependency (local path reference)
-COPY vendor/agentweave/ /home/aj-geddes/dev/claude-projects/agentweave/
+COPY forge-ai/packages/forge-config/pyproject.toml packages/forge-config/pyproject.toml
+COPY forge-ai/packages/forge-security/pyproject.toml packages/forge-security/pyproject.toml
+COPY forge-ai/packages/forge-agent/pyproject.toml packages/forge-agent/pyproject.toml
+COPY forge-ai/packages/forge-gateway/pyproject.toml packages/forge-gateway/pyproject.toml
 
 # Install dependencies (cached layer)
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev --no-install-workspace
 
 # Copy source code
-COPY packages/ packages/
+COPY forge-ai/packages/ packages/
 
 # Install workspace packages
 RUN --mount=type=cache,target=/root/.cache/uv \
@@ -35,10 +41,10 @@ RUN groupadd --gid 999 forge && \
 WORKDIR /app
 
 # Copy virtual environment from builder
-COPY --from=builder /app/.venv /app/.venv
+COPY --from=builder /build/forge-ai/.venv /app/.venv
 
 # Copy config example as reference
-COPY forge.yaml.example /app/forge.yaml.example
+COPY forge-ai/forge.yaml.example /app/forge.yaml.example
 
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \

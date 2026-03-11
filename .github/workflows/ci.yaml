@@ -14,10 +14,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: aj-geddes/agentweave
+          path: ../agentweave
       - uses: astral-sh/setup-uv@v5
         with:
           version: "latest"
-      - run: uv sync --locked
+      - run: uv sync --frozen
       - run: uv run ruff check .
       - run: uv run ruff format --check .
 
@@ -25,20 +29,28 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: aj-geddes/agentweave
+          path: ../agentweave
       - uses: astral-sh/setup-uv@v5
         with:
           version: "latest"
-      - run: uv sync --locked
+      - run: uv sync --frozen
       - run: uv run mypy packages/
 
   test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: aj-geddes/agentweave
+          path: ../agentweave
       - uses: astral-sh/setup-uv@v5
         with:
           version: "latest"
-      - run: uv sync --locked
+      - run: uv sync --frozen
       - run: uv run pytest --cov=packages --cov-report=xml -v
       - uses: codecov/codecov-action@v4
         if: always()
@@ -58,10 +70,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: forge-ai
+      - uses: actions/checkout@v4
+        with:
+          repository: aj-geddes/agentweave
+          path: agentweave
       - uses: docker/setup-buildx-action@v3
       - uses: docker/build-push-action@v6
         with:
           context: .
+          file: forge-ai/Dockerfile
           push: false
           tags: forge:test
           cache-from: type=gha

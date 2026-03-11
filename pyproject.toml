@@ -36,7 +36,7 @@ forge-config = { workspace = true }
 forge-security = { workspace = true }
 forge-agent = { workspace = true }
 forge-gateway = { workspace = true }
-agentweave = { path = "/home/aj-geddes/dev/claude-projects/agentweave", editable = true }
+agentweave = { path = "../agentweave", editable = true }
 
 [tool.ruff]
 line-length = 100

@@ -1,0 +1,25 @@
+# Pre-commit hooks mirroring CI checks.
+# Install: pre-commit install
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.9.10
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+
+  - repo: local
+    hooks:
+      - id: uv-lock-check
+        name: uv lockfile sync
+        entry: uv lock --check
+        language: system
+        pass_filenames: false
+        files: "pyproject\\.toml$"
+
+      - id: pytest
+        name: pytest
+        entry: uv run pytest packages/ -x -q
+        language: system
+        pass_filenames: false
+        stages: [pre-commit]
