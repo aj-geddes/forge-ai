@@ -28,7 +28,7 @@ def _make_config(
             default_model="test",
             system_prompt=system_prompt,
         ),
-        tools=ToolsConfig(manual=manual_tools or []),
+        tools=ToolsConfig(manual_tools=manual_tools or []),
     )
 
 

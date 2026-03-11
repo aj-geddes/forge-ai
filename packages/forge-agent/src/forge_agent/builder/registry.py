@@ -14,6 +14,7 @@ from forge_config.schema import ForgeConfig
 from forge_config.versioning import compute_surface_version
 from pydantic_ai.tools import Tool
 
+from forge_agent.agent.peers import PeerCaller
 from forge_agent.builder.manual import ManualToolBuilder
 from forge_agent.builder.openapi import OpenAPIToolBuilder
 from forge_agent.builder.workflow import WorkflowBuilder
@@ -64,7 +65,7 @@ class ToolSurfaceRegistry:
             if new_version == self._version:
                 return False
 
-            new_tools = self._build_tools(config)
+            new_tools = await self._build_tools(config)
             self._tools = new_tools
             self._version = new_version
             return True
@@ -86,7 +87,7 @@ class ToolSurfaceRegistry:
             self._tools = []
             self._version = ""
 
-    def _build_tools(self, config: ForgeConfig) -> list[Tool[None]]:
+    async def _build_tools(self, config: ForgeConfig) -> list[Tool[None]]:
         """Build all tools from a ForgeConfig.
 
         Args:
@@ -97,13 +98,13 @@ class ToolSurfaceRegistry:
         """
         tools: list[Tool[None]] = []
 
-        # Build OpenAPI tools.
-        for source in config.tools.openapi:
+        # Build OpenAPI tools (async since specs may be fetched remotely).
+        for source in config.tools.openapi_sources:
             openapi_builder = OpenAPIToolBuilder(source)
-            tools.extend(openapi_builder.build())
+            tools.extend(await openapi_builder.build())
 
         # Build manual tools.
-        for manual in config.tools.manual:
+        for manual in config.tools.manual_tools:
             manual_builder = ManualToolBuilder(manual)
             tools.append(manual_builder.build())
 
@@ -111,5 +112,13 @@ class ToolSurfaceRegistry:
         for workflow in config.tools.workflows:
             workflow_builder = WorkflowBuilder(workflow)
             tools.append(workflow_builder.build())
+
+        # Build peer agent tools.
+        if config.agents.peers:
+            peer_caller = PeerCaller(
+                peers=config.agents.peers,
+                caller_id=config.metadata.name,
+            )
+            tools.extend(peer_caller.build_tools())
 
         return tools

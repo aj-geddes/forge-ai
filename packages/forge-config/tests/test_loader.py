@@ -14,8 +14,8 @@ class TestLoadConfig:
         config = load_config(FIXTURES / "valid_config.yaml")
         assert config.metadata.name == "test-forge"
         assert config.llm.default_model == "gpt-4o"
-        assert len(config.tools.manual) == 1
-        assert config.tools.manual[0].name == "echo"
+        assert len(config.tools.manual_tools) == 1
+        assert config.tools.manual_tools[0].name == "echo"
 
     def test_load_minimal_config(self) -> None:
         config = load_config(FIXTURES / "minimal_config.yaml")

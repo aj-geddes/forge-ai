@@ -137,7 +137,7 @@ async def _execute_api_call(
     Returns:
         The parsed JSON response or raw text.
     """
-    url = _resolve_template_string(api_config.url, params)
+    url = _resolve_template_string(api_config.resolved_url, params)
 
     headers = {k: _resolve_template_string(v, params) for k, v in api_config.headers.items()}
 

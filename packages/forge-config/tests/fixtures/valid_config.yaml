@@ -16,7 +16,7 @@ llm:
           model: openai/gpt-4o
 
 tools:
-  manual:
+  manual_tools:
     - name: echo
       description: "Echo back the input"
       parameters:

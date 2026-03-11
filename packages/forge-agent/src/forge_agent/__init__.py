@@ -4,6 +4,7 @@ from forge_agent.agent.context import ConversationContext
 from forge_agent.agent.core import ForgeAgent
 from forge_agent.agent.llm import LLMRouter
 from forge_agent.agent.output import ConversationalOutput, StructuredOutput
+from forge_agent.agent.peers import PeerCaller, PeerCallError, PeerNotFoundError
 from forge_agent.builder.manual import ManualToolBuilder
 from forge_agent.builder.openapi import OpenAPIToolBuilder
 from forge_agent.builder.registry import ToolSurfaceRegistry
@@ -16,6 +17,9 @@ __all__ = [
     "LLMRouter",
     "ManualToolBuilder",
     "OpenAPIToolBuilder",
+    "PeerCallError",
+    "PeerCaller",
+    "PeerNotFoundError",
     "StructuredOutput",
     "ToolSurfaceRegistry",
     "WorkflowBuilder",

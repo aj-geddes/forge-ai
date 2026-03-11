@@ -30,16 +30,22 @@ llm:
     max_retries: 3
 
 tools:
-  openapi:
-    - url: https://petstore3.swagger.io/api/v3/openapi.json
-      prefix: petstore
+  openapi_sources:
+    - name: petstore
+      url: https://petstore3.swagger.io/api/v3/openapi.json
+      namespace: petstore
+      include_tags:
+        - pet
+      include_operations:
+        - findPetsByStatus
+        - getPetById
       route_map:
         findPetsByStatus: find_pets
         getPetById: get_pet
       auth:
         type: none
 
-  manual:
+  manual_tools:
     - name: get_weather
       description: "Get current weather for a location"
       parameters:
@@ -53,7 +59,8 @@ tools:
           required: false
           default: metric
       api:
-        url: "https://api.weatherapi.com/v1/current.json"
+        base_url: "https://api.weatherapi.com"
+        endpoint: "/v1/current.json"
         method: GET
         auth:
           type: api_key
@@ -63,6 +70,10 @@ tools:
           header_name: "X-Api-Key"
         response_mapping:
           result_path: "$.current"
+          field_map:
+            temperature: "temp_c"
+            condition: "condition.text"
+            humidity: "humidity"
 
   workflows:
     - name: enrich_contact
@@ -90,6 +101,8 @@ security:
     spiffe_endpoint: "unix:///run/spire/sockets/agent.sock"
     authz_provider: opa
     opa_endpoint: "http://localhost:8181"
+    identity_secret: "${AGENTWEAVE_IDENTITY_SECRET}"
+    trust_policy: strict
   api_keys:
     enabled: false
     keys:
@@ -114,3 +127,12 @@ agents:
         - get_weather
         - enrich_contact
       max_turns: 5
+  peers:
+    - name: data-forge
+      endpoint: "https://data-forge.hvs.internal"
+      trust_level: high
+      capabilities: [data_query, reporting]
+    - name: security-forge
+      endpoint: "https://security-forge.hvs.internal"
+      trust_level: medium
+      capabilities: [threat_analysis, audit]

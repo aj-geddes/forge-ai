@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from forge_agent.builder.registry import ToolSurfaceRegistry
@@ -19,10 +20,31 @@ from forge_config.schema import (
 from forge_config.versioning import compute_surface_version
 from pydantic_ai.tools import Tool
 
+# Minimal OpenAPI spec for registry integration tests.
+_MINIMAL_SPEC: dict[str, Any] = {
+    "openapi": "3.0.0",
+    "info": {"title": "Test", "version": "1.0"},
+    "servers": [{"url": "https://api.example.com"}],
+    "paths": {
+        "/users": {
+            "get": {
+                "operationId": "list_users",
+                "summary": "List users",
+                "responses": {"200": {"description": "OK"}},
+            },
+            "post": {
+                "operationId": "create_user",
+                "summary": "Create user",
+                "responses": {"201": {"description": "Created"}},
+            },
+        }
+    },
+}
+
 
 def _make_config_with_manual_tools(tools: list[ManualTool]) -> ForgeConfig:
     """Create a ForgeConfig with manual tools."""
-    return ForgeConfig(tools=ToolsConfig(manual=tools))
+    return ForgeConfig(tools=ToolsConfig(manual_tools=tools))
 
 
 def _make_manual_tool(name: str, url: str = "https://api.example.com") -> ManualTool:
@@ -156,19 +178,21 @@ class TestToolSurfaceRegistry:
         registry = ToolSurfaceRegistry()
         config = ForgeConfig(
             tools=ToolsConfig(
-                openapi=[
+                openapi_sources=[
                     OpenAPISource(
+                        name="example",
                         url="https://api.example.com/openapi.json",
-                        route_map={
-                            "GET /users": "list_users",
-                            "POST /users": "create_user",
-                        },
                     )
                 ]
             )
         )
 
-        await registry.build_and_swap(config)
+        with patch(
+            "forge_agent.builder.openapi.OpenAPIToolBuilder._fetch_remote_spec",
+            new_callable=AsyncMock,
+            return_value=_MINIMAL_SPEC,
+        ):
+            await registry.build_and_swap(config)
         assert registry.tool_count == 2
 
     @pytest.mark.anyio
