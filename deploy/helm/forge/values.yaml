@@ -1,0 +1,122 @@
+# Default values for forge (small profile)
+profile: small
+
+image:
+  repository: ghcr.io/aj-geddes/forge-ai
+  tag: ""  # Defaults to Chart.appVersion
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# --- Agent deployment ---
+agent:
+  replicaCount: 1
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  podAnnotations: {}
+  podLabels: {}
+  env: []
+  envFrom: []
+
+# --- Gateway ---
+gateway:
+  # small/medium: in-process (disabled). large: separate pod.
+  enabled: false
+  replicaCount: 1
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 250m
+      memory: 256Mi
+
+# --- LiteLLM ---
+litellm:
+  mode: embedded  # embedded | sidecar | dedicated
+  image:
+    repository: ghcr.io/berriai/litellm
+    tag: "main-latest"
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+# --- Redis ---
+redis:
+  mode: single  # single | single-pvc | ha | external
+  image:
+    repository: redis
+    tag: "7-alpine"
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 250m
+      memory: 256Mi
+  persistence:
+    enabled: false
+    size: 1Gi
+    storageClass: ""
+  external:
+    host: ""
+    port: 6379
+
+# --- Autoscaling ---
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 2
+  targetCPUUtilizationPercentage: 70
+
+# --- Pod Disruption Budget ---
+podDisruptionBudget:
+  enabled: false
+  minAvailable: 1
+
+# --- Service ---
+service:
+  type: ClusterIP
+  port: 8000
+  metricsPort: 9090
+
+# --- Ingress ---
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: forge.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+# --- Monitoring ---
+serviceMonitor:
+  enabled: false
+  interval: 30s
+  scrapeTimeout: 10s
+
+# --- Config ---
+forgeConfig: {}
+#  Override with full forge.yaml content
+
+# --- Secrets ---
+secrets: {}
+#  OPENAI_API_KEY: ""
+#  ANTHROPIC_API_KEY: ""

@@ -1,0 +1,14 @@
+apiVersion: v2
+name: forge
+description: Config-driven AI agent system with dynamic MCP tool surfaces
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - ai
+  - agent
+  - mcp
+  - llm
+maintainers:
+  - name: High Velocity Solutions LLC
+    email: info@hvs.solutions

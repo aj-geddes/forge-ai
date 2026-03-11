@@ -1,0 +1,116 @@
+---
+# Forge AI - Example Configuration
+# Copy to forge.yaml and customize for your deployment.
+
+metadata:
+  name: my-forge-agent
+  version: "0.1.0"
+  description: "Example Forge AI deployment"
+  environment: development
+
+llm:
+  default_model: gpt-4o
+  temperature: 0.7
+  max_tokens: 4096
+  system_prompt: "You are a helpful AI assistant with access to tools."
+  litellm:
+    mode: embedded
+    model_list:
+      - model_name: gpt-4o
+        litellm_params:
+          model: openai/gpt-4o
+          api_key: ${OPENAI_API_KEY}
+      - model_name: claude-sonnet
+        litellm_params:
+          model: anthropic/claude-sonnet-4-20250514
+          api_key: ${ANTHROPIC_API_KEY}
+    fallback_models:
+      - claude-sonnet
+    timeout: 30.0
+    max_retries: 3
+
+tools:
+  openapi:
+    - url: https://petstore3.swagger.io/api/v3/openapi.json
+      prefix: petstore
+      route_map:
+        findPetsByStatus: find_pets
+        getPetById: get_pet
+      auth:
+        type: none
+
+  manual:
+    - name: get_weather
+      description: "Get current weather for a location"
+      parameters:
+        - name: location
+          type: string
+          description: "City name or coordinates"
+          required: true
+        - name: units
+          type: string
+          description: "Temperature units"
+          required: false
+          default: metric
+      api:
+        url: "https://api.weatherapi.com/v1/current.json"
+        method: GET
+        auth:
+          type: api_key
+          token:
+            source: env
+            name: WEATHER_API_KEY
+          header_name: "X-Api-Key"
+        response_mapping:
+          result_path: "$.current"
+
+  workflows:
+    - name: enrich_contact
+      description: "Look up a contact and enrich with weather data"
+      parameters:
+        - name: email
+          type: string
+          description: "Contact email"
+          required: true
+      steps:
+        - tool: lookup_contact
+          params:
+            email: "{{ email }}"
+          output_as: contact
+        - tool: get_weather
+          params:
+            location: "{{ contact.city }}"
+          output_as: weather
+          condition: "contact.city is not None"
+
+security:
+  agentweave:
+    enabled: true
+    trust_domain: forge.local
+    spiffe_endpoint: "unix:///run/spire/sockets/agent.sock"
+    authz_provider: opa
+    opa_endpoint: "http://localhost:8181"
+  api_keys:
+    enabled: false
+    keys:
+      - source: env
+        name: FORGE_API_KEY
+  rate_limit_rpm: 60
+  allowed_origins:
+    - "*"
+
+agents:
+  default: assistant
+  agents:
+    - name: assistant
+      description: "General-purpose assistant"
+      system_prompt: "You are a helpful assistant."
+      max_turns: 10
+    - name: analyst
+      description: "Data analysis specialist"
+      system_prompt: "You are a data analyst. Focus on structured output."
+      model: gpt-4o
+      tools:
+        - get_weather
+        - enrich_contact
+      max_turns: 5

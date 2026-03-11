@@ -1,0 +1,73 @@
+[project]
+name = "forge-ai"
+version = "0.1.0"
+description = "Config-driven AI agent system with dynamic MCP tool surfaces"
+requires-python = ">=3.12"
+license = {text = "Apache-2.0"}
+authors = [
+    {name = "High Velocity Solutions LLC", email = "info@hvs.solutions"}
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.25",
+    "pytest-cov>=6.0",
+    "pytest-mock>=3.14",
+    "ruff>=0.9",
+    "mypy>=1.14",
+    "types-PyYAML>=6.0",
+    "forge-config",
+    "forge-security",
+    "forge-agent",
+    "forge-gateway",
+]
+
+[tool.uv.workspace]
+members = [
+    "packages/forge-config",
+    "packages/forge-security",
+    "packages/forge-agent",
+    "packages/forge-gateway",
+]
+
+[tool.uv.sources]
+forge-config = { workspace = true }
+forge-security = { workspace = true }
+forge-agent = { workspace = true }
+forge-gateway = { workspace = true }
+agentweave = { path = "/home/aj-geddes/dev/claude-projects/agentweave", editable = true }
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "S", "B", "A", "SIM"]
+ignore = ["S101", "UP042"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["S101", "S105", "S106"]
+"**/tests/**/*.py" = ["S101", "S105", "S106"]
+"**/schema.py" = ["S105"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+plugins = ["pydantic.mypy"]
+exclude = ["tests/"]
+
+[tool.pydantic-mypy]
+init_forbid_extra = true
+init_typed = true
+warn_required_dynamic_aliases = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["packages/*/tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "--strict-markers -v --import-mode=importlib"

@@ -1,0 +1,60 @@
+{{- if .Values.gateway.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "forge.fullname" . }}-gateway
+  labels:
+    {{- include "forge.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gateway
+spec:
+  replicas: {{ .Values.gateway.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "forge.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: gateway
+  template:
+    metadata:
+      labels:
+        {{- include "forge.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: gateway
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+      containers:
+        - name: gateway
+          image: {{ include "forge.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["--host", "0.0.0.0", "--port", "8000"]
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: http
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: http
+          resources:
+            {{- toYaml .Values.gateway.resources | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /app/config
+              readOnly: true
+          env:
+            - name: FORGE_CONFIG_PATH
+              value: /app/config/forge.yaml
+          {{- if .Values.secrets }}
+          envFrom:
+            - secretRef:
+                name: {{ include "forge.fullname" . }}-secrets
+          {{- end }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "forge.fullname" . }}-config
+{{- end }}

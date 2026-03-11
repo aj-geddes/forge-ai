@@ -1,0 +1,20 @@
+# Development overrides
+profile: small
+
+image:
+  pullPolicy: Never
+
+agent:
+  replicaCount: 1
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  env:
+    - name: FORGE_ENV
+      value: development
+    - name: LOG_LEVEL
+      value: DEBUG

@@ -1,0 +1,6 @@
+metadata:
+  name: "${FORGE_NAME:default-forge}"
+  environment: "${FORGE_ENV}"
+
+llm:
+  default_model: "${LLM_MODEL:gpt-4o}"

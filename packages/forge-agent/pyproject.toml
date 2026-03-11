@@ -1,0 +1,21 @@
+[project]
+name = "forge-agent"
+version = "0.1.0"
+description = "Tool builder and PydanticAI agent core for Forge AI"
+requires-python = ">=3.12"
+license = {text = "Apache-2.0"}
+dependencies = [
+    "forge-config",
+    "forge-security",
+    "pydantic-ai>=0.1",
+    "litellm>=1.50",
+    "fastmcp>=2.0",
+    "httpx>=0.28",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/forge_agent"]

@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "forge.fullname" . }}-config
+  labels:
+    {{- include "forge.labels" . | nindent 4 }}
+data:
+  forge.yaml: |
+    {{- if .Values.forgeConfig }}
+    {{- .Values.forgeConfig | toYaml | nindent 4 }}
+    {{- else }}
+    metadata:
+      name: {{ include "forge.fullname" . }}
+      environment: {{ .Values.profile | default "small" }}
+    {{- end }}

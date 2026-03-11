@@ -1,0 +1,28 @@
+apiVersion: skaffold/v4beta11
+kind: Config
+metadata:
+  name: forge-ai
+build:
+  artifacts:
+    - image: forge-ai
+      docker:
+        dockerfile: Dockerfile
+  local:
+    push: false
+manifests:
+  helm:
+    releases:
+      - name: forge
+        chartPath: deploy/helm/forge
+        valuesFiles:
+          - deploy/helm/forge/values.dev.yaml
+        setValues:
+          image.repository: forge-ai
+          image.tag: ""
+deploy:
+  helm: {}
+portForward:
+  - resourceType: service
+    resourceName: forge
+    port: 8000
+    localPort: 8000

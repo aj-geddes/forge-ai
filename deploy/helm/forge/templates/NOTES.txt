@@ -1,0 +1,25 @@
+Forge AI has been deployed!
+
+Profile: {{ .Values.profile | default "small" }}
+Release: {{ .Release.Name }}
+
+1. Get the application URL:
+{{- if .Values.ingress.enabled }}
+  {{- range $host := .Values.ingress.hosts }}
+  http{{ if $.Values.ingress.tls }}s{{ end }}://{{ $host.host }}
+  {{- end }}
+{{- else }}
+  kubectl port-forward svc/{{ include "forge.fullname" . }} {{ .Values.service.port }}:{{ .Values.service.port }}
+  Then visit: http://localhost:{{ .Values.service.port }}
+{{- end }}
+
+2. Health check:
+  curl http://localhost:{{ .Values.service.port }}/health/ready
+
+3. MCP endpoint:
+  http://localhost:{{ .Values.service.port }}/mcp
+
+4. Programmatic API:
+  curl -X POST http://localhost:{{ .Values.service.port }}/v1/agent/invoke \
+    -H "Content-Type: application/json" \
+    -d '{"intent": "hello", "params": {}}'
