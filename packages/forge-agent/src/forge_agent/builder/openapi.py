@@ -98,7 +98,8 @@ class OpenAPIToolBuilder:
         try:
             response = await client.get(url, timeout=30.0)
             response.raise_for_status()
-            return response.json()
+            result: dict[str, Any] = response.json()
+            return result
         finally:
             if should_close:
                 await client.aclose()
@@ -119,11 +120,13 @@ class OpenAPIToolBuilder:
             try:
                 import yaml
 
-                return yaml.safe_load(content)
+                parsed: dict[str, Any] = yaml.safe_load(content)
+                return parsed
             except ImportError:
                 msg = "PyYAML is required to parse YAML specs"
                 raise ImportError(msg)  # noqa: B904
-        return json.loads(content)
+        loaded: dict[str, Any] = json.loads(content)
+        return loaded
 
     def _extract_base_url(self, spec: dict[str, Any]) -> str:
         """Extract the base URL from the spec's servers list.
@@ -139,7 +142,8 @@ class OpenAPIToolBuilder:
         """
         servers = spec.get("servers", [])
         if servers and isinstance(servers[0], dict):
-            return servers[0].get("url", "").rstrip("/")
+            server_url: str = servers[0].get("url", "")
+            return server_url.rstrip("/")
 
         # Fall back to source URL without the spec file portion.
         if self._source.url:

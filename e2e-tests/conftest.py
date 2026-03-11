@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-import pytest
 import httpx
-
+import pytest
 
 BASE_URL = "http://127.0.0.1:8001"
 

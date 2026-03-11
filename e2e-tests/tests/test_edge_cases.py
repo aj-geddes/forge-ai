@@ -105,10 +105,7 @@ class TestConcurrentRequests:
             ("GET", "/health/startup", None),
         ]
         for method, path, body in endpoints:
-            if method == "GET":
-                response = client.get(path)
-            else:
-                response = client.post(path, json=body)
+            response = client.get(path) if method == "GET" else client.post(path, json=body)
             assert response.status_code in (200, 503), (
                 f"{method} {path} returned unexpected {response.status_code}"
             )

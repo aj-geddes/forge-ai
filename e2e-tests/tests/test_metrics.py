@@ -21,8 +21,4 @@ class TestMetrics:
         response = client.get("/metrics")
         text = response.text
         # Either real prometheus output or the fallback
-        assert (
-            "prometheus_client not available" in text
-            or "# HELP" in text
-            or "# TYPE" in text
-        )
+        assert "prometheus_client not available" in text or "# HELP" in text or "# TYPE" in text
