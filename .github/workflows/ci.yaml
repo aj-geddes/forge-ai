@@ -9,15 +9,17 @@ on:
 permissions:
   contents: read
 
+env:
+  # Ensure agentweave is available as a sibling directory
+  AGENTWEAVE_SETUP: |
+    git clone --depth 1 https://github.com/aj-geddes/agentweave.git ../agentweave
+
 jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/checkout@v4
-        with:
-          repository: aj-geddes/agentweave
-          path: ../agentweave
+      - run: ${{ env.AGENTWEAVE_SETUP }}
       - uses: astral-sh/setup-uv@v5
         with:
           version: "latest"
@@ -29,10 +31,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/checkout@v4
-        with:
-          repository: aj-geddes/agentweave
-          path: ../agentweave
+      - run: ${{ env.AGENTWEAVE_SETUP }}
       - uses: astral-sh/setup-uv@v5
         with:
           version: "latest"
@@ -43,10 +42,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/checkout@v4
-        with:
-          repository: aj-geddes/agentweave
-          path: ../agentweave
+      - run: ${{ env.AGENTWEAVE_SETUP }}
       - uses: astral-sh/setup-uv@v5
         with:
           version: "latest"
@@ -72,10 +68,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           path: forge-ai
-      - uses: actions/checkout@v4
-        with:
-          repository: aj-geddes/agentweave
-          path: agentweave
+      - run: git clone --depth 1 https://github.com/aj-geddes/agentweave.git agentweave
       - uses: docker/setup-buildx-action@v3
       - uses: docker/build-push-action@v6
         with:
