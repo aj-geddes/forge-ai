@@ -16,11 +16,21 @@ Covers:
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
 from fastapi import Depends, FastAPI, HTTPException, Request, status
+from fastapi.security import HTTPAuthorizationCredentials
+from forge_gateway.security import (
+    CallerIdentity,
+    _classify_denial,
+    _extract_caller_id,
+    _extract_origin,
+    _route_name,
+    require_security,
+    set_security_gate,
+)
 from forge_security.audit import ToolCallEvent
 from forge_security.middleware import GateResult, SecurityGate
 
@@ -1097,3 +1107,371 @@ class TestSecurityGateIntegration:
                 headers=valid_headers,
             )
         assert resp.status_code == 200
+
+
+# ===========================================================================
+# Tests for forge_gateway.security module (the actual dependency)
+# ===========================================================================
+#
+# The tests above exercise a local re-implementation of the security
+# dependency defined in this test file.  The tests below directly import
+# and exercise the *real* functions in ``forge_gateway.security`` to
+# cover missed lines 79-87, 92, 97-100, 110-115, 137-159.
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# Helpers for building mock Request objects
+# ---------------------------------------------------------------------------
+
+
+def _mock_request(
+    *,
+    headers: dict[str, str] | None = None,
+    query_params: dict[str, str] | None = None,
+    path: str = "/v1/agent/invoke",
+    route_name: str | None = None,
+) -> MagicMock:
+    """Build a lightweight mock ``Request`` with the given attributes."""
+    req = MagicMock(spec=Request)
+    req.headers = headers or {}
+    req.query_params = query_params or {}
+    req.url = MagicMock()
+    req.url.path = path
+
+    if route_name is not None:
+        route_obj = MagicMock()
+        route_obj.name = route_name
+        req.scope = {"route": route_obj}
+    else:
+        req.scope = {}
+
+    return req
+
+
+# ---------------------------------------------------------------------------
+# 11. _extract_caller_id — lines 79-87
+# ---------------------------------------------------------------------------
+
+
+class TestExtractCallerId:
+    """Direct tests for ``_extract_caller_id``."""
+
+    def test_bearer_token_takes_precedence(self) -> None:
+        """When a Bearer token is present it is returned as the identity."""
+        bearer = HTTPAuthorizationCredentials(scheme="Bearer", credentials="my-token")
+        req = _mock_request(headers={"X-Caller-ID": "header-caller"})
+        result = _extract_caller_id(req, bearer)
+        assert result == "my-token"
+
+    def test_x_caller_id_header_used_when_no_bearer(self) -> None:
+        """Falls back to X-Caller-ID header when no bearer token."""
+        req = _mock_request(headers={"X-Caller-ID": "agent-42"})
+        result = _extract_caller_id(req, None)
+        assert result == "agent-42"
+
+    def test_query_param_used_when_no_header(self) -> None:
+        """Falls back to ``caller_id`` query parameter."""
+        req = _mock_request(query_params={"caller_id": "query-caller"})
+        result = _extract_caller_id(req, None)
+        assert result == "query-caller"
+
+    def test_returns_none_when_no_identity_source(self) -> None:
+        """Returns None when no bearer, header, or query param is present."""
+        req = _mock_request()
+        result = _extract_caller_id(req, None)
+        assert result is None
+
+    def test_x_caller_id_preferred_over_query_param(self) -> None:
+        """X-Caller-ID header takes precedence over query parameter."""
+        req = _mock_request(
+            headers={"X-Caller-ID": "from-header"},
+            query_params={"caller_id": "from-query"},
+        )
+        result = _extract_caller_id(req, None)
+        assert result == "from-header"
+
+
+# ---------------------------------------------------------------------------
+# 12. _extract_origin — line 92
+# ---------------------------------------------------------------------------
+
+
+class TestExtractOrigin:
+    """Direct tests for ``_extract_origin``."""
+
+    def test_origin_header_returned(self) -> None:
+        req = _mock_request(headers={"Origin": "https://example.com"})
+        assert _extract_origin(req) == "https://example.com"
+
+    def test_referer_fallback(self) -> None:
+        """Falls back to Referer when Origin is absent."""
+        req = _mock_request(headers={"Referer": "https://ref.example.com/page"})
+        assert _extract_origin(req) == "https://ref.example.com/page"
+
+    def test_origin_preferred_over_referer(self) -> None:
+        req = _mock_request(
+            headers={
+                "Origin": "https://origin.example.com",
+                "Referer": "https://ref.example.com",
+            }
+        )
+        assert _extract_origin(req) == "https://origin.example.com"
+
+    def test_returns_none_when_no_origin_or_referer(self) -> None:
+        req = _mock_request()
+        assert _extract_origin(req) is None
+
+
+# ---------------------------------------------------------------------------
+# 13. _route_name — lines 97-100
+# ---------------------------------------------------------------------------
+
+
+class TestRouteName:
+    """Direct tests for ``_route_name``."""
+
+    def test_returns_route_name_from_scope(self) -> None:
+        req = _mock_request(route_name="gated_invoke")
+        assert _route_name(req) == "gated_invoke"
+
+    def test_falls_back_to_url_path_when_no_route(self) -> None:
+        req = _mock_request(path="/v1/chat/completions")
+        assert _route_name(req) == "/v1/chat/completions"
+
+    def test_falls_back_to_url_path_when_route_has_no_name(self) -> None:
+        """Route object exists but has no ``name`` attribute."""
+        req = _mock_request(path="/custom/path")
+        route_obj = object()  # no 'name' attribute
+        req.scope = {"route": route_obj}
+        assert _route_name(req) == "/custom/path"
+
+
+# ---------------------------------------------------------------------------
+# 14. _classify_denial — lines 110-115
+# ---------------------------------------------------------------------------
+
+
+class TestClassifyDenial:
+    """Direct tests for ``_classify_denial``."""
+
+    def test_rate_limit_reason_returns_429(self) -> None:
+        assert _classify_denial("Rate limit exceeded") == 429
+
+    def test_rate_limit_case_insensitive(self) -> None:
+        assert _classify_denial("RATE LIMIT hit for agent-x") == 429
+
+    def test_origin_reason_returns_403(self) -> None:
+        assert _classify_denial("Origin 'https://evil.com' not allowed") == 403
+
+    def test_generic_denial_returns_403(self) -> None:
+        assert _classify_denial("authorization policy denied") == 403
+
+    def test_empty_reason_returns_403(self) -> None:
+        assert _classify_denial("") == 403
+
+
+# ---------------------------------------------------------------------------
+# 15. require_security — lines 133-159 (dev mode & production mode)
+# ---------------------------------------------------------------------------
+
+
+class TestRequireSecurity:
+    """Direct tests for ``require_security`` covering dev and production paths."""
+
+    async def test_dev_mode_returns_anonymous_identity(self) -> None:
+        """When no gate is configured, returns dev-anonymous identity."""
+        set_security_gate(None)  # dev mode
+        result = await require_security(_mock_request(), bearer=None)
+        assert result.identity == "dev-anonymous"
+        assert result.dev_mode is True
+
+    async def test_production_missing_identity_raises_401(self) -> None:
+        """Production mode with no identity source raises 401."""
+        gate = AsyncMock(spec=SecurityGate)
+        set_security_gate(gate)
+        try:
+            with pytest.raises(HTTPException) as exc_info:
+                await require_security(_mock_request(), bearer=None)
+            assert exc_info.value.status_code == 401
+            assert "Missing caller identity" in exc_info.value.detail
+        finally:
+            set_security_gate(None)
+
+    async def test_production_bearer_token_allowed(self) -> None:
+        """Production mode: bearer token extracted, gate allows, returns CallerIdentity."""
+        gate = AsyncMock(spec=SecurityGate)
+        gate.return_value = GateResult(
+            allowed=True,
+            identity="authenticated-caller",
+            reason="all checks passed",
+        )
+        set_security_gate(gate)
+        try:
+            bearer = HTTPAuthorizationCredentials(scheme="Bearer", credentials="my-token")
+            result = await require_security(_mock_request(), bearer=bearer)
+            assert isinstance(result, CallerIdentity)
+            assert result.identity == "authenticated-caller"
+            assert result.dev_mode is False
+            gate.assert_called_once()
+        finally:
+            set_security_gate(None)
+
+    async def test_production_x_caller_id_allowed(self) -> None:
+        """Production mode: X-Caller-ID header extracted and gate allows."""
+        gate = AsyncMock(spec=SecurityGate)
+        gate.return_value = GateResult(
+            allowed=True,
+            identity="header-caller",
+            reason="ok",
+        )
+        set_security_gate(gate)
+        try:
+            req = _mock_request(headers={"X-Caller-ID": "header-caller"})
+            result = await require_security(req, bearer=None)
+            assert result.identity == "header-caller"
+        finally:
+            set_security_gate(None)
+
+    async def test_production_gate_denied_rate_limit_raises_429(self) -> None:
+        """Production mode: gate returns rate limit denial -> 429."""
+        gate = AsyncMock(spec=SecurityGate)
+        gate.return_value = GateResult(
+            allowed=False,
+            identity="caller",
+            reason="Rate limit exceeded: retry after 30s",
+        )
+        set_security_gate(gate)
+        try:
+            bearer = HTTPAuthorizationCredentials(scheme="Bearer", credentials="tok")
+            with pytest.raises(HTTPException) as exc_info:
+                await require_security(_mock_request(), bearer=bearer)
+            assert exc_info.value.status_code == 429
+            assert "Rate limit" in exc_info.value.detail
+        finally:
+            set_security_gate(None)
+
+    async def test_production_gate_denied_origin_raises_403(self) -> None:
+        """Production mode: gate returns origin denial -> 403."""
+        gate = AsyncMock(spec=SecurityGate)
+        gate.return_value = GateResult(
+            allowed=False,
+            identity="caller",
+            reason="Origin 'https://evil.com' not in allowed list",
+        )
+        set_security_gate(gate)
+        try:
+            bearer = HTTPAuthorizationCredentials(scheme="Bearer", credentials="tok")
+            with pytest.raises(HTTPException) as exc_info:
+                await require_security(_mock_request(), bearer=bearer)
+            assert exc_info.value.status_code == 403
+            assert "Origin" in exc_info.value.detail
+        finally:
+            set_security_gate(None)
+
+    async def test_production_gate_denied_generic_raises_403(self) -> None:
+        """Production mode: gate returns generic denial -> 403."""
+        gate = AsyncMock(spec=SecurityGate)
+        gate.return_value = GateResult(
+            allowed=False,
+            identity="caller",
+            reason="policy denied",
+        )
+        set_security_gate(gate)
+        try:
+            bearer = HTTPAuthorizationCredentials(scheme="Bearer", credentials="tok")
+            with pytest.raises(HTTPException) as exc_info:
+                await require_security(_mock_request(), bearer=bearer)
+            assert exc_info.value.status_code == 403
+        finally:
+            set_security_gate(None)
+
+    async def test_production_gate_called_with_correct_args(self) -> None:
+        """Verify the gate is called with caller_id, tool_name, and origin."""
+        gate = AsyncMock(spec=SecurityGate)
+        gate.return_value = GateResult(
+            allowed=True,
+            identity="tok-caller",
+            reason="ok",
+        )
+        set_security_gate(gate)
+        try:
+            req = _mock_request(
+                headers={"Origin": "https://trusted.example.com"},
+                route_name="my_route",
+            )
+            bearer = HTTPAuthorizationCredentials(scheme="Bearer", credentials="tok-caller")
+            await require_security(req, bearer=bearer)
+
+            gate.assert_called_once()
+            call_kwargs = gate.call_args.kwargs
+            assert call_kwargs["caller_id"] == "tok-caller"
+            assert call_kwargs["tool_name"] == "my_route"
+            assert call_kwargs["origin"] == "https://trusted.example.com"
+        finally:
+            set_security_gate(None)
+
+    async def test_production_gate_exception_propagates(self) -> None:
+        """If the gate raises an unexpected exception, it propagates."""
+        gate = AsyncMock(spec=SecurityGate)
+        gate.side_effect = RuntimeError("internal gate failure")
+        set_security_gate(gate)
+        try:
+            bearer = HTTPAuthorizationCredentials(scheme="Bearer", credentials="tok")
+            with pytest.raises(RuntimeError, match="internal gate failure"):
+                await require_security(_mock_request(), bearer=bearer)
+        finally:
+            set_security_gate(None)
+
+
+# ---------------------------------------------------------------------------
+# 16. set_security_gate — lines 32-45
+# ---------------------------------------------------------------------------
+
+
+class TestSetSecurityGate:
+    """Direct tests for ``set_security_gate``."""
+
+    def test_setting_none_enables_dev_mode(self) -> None:
+        set_security_gate(None)
+        try:
+            # Verify dev mode by calling require_security (tested above)
+            import forge_gateway.security as sec_mod
+
+            assert sec_mod._dev_mode is True
+            assert sec_mod._security_gate is None
+        finally:
+            set_security_gate(None)
+
+    def test_setting_gate_disables_dev_mode(self) -> None:
+        gate = AsyncMock(spec=SecurityGate)
+        set_security_gate(gate)
+        try:
+            import forge_gateway.security as sec_mod
+
+            assert sec_mod._dev_mode is False
+            assert sec_mod._security_gate is gate
+        finally:
+            set_security_gate(None)
+
+
+# ---------------------------------------------------------------------------
+# 17. CallerIdentity dataclass
+# ---------------------------------------------------------------------------
+
+
+class TestCallerIdentity:
+    """Tests for the CallerIdentity dataclass."""
+
+    def test_default_dev_mode_is_false(self) -> None:
+        ci = CallerIdentity(identity="test")
+        assert ci.dev_mode is False
+
+    def test_dev_mode_identity(self) -> None:
+        ci = CallerIdentity(identity="dev-anonymous", dev_mode=True)
+        assert ci.identity == "dev-anonymous"
+        assert ci.dev_mode is True
+
+    def test_frozen_dataclass(self) -> None:
+        ci = CallerIdentity(identity="x")
+        with pytest.raises(AttributeError):
+            ci.identity = "y"  # type: ignore[misc]
