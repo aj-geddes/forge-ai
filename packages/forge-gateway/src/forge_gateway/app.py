@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -18,6 +18,31 @@ from forge_gateway.routes import a2a, admin, conversational, health, metrics, pr
 logger = logging.getLogger("forge.gateway")
 
 
+def _make_reload_callback(config_path: str) -> Callable[[Path], None]:
+    """Create a config-reload callback bound to a specific config path.
+
+    The returned callable accepts a ``Path`` argument (provided by ConfigWatcher)
+    and reloads the config, updating admin state and API key auth.  The existing
+    agent reference is preserved across reloads.
+    """
+
+    def _on_config_change(changed_path: Path) -> None:
+        logger.info("Config file changed: %s, triggering reload", changed_path)
+        try:
+            from forge_config import load_config
+
+            new_config = load_config(str(changed_path))
+            logger.info("Reloaded config: %s", new_config.metadata.name)
+
+            # Preserve the current agent reference across config reloads
+            admin.set_state(config=new_config, config_path=config_path)
+            set_api_key_config(new_config.security.api_keys)
+        except Exception:
+            logger.exception("Failed to reload config from %s", changed_path)
+
+    return _on_config_change
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Application lifespan: build tools on startup, drain on shutdown."""
@@ -25,6 +50,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     # Signal startup complete
     health.set_started(True)
+
+    watcher = None
 
     try:
         # Try to initialize the agent from config
@@ -64,6 +91,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if config is not None:
             set_api_key_config(config.security.api_keys)
 
+        # Start config file watcher for hot-reload
+        if config is not None and Path(config_path).exists():
+            try:
+                from forge_config import ConfigWatcher
+
+                callback = _make_reload_callback(config_path)
+                watcher = ConfigWatcher(config_path, on_change=callback)
+                watcher.start()
+            except ImportError:
+                logger.warning("ConfigWatcher not available, hot-reload disabled")
+            except Exception:
+                logger.exception("Failed to start config watcher, hot-reload disabled")
+
         health.set_ready(True)
         logger.info("Forge Gateway ready")
 
@@ -71,6 +111,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     finally:
         logger.info("Forge Gateway shutting down")
+        if watcher is not None:
+            try:
+                watcher.stop()
+            except Exception:
+                logger.exception("Error stopping config watcher")
         health.set_ready(False)
         health.set_started(False)
 

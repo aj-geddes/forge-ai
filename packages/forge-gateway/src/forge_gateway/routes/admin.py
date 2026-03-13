@@ -45,17 +45,24 @@ _config: ForgeConfig | None = None
 _config_path: str = ""
 _agent: Any = None
 
+_UNSET: Any = object()
+
 
 def set_state(
     config: ForgeConfig | None,
     config_path: str,
-    agent: Any = None,
+    agent: Any = _UNSET,
 ) -> None:
-    """Wire admin state from the application lifespan."""
+    """Wire admin state from the application lifespan.
+
+    Pass ``agent`` to update it, or omit it to preserve the current value.
+    This allows config hot-reloads to update config without losing the agent.
+    """
     global _config, _config_path, _agent
     _config = config
     _config_path = config_path
-    _agent = agent
+    if agent is not _UNSET:
+        _agent = agent
 
 
 # --- Config endpoints ---

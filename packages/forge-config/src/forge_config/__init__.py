@@ -30,6 +30,7 @@ from forge_config.schema import (
     Workflow,
     WorkflowStep,
 )
+from forge_config.watcher import ConfigWatcher
 
 __all__ = [
     "AgentsConfig",
@@ -39,6 +40,7 @@ __all__ = [
     "ConfigError",
     "ConfigLoadError",
     "ConfigValidationError",
+    "ConfigWatcher",
     "ForgeConfig",
     "ForgeMetadata",
     "LiteLLMConfig",
