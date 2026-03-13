@@ -163,12 +163,33 @@ class ForgeAgent:
         # ModelSettings is a TypedDict; cast via dict unpacking.
         return ModelSettings(**filtered)  # type: ignore[typeddict-item, no-any-return]
 
+    @staticmethod
+    def _filter_tools(
+        tools: list[Any],
+        tool_names_filter: list[str] | None,
+    ) -> list[Any]:
+        """Filter tools to only those whose name is in the allow-list.
+
+        Args:
+            tools: Full list of PydanticAI Tool objects.
+            tool_names_filter: Tool names to keep. When None or
+                empty, all tools are returned unfiltered.
+
+        Returns:
+            Filtered (or original) tool list.
+        """
+        if not tool_names_filter:
+            return tools
+        allowed = set(tool_names_filter)
+        return [t for t in tools if t.name in allowed]
+
     def _create_agent(
         self,
         output_type: type | None = None,
         *,
         system_prompt_override: str | None = None,
         model_name_override: str | None = None,
+        tool_names_filter: list[str] | None = None,
     ) -> PydanticAIAgent[None]:
         """Create a PydanticAI Agent with current tools and config.
 
@@ -176,6 +197,8 @@ class ForgeAgent:
             output_type: Optional output type for structured responses.
             system_prompt_override: If set, replaces the default system prompt.
             model_name_override: If set, replaces the default model name.
+            tool_names_filter: If set and non-empty, only include tools
+                whose name appears in this list.
 
         Returns:
             A configured PydanticAI Agent.
@@ -185,7 +208,7 @@ class ForgeAgent:
             model = model_name_override or self._llm_router.model_name
 
         system_prompt = system_prompt_override or self._llm_router.system_prompt or ""
-        tools = self._registry.tools
+        tools = self._filter_tools(self._registry.tools, tool_names_filter)
 
         kwargs: dict[str, Any] = {
             "model": model,
@@ -214,6 +237,7 @@ class ForgeAgent:
         system_prompt_override: str | None = None,
         model_name_override: str | None = None,
         max_turns_override: int | None = None,
+        tool_names_filter: list[str] | None = None,
     ) -> ForgeRunResult | AsyncIterator[str]:
         """Run a conversational interaction with the agent.
 
@@ -225,17 +249,24 @@ class ForgeAgent:
             model_name_override: If set, replaces the default model name.
             max_turns_override: If set, limits the number of LLM request
                 turns via PydanticAI's ``usage_limits``.
+            tool_names_filter: If set and non-empty, only include tools
+                whose name appears in this list.
 
         Returns:
             A ForgeRunResult containing the response and metadata,
             or an async iterator of chunks if stream=True.
         """
-        has_overrides = system_prompt_override is not None or model_name_override is not None
+        has_overrides = (
+            system_prompt_override is not None
+            or model_name_override is not None
+            or bool(tool_names_filter)
+        )
 
         if has_overrides:
             agent = self._create_agent(
                 system_prompt_override=system_prompt_override,
                 model_name_override=model_name_override,
+                tool_names_filter=tool_names_filter,
             )
         else:
             if self._agent is None:
@@ -322,6 +353,35 @@ class ForgeAgent:
 
         return _generate()
 
+    @staticmethod
+    def _merge_tool_filters(
+        persona_tools: list[str] | None,
+        tool_hints: list[str] | None,
+    ) -> list[str] | None:
+        """Merge persona-level and request-level tool filters.
+
+        When both are provided, returns their intersection so that only
+        tools allowed by the persona *and* requested by the caller are
+        included. When only one is provided, returns that one. When
+        neither is provided, returns None (no filtering).
+
+        Args:
+            persona_tools: Tool names allowed by the agent persona.
+            tool_hints: Tool names requested by the API caller.
+
+        Returns:
+            Merged filter list, or None when no filtering applies.
+        """
+        has_persona = bool(persona_tools)
+        has_hints = bool(tool_hints)
+        if has_persona and has_hints:
+            return list(set(persona_tools) & set(tool_hints))  # type: ignore[arg-type]
+        if has_persona:
+            return persona_tools
+        if has_hints:
+            return tool_hints
+        return None
+
     async def run_structured(
         self,
         intent: str,
@@ -331,6 +391,8 @@ class ForgeAgent:
         system_prompt_override: str | None = None,
         model_name_override: str | None = None,
         max_turns_override: int | None = None,
+        tool_names_filter: list[str] | None = None,
+        tool_hints_filter: list[str] | None = None,
     ) -> ForgeRunResult:
         """Run a structured interaction that returns typed output.
 
@@ -342,17 +404,31 @@ class ForgeAgent:
             model_name_override: If set, replaces the default model name.
             max_turns_override: If set, limits the number of LLM request
                 turns via PydanticAI's ``usage_limits``.
+            tool_names_filter: If set and non-empty, only include tools
+                whose name appears in this list (persona-level).
+            tool_hints_filter: If set and non-empty, request-level tool
+                filter from the API caller. Intersected with
+                ``tool_names_filter`` when both are present.
 
         Returns:
             A ForgeRunResult containing the output and run metadata.
         """
-        has_overrides = system_prompt_override is not None or model_name_override is not None
+        effective_filter = self._merge_tool_filters(
+            tool_names_filter,
+            tool_hints_filter,
+        )
+        has_overrides = (
+            system_prompt_override is not None
+            or model_name_override is not None
+            or bool(effective_filter)
+        )
 
         if has_overrides:
             agent = self._create_agent(
                 output_type=output_schema,
                 system_prompt_override=system_prompt_override,
                 model_name_override=model_name_override,
+                tool_names_filter=effective_filter,
             )
         else:
             if self._agent is None:

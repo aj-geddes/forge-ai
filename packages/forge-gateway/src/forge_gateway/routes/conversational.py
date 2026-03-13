@@ -96,12 +96,14 @@ async def _handle_non_streaming(
 ) -> ConversationResponse:
     """Handle a standard (non-streaming) chat request."""
     try:
+        persona_tools = (persona.tools or None) if persona else None
         run_result = await _forge_agent.run_conversational(
             message=request.message,
             session_id=session_id,
             system_prompt_override=(persona.system_prompt if persona else None),
             model_name_override=persona.model if persona else None,
             max_turns_override=(persona.max_turns if persona else None),
+            tool_names_filter=persona_tools,
         )
         return ConversationResponse(
             message=run_result.output,
@@ -123,6 +125,7 @@ async def _handle_streaming(
 ) -> StreamingResponse:
     """Handle a streaming chat request, returning SSE."""
     try:
+        persona_tools = (persona.tools or None) if persona else None
         chunks: AsyncIterator[str] = await _forge_agent.run_conversational(
             message=request.message,
             session_id=session_id,
@@ -130,6 +133,7 @@ async def _handle_streaming(
             system_prompt_override=(persona.system_prompt if persona else None),
             model_name_override=persona.model if persona else None,
             max_turns_override=(persona.max_turns if persona else None),
+            tool_names_filter=persona_tools,
         )
     except Exception as e:
         logger.exception("Failed to start streaming response")

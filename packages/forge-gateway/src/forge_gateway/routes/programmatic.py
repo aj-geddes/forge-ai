@@ -73,6 +73,8 @@ async def invoke(request: InvokeRequest) -> InvokeResponse:
 
     try:
         output_schema = _resolve_output_schema(request.output_schema)
+        persona_tools = (persona.tools or None) if persona else None
+        tool_hints = request.tool_hints or None
         run_result = await _forge_agent.run_structured(
             intent=request.intent,
             params=request.params,
@@ -80,6 +82,8 @@ async def invoke(request: InvokeRequest) -> InvokeResponse:
             system_prompt_override=(persona.system_prompt if persona else None),
             model_name_override=persona.model if persona else None,
             max_turns_override=(persona.max_turns if persona else None),
+            tool_names_filter=persona_tools,
+            tool_hints_filter=tool_hints,
         )
         return InvokeResponse(
             result=run_result.output,

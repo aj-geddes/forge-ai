@@ -571,3 +571,185 @@ class TestModelSettingsWiring:
         assert "model_settings" in call_kwargs
         assert call_kwargs["model_settings"]["temperature"] == 0.9
         assert call_kwargs["model_settings"]["max_tokens"] == 512
+
+
+class TestToolFiltering:
+    """Tests for tool_names_filter support in _create_agent."""
+
+    @pytest.mark.anyio
+    async def test_create_agent_with_tool_filter(self) -> None:
+        """When tool_names_filter is provided, only matching tools are passed."""
+        from unittest.mock import MagicMock
+
+        config = _make_config(
+            manual_tools=[
+                ManualTool(
+                    name="search",
+                    description="Search the web",
+                    parameters=[
+                        ParameterDef(name="query", type=ParamType.STRING),
+                    ],
+                    api=ManualToolAPI(
+                        url="https://api.example.com/search",
+                        method=HTTPMethod.GET,
+                    ),
+                ),
+                ManualTool(
+                    name="calc",
+                    description="Calculate math",
+                    parameters=[
+                        ParameterDef(name="expr", type=ParamType.STRING),
+                    ],
+                    api=ManualToolAPI(
+                        url="https://api.example.com/calc",
+                        method=HTTPMethod.GET,
+                    ),
+                ),
+                ManualTool(
+                    name="weather",
+                    description="Get weather info",
+                    parameters=[
+                        ParameterDef(name="city", type=ParamType.STRING),
+                    ],
+                    api=ManualToolAPI(
+                        url="https://api.example.com/weather",
+                        method=HTTPMethod.GET,
+                    ),
+                ),
+            ]
+        )
+        agent = ForgeAgent(config, model_override=TestModel())
+        await agent.initialize()
+
+        # Registry should have all 3 tools.
+        assert agent.registry.tool_count == 3
+
+        with patch(
+            "forge_agent.agent.core.PydanticAIAgent",
+        ) as mock_agent_cls:
+            mock_instance = MagicMock()
+            mock_agent_cls.return_value = mock_instance
+            agent._create_agent(tool_names_filter=["search", "calc"])
+
+        call_kwargs = mock_agent_cls.call_args.kwargs
+        tools_passed = call_kwargs["tools"]
+        tool_names = [t.name for t in tools_passed]
+        assert sorted(tool_names) == ["calc", "search"]
+
+    @pytest.mark.anyio
+    async def test_create_agent_without_tool_filter(self) -> None:
+        """When no filter is given, all registry tools are passed."""
+        from unittest.mock import MagicMock
+
+        config = _make_config(
+            manual_tools=[
+                ManualTool(
+                    name="search",
+                    description="Search",
+                    parameters=[],
+                    api=ManualToolAPI(
+                        url="https://api.example.com/search",
+                        method=HTTPMethod.GET,
+                    ),
+                ),
+                ManualTool(
+                    name="calc",
+                    description="Calculate",
+                    parameters=[],
+                    api=ManualToolAPI(
+                        url="https://api.example.com/calc",
+                        method=HTTPMethod.GET,
+                    ),
+                ),
+            ]
+        )
+        agent = ForgeAgent(config, model_override=TestModel())
+        await agent.initialize()
+
+        assert agent.registry.tool_count == 2
+
+        with patch(
+            "forge_agent.agent.core.PydanticAIAgent",
+        ) as mock_agent_cls:
+            mock_instance = MagicMock()
+            mock_agent_cls.return_value = mock_instance
+            agent._create_agent()
+
+        call_kwargs = mock_agent_cls.call_args.kwargs
+        tools_passed = call_kwargs["tools"]
+        assert len(tools_passed) == 2
+
+    @pytest.mark.anyio
+    async def test_create_agent_empty_tool_filter(self) -> None:
+        """An empty filter list means no filtering — use all tools."""
+        from unittest.mock import MagicMock
+
+        config = _make_config(
+            manual_tools=[
+                ManualTool(
+                    name="search",
+                    description="Search",
+                    parameters=[],
+                    api=ManualToolAPI(
+                        url="https://api.example.com/search",
+                        method=HTTPMethod.GET,
+                    ),
+                ),
+                ManualTool(
+                    name="calc",
+                    description="Calculate",
+                    parameters=[],
+                    api=ManualToolAPI(
+                        url="https://api.example.com/calc",
+                        method=HTTPMethod.GET,
+                    ),
+                ),
+            ]
+        )
+        agent = ForgeAgent(config, model_override=TestModel())
+        await agent.initialize()
+
+        with patch(
+            "forge_agent.agent.core.PydanticAIAgent",
+        ) as mock_agent_cls:
+            mock_instance = MagicMock()
+            mock_agent_cls.return_value = mock_instance
+            agent._create_agent(tool_names_filter=[])
+
+        call_kwargs = mock_agent_cls.call_args.kwargs
+        tools_passed = call_kwargs["tools"]
+        assert len(tools_passed) == 2
+
+    @pytest.mark.anyio
+    async def test_tool_filter_with_unknown_names(self) -> None:
+        """Filtering with names that match no tools results in empty list."""
+        from unittest.mock import MagicMock
+
+        config = _make_config(
+            manual_tools=[
+                ManualTool(
+                    name="search",
+                    description="Search",
+                    parameters=[],
+                    api=ManualToolAPI(
+                        url="https://api.example.com/search",
+                        method=HTTPMethod.GET,
+                    ),
+                ),
+            ]
+        )
+        agent = ForgeAgent(config, model_override=TestModel())
+        await agent.initialize()
+
+        with patch(
+            "forge_agent.agent.core.PydanticAIAgent",
+        ) as mock_agent_cls:
+            mock_instance = MagicMock()
+            mock_agent_cls.return_value = mock_instance
+            agent._create_agent(
+                tool_names_filter=["nonexistent", "also_missing"],
+            )
+
+        call_kwargs = mock_agent_cls.call_args.kwargs
+        tools_passed = call_kwargs["tools"]
+        assert len(tools_passed) == 0

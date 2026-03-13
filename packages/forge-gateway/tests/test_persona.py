@@ -888,3 +888,144 @@ class TestMaxTurnsForwarding:
 
         call_kwargs = mock_agent.run_conversational.call_args.kwargs
         assert call_kwargs["max_turns_override"] == 10
+
+
+# ===========================================================================
+# 9. Persona tool filtering -> tool_names_filter forwarded to agent
+# ===========================================================================
+
+
+SEARCHER = AgentDef(
+    name="searcher",
+    description="A search-only agent",
+    system_prompt="You only search.",
+    tools=["search"],
+)
+
+NO_TOOLS = AgentDef(
+    name="generalist",
+    description="An agent with no tool restrictions",
+)
+
+
+class TestPersonaToolFiltering:
+    """Verify that a persona's tools list is forwarded as tool_names_filter."""
+
+    @pytest.fixture()
+    def tool_config(self) -> ForgeConfig:
+        """Config with personas that have and don't have tool filters."""
+        return _make_config(SEARCHER, NO_TOOLS)
+
+    @pytest.fixture()
+    def tool_invoke_client(
+        self, mock_agent: AsyncMock, tool_config: ForgeConfig
+    ) -> Iterator[TestClient]:
+        app = FastAPI()
+        app.include_router(programmatic.router)
+        programmatic.set_agent(mock_agent)
+        programmatic.set_config(tool_config)
+        yield TestClient(app)
+        programmatic.set_agent(None)
+        programmatic.set_config(None)
+
+    @pytest.fixture()
+    def tool_chat_client(
+        self, mock_agent: AsyncMock, tool_config: ForgeConfig
+    ) -> Iterator[TestClient]:
+        app = FastAPI()
+        app.include_router(conversational.router)
+        conversational.set_agent(mock_agent)
+        conversational.set_config(tool_config)
+        yield TestClient(app)
+        conversational.set_agent(None)
+        conversational.set_config(None)
+
+    def test_persona_with_tools_filters_agent_tools_invoke(
+        self,
+        tool_invoke_client: TestClient,
+        mock_agent: AsyncMock,
+    ) -> None:
+        """Persona with tools: ["search"] passes tool_names_filter to agent."""
+        response = tool_invoke_client.post(
+            "/v1/agent/invoke",
+            json={"intent": "find info", "agent": "searcher"},
+        )
+        assert response.status_code == 200
+
+        call_kwargs = mock_agent.run_structured.call_args.kwargs
+        assert call_kwargs["tool_names_filter"] == ["search"]
+
+    def test_persona_with_tools_filters_agent_tools_chat(
+        self,
+        tool_chat_client: TestClient,
+        mock_agent: AsyncMock,
+    ) -> None:
+        """Persona with tools: ["search"] passes tool_names_filter in chat."""
+        response = tool_chat_client.post(
+            "/v1/chat/completions",
+            json={"message": "find info", "agent": "searcher"},
+        )
+        assert response.status_code == 200
+
+        call_kwargs = mock_agent.run_conversational.call_args.kwargs
+        assert call_kwargs["tool_names_filter"] == ["search"]
+
+    def test_persona_without_tools_uses_all_invoke(
+        self,
+        tool_invoke_client: TestClient,
+        mock_agent: AsyncMock,
+    ) -> None:
+        """Persona without tools field passes None for tool_names_filter."""
+        response = tool_invoke_client.post(
+            "/v1/agent/invoke",
+            json={"intent": "anything", "agent": "generalist"},
+        )
+        assert response.status_code == 200
+
+        call_kwargs = mock_agent.run_structured.call_args.kwargs
+        assert call_kwargs.get("tool_names_filter") is None
+
+    def test_persona_without_tools_uses_all_chat(
+        self,
+        tool_chat_client: TestClient,
+        mock_agent: AsyncMock,
+    ) -> None:
+        """Persona without tools field passes None for tool_names_filter."""
+        response = tool_chat_client.post(
+            "/v1/chat/completions",
+            json={"message": "anything", "agent": "generalist"},
+        )
+        assert response.status_code == 200
+
+        call_kwargs = mock_agent.run_conversational.call_args.kwargs
+        assert call_kwargs.get("tool_names_filter") is None
+
+    def test_no_persona_does_not_pass_tool_filter_invoke(
+        self,
+        tool_invoke_client: TestClient,
+        mock_agent: AsyncMock,
+    ) -> None:
+        """When no persona is specified, tool_names_filter is None."""
+        response = tool_invoke_client.post(
+            "/v1/agent/invoke",
+            json={"intent": "test"},
+        )
+        assert response.status_code == 200
+
+        call_kwargs = mock_agent.run_structured.call_args.kwargs
+        assert call_kwargs.get("tool_names_filter") is None
+
+    def test_no_persona_does_not_pass_tool_filter_chat(
+        self,
+        tool_chat_client: TestClient,
+        mock_agent: AsyncMock,
+    ) -> None:
+        """When no persona is specified, tool_names_filter is None."""
+        response = tool_chat_client.post(
+            "/v1/chat/completions",
+            json={"message": "Hi"},
+        )
+        assert response.status_code == 200
+
+        call_kwargs = mock_agent.run_conversational.call_args.kwargs
+        assert call_kwargs.get("tool_names_filter") is None

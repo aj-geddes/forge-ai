@@ -337,6 +337,53 @@ class TestInvokePersonaRouting:
         programmatic.set_agent(None)
 
 
+class TestToolHints:
+    """Verify that tool_hints from InvokeRequest are forwarded as
+    tool_hints_filter to the agent's run_structured method.
+    """
+
+    def test_invoke_with_tool_hints_passes_filter(
+        self, client: TestClient, mock_agent: AsyncMock
+    ) -> None:
+        """Request with tool_hints passes them as tool_hints_filter."""
+        response = client.post(
+            "/v1/agent/invoke",
+            json={
+                "intent": "search for info",
+                "tool_hints": ["search"],
+            },
+        )
+        assert response.status_code == 200
+
+        call_kwargs = mock_agent.run_structured.call_args.kwargs
+        assert call_kwargs["tool_hints_filter"] == ["search"]
+
+    def test_invoke_without_tool_hints(self, client: TestClient, mock_agent: AsyncMock) -> None:
+        """No tool_hints means tool_hints_filter is None."""
+        response = client.post(
+            "/v1/agent/invoke",
+            json={"intent": "do something"},
+        )
+        assert response.status_code == 200
+
+        call_kwargs = mock_agent.run_structured.call_args.kwargs
+        assert call_kwargs.get("tool_hints_filter") is None
+
+    def test_invoke_with_empty_tool_hints(self, client: TestClient, mock_agent: AsyncMock) -> None:
+        """Empty tool_hints list means no filter (None)."""
+        response = client.post(
+            "/v1/agent/invoke",
+            json={
+                "intent": "do something",
+                "tool_hints": [],
+            },
+        )
+        assert response.status_code == 200
+
+        call_kwargs = mock_agent.run_structured.call_args.kwargs
+        assert call_kwargs.get("tool_hints_filter") is None
+
+
 class TestErrorDetailRedaction:
     """HTTP 500 responses must not leak internal error details to clients."""
 
