@@ -11,6 +11,8 @@ dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.34",
     "prometheus-client>=0.21",
+    "pyyaml>=6.0",
+    "httpx>=0.28",
 ]
 
 [build-system]

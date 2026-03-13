@@ -990,7 +990,9 @@ dependencies = [
     { name = "forge-agent" },
     { name = "forge-config" },
     { name = "forge-security" },
+    { name = "httpx" },
     { name = "prometheus-client" },
+    { name = "pyyaml" },
     { name = "uvicorn", extra = ["standard"] },
 ]
 
@@ -1000,7 +1002,9 @@ requires-dist = [
     { name = "forge-agent", editable = "packages/forge-agent" },
     { name = "forge-config", editable = "packages/forge-config" },
     { name = "forge-security", editable = "packages/forge-security" },
+    { name = "httpx", specifier = ">=0.28" },
     { name = "prometheus-client", specifier = ">=0.21" },
+    { name = "pyyaml", specifier = ">=6.0" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.34" },
 ]
 

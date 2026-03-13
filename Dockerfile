@@ -1,4 +1,13 @@
-# Stage 1: Builder
+# Stage 1: UI Builder
+FROM node:22-slim AS ui-builder
+
+WORKDIR /ui
+COPY forge-ai/packages/forge-ui/package.json forge-ai/packages/forge-ui/package-lock.json ./
+RUN npm ci
+COPY forge-ai/packages/forge-ui/ .
+RUN npm run build
+
+# Stage 2: Python Builder
 FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim AS builder
 
 WORKDIR /build
@@ -32,7 +41,7 @@ COPY forge-ai/packages/ packages/
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev
 
-# Stage 2: Runtime
+# Stage 3: Runtime
 FROM python:3.12-slim-bookworm AS runtime
 
 RUN groupadd --gid 999 forge && \
@@ -42,6 +51,9 @@ WORKDIR /app
 
 # Copy virtual environment from builder
 COPY --from=builder /build/forge-ai/.venv /app/.venv
+
+# Copy UI build output
+COPY --from=ui-builder /ui/dist /app/static
 
 # Copy config example as reference
 COPY forge-ai/forge.yaml.example /app/forge.yaml.example
