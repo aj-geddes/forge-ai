@@ -44,6 +44,8 @@ def _make_reload_callback(
 
             # Preserve the current agent reference across config reloads
             admin.set_state(config=new_config, config_path=config_path)
+            programmatic.set_config(new_config)
+            conversational.set_config(new_config)
             set_api_key_config(new_config.security.api_keys)
             _init_security_gate(new_config)
 
@@ -221,9 +223,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 agent = ForgeAgent(config)
                 await agent.initialize()
 
-                # Wire agent into all route modules
+                # Wire agent and config into all route modules
                 programmatic.set_agent(agent)
+                programmatic.set_config(config)
                 conversational.set_agent(agent)
+                conversational.set_config(config)
                 a2a.set_agent(agent)
 
                 # Build MCP server from the agent's tool registry

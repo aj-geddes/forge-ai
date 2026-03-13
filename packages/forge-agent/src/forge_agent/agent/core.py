@@ -11,7 +11,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any
 
-from forge_config.schema import ForgeConfig
+from forge_config.schema import AgentDef, ForgeConfig
 from pydantic import BaseModel
 from pydantic_ai import Agent as PydanticAIAgent
 from pydantic_ai.messages import ModelMessage, ModelResponse, ToolCallPart
@@ -98,6 +98,20 @@ class ForgeAgent:
         """The LLM router."""
         return self._llm_router
 
+    def resolve_persona(self, name: str) -> AgentDef | None:
+        """Look up a named agent persona from the config's agents list.
+
+        Args:
+            name: The persona name to look up (case-sensitive).
+
+        Returns:
+            The matching AgentDef, or None if not found.
+        """
+        for agent_def in self._config.agents.agents:
+            if agent_def.name == name:
+                return agent_def
+        return None
+
     async def initialize(self) -> None:
         """Initialize the agent by building the tool surface and creating the PydanticAI Agent.
 
@@ -106,20 +120,28 @@ class ForgeAgent:
         await self._registry.build_and_swap(self._config)
         self._agent = self._create_agent()
 
-    def _create_agent(self, output_type: type | None = None) -> PydanticAIAgent[None]:
+    def _create_agent(
+        self,
+        output_type: type | None = None,
+        *,
+        system_prompt_override: str | None = None,
+        model_name_override: str | None = None,
+    ) -> PydanticAIAgent[None]:
         """Create a PydanticAI Agent with current tools and config.
 
         Args:
             output_type: Optional output type for structured responses.
+            system_prompt_override: If set, replaces the default system prompt.
+            model_name_override: If set, replaces the default model name.
 
         Returns:
             A configured PydanticAI Agent.
         """
         model: Any = self._model_override
         if model is None:
-            model = self._llm_router.model_name
+            model = model_name_override or self._llm_router.model_name
 
-        system_prompt = self._llm_router.system_prompt or ""
+        system_prompt = system_prompt_override or self._llm_router.system_prompt or ""
         tools = self._registry.tools
 
         kwargs: dict[str, Any] = {
@@ -141,6 +163,9 @@ class ForgeAgent:
         message: str,
         session_id: str | None = None,
         stream: bool = False,
+        *,
+        system_prompt_override: str | None = None,
+        model_name_override: str | None = None,
     ) -> ForgeRunResult | AsyncIterator[str]:
         """Run a conversational interaction with the agent.
 
@@ -148,24 +173,34 @@ class ForgeAgent:
             message: The user message.
             session_id: Optional session ID for context continuity.
             stream: If True, return an async iterator of text chunks.
+            system_prompt_override: If set, replaces the default system prompt.
+            model_name_override: If set, replaces the default model name.
 
         Returns:
             A ForgeRunResult containing the response and metadata,
             or an async iterator of chunks if stream=True.
         """
-        if self._agent is None:
-            await self.initialize()
+        has_overrides = system_prompt_override is not None or model_name_override is not None
 
-        assert self._agent is not None
+        if has_overrides:
+            agent = self._create_agent(
+                system_prompt_override=system_prompt_override,
+                model_name_override=model_name_override,
+            )
+        else:
+            if self._agent is None:
+                await self.initialize()
+            assert self._agent is not None
+            agent = self._agent
 
         message_history = None
         if session_id:
             message_history = self._context.get_messages(session_id) or None
 
         if stream:
-            return self._make_stream(message, session_id, message_history)
+            return self._make_stream(message, session_id, message_history, agent_override=agent)
 
-        result = await self._agent.run(
+        result = await agent.run(
             message,
             message_history=message_history,
         )
@@ -187,6 +222,8 @@ class ForgeAgent:
         message: str,
         session_id: str | None,
         message_history: list[Any] | None,
+        *,
+        agent_override: PydanticAIAgent[None] | None = None,
     ) -> AsyncIterator[str]:
         """Create an async iterator that streams the agent response.
 
@@ -194,11 +231,12 @@ class ForgeAgent:
             message: The user message.
             session_id: Optional session ID.
             message_history: Previous messages for context.
+            agent_override: If set, use this agent instead of the default.
 
         Returns:
             Async iterator yielding text chunks.
         """
-        agent = self._agent
+        agent = agent_override or self._agent
         context = self._context
         assert agent is not None
 
@@ -221,6 +259,9 @@ class ForgeAgent:
         intent: str,
         params: dict[str, Any] | None = None,
         output_schema: type[BaseModel] | None = None,
+        *,
+        system_prompt_override: str | None = None,
+        model_name_override: str | None = None,
     ) -> ForgeRunResult:
         """Run a structured interaction that returns typed output.
 
@@ -228,14 +269,25 @@ class ForgeAgent:
             intent: Description of what the agent should produce.
             params: Optional parameters to include in the prompt.
             output_schema: A Pydantic BaseModel class for the output type.
+            system_prompt_override: If set, replaces the default system prompt.
+            model_name_override: If set, replaces the default model name.
 
         Returns:
             A ForgeRunResult containing the output and run metadata.
         """
-        if self._agent is None:
-            await self.initialize()
+        has_overrides = system_prompt_override is not None or model_name_override is not None
 
-        assert self._agent is not None
+        if has_overrides:
+            agent = self._create_agent(
+                output_type=output_schema,
+                system_prompt_override=system_prompt_override,
+                model_name_override=model_name_override,
+            )
+        else:
+            if self._agent is None:
+                await self.initialize()
+            assert self._agent is not None
+            agent = self._agent
 
         prompt = intent
         if params:
@@ -243,11 +295,11 @@ class ForgeAgent:
             prompt = f"{intent} (parameters: {param_str})"
 
         if output_schema is not None:
-            structured_result = await self._agent.run(prompt, output_type=output_schema)
+            structured_result = await agent.run(prompt, output_type=output_schema)
             output: Any = structured_result.output
             all_msgs = list(structured_result.all_messages())
         else:
-            text_result = await self._agent.run(prompt)
+            text_result = await agent.run(prompt)
             output = {"result": text_result.output}
             all_msgs = list(text_result.all_messages())
 

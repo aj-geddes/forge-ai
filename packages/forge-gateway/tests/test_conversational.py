@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock
 import pytest
 from fastapi import FastAPI
 from forge_agent.agent.core import ForgeRunResult
+from forge_config.schema import AgentDef, AgentsConfig, ForgeConfig, LLMConfig
 from forge_gateway.routes import conversational
 from httpx import ASGITransport, AsyncClient
 from starlette.testclient import TestClient
@@ -53,8 +54,10 @@ def app(mock_agent: AsyncMock) -> FastAPI:
     _app = FastAPI()
     _app.include_router(conversational.router)
     conversational.set_agent(mock_agent)
+    conversational.set_config(None)
     yield _app  # type: ignore[misc]
     conversational.set_agent(None)
+    conversational.set_config(None)
 
 
 @pytest.fixture()
@@ -135,6 +138,8 @@ class TestNonStreamingChat:
         mock_agent.run_conversational.assert_called_once_with(
             message="Hello",
             session_id=data["session_id"],
+            system_prompt_override=None,
+            model_name_override=None,
         )
 
     def test_non_streaming_content_type(self, client: TestClient) -> None:
@@ -177,6 +182,8 @@ class TestStreamingContentType:
             message="Tell me a joke",
             session_id="s-flag",
             stream=True,
+            system_prompt_override=None,
+            model_name_override=None,
         )
 
     def test_streaming_content_type_sync(self, client: TestClient, mock_agent: AsyncMock) -> None:
@@ -743,3 +750,125 @@ class TestConversationalToolsUsedAndModel:
         data = response.json()
         assert data["tools_used"] == []
         assert data["model"] is None
+
+
+# ---------------------------------------------------------------------------
+# 10. Agent persona routing
+# ---------------------------------------------------------------------------
+
+
+class TestChatPersonaRouting:
+    """Tests for agent persona routing in the chat endpoint."""
+
+    @pytest.fixture
+    def config_with_personas(self) -> ForgeConfig:
+        return ForgeConfig(
+            llm=LLMConfig(default_model="gpt-4o"),
+            agents=AgentsConfig(
+                agents=[
+                    AgentDef(
+                        name="coder",
+                        description="A coding assistant",
+                        system_prompt="You are a coding assistant.",
+                        model="gpt-4o-mini",
+                    ),
+                    AgentDef(
+                        name="writer",
+                        description="A writing assistant",
+                        system_prompt="You are a creative writer.",
+                    ),
+                ]
+            ),
+        )
+
+    @pytest.fixture
+    def persona_client(
+        self, mock_agent: AsyncMock, config_with_personas: ForgeConfig
+    ) -> TestClient:
+        app = FastAPI()
+        app.include_router(conversational.router)
+        conversational.set_agent(mock_agent)
+        conversational.set_config(config_with_personas)
+        yield TestClient(app)
+        conversational.set_agent(None)
+        conversational.set_config(None)
+
+    def test_chat_with_known_persona(
+        self, persona_client: TestClient, mock_agent: AsyncMock
+    ) -> None:
+        """Chatting with a known persona passes overrides to the agent."""
+        response = persona_client.post(
+            "/v1/chat/completions",
+            json={"message": "Help me code", "agent": "coder"},
+        )
+        assert response.status_code == 200
+
+        call_kwargs = mock_agent.run_conversational.call_args.kwargs
+        assert call_kwargs["system_prompt_override"] == "You are a coding assistant."
+        assert call_kwargs["model_name_override"] == "gpt-4o-mini"
+
+    def test_chat_with_unknown_persona_returns_404(self, persona_client: TestClient) -> None:
+        """Chatting with an unknown persona returns 404."""
+        response = persona_client.post(
+            "/v1/chat/completions",
+            json={"message": "Hello", "agent": "nonexistent"},
+        )
+        assert response.status_code == 404
+        assert "Unknown agent persona" in response.json()["detail"]
+
+    def test_chat_without_persona_uses_defaults(
+        self, persona_client: TestClient, mock_agent: AsyncMock
+    ) -> None:
+        """Chatting without agent field passes None overrides."""
+        response = persona_client.post(
+            "/v1/chat/completions",
+            json={"message": "Hello"},
+        )
+        assert response.status_code == 200
+
+        call_kwargs = mock_agent.run_conversational.call_args.kwargs
+        assert call_kwargs.get("system_prompt_override") is None
+        assert call_kwargs.get("model_name_override") is None
+
+    def test_chat_persona_without_model_override(
+        self, persona_client: TestClient, mock_agent: AsyncMock
+    ) -> None:
+        """A persona with no model override passes None for model_name_override."""
+        response = persona_client.post(
+            "/v1/chat/completions",
+            json={"message": "Write a story", "agent": "writer"},
+        )
+        assert response.status_code == 200
+
+        call_kwargs = mock_agent.run_conversational.call_args.kwargs
+        assert call_kwargs["system_prompt_override"] == "You are a creative writer."
+        assert call_kwargs["model_name_override"] is None
+
+    def test_chat_persona_no_config_returns_404(self, mock_agent: AsyncMock) -> None:
+        """When no config is loaded, any persona name returns 404."""
+        app = FastAPI()
+        app.include_router(conversational.router)
+        conversational.set_agent(mock_agent)
+        conversational.set_config(None)
+        tc = TestClient(app)
+        response = tc.post(
+            "/v1/chat/completions",
+            json={"message": "Hi", "agent": "coder"},
+        )
+        assert response.status_code == 404
+        conversational.set_agent(None)
+
+    def test_chat_streaming_with_persona(
+        self, persona_client: TestClient, mock_agent: AsyncMock
+    ) -> None:
+        """Streaming with a persona passes the overrides correctly."""
+        mock_agent.run_conversational.return_value = _async_iter("Hello")
+        response = persona_client.post(
+            "/v1/chat/completions",
+            json={"message": "Code it", "agent": "coder", "stream": True},
+        )
+        assert response.status_code == 200
+
+        call_kwargs = mock_agent.run_conversational.call_args.kwargs
+        assert call_kwargs["system_prompt_override"] == "You are a coding assistant."
+        assert call_kwargs["model_name_override"] == "gpt-4o-mini"

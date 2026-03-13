@@ -10,6 +10,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
+from forge_config.schema import AgentDef, ForgeConfig
 
 from forge_gateway.models import ConversationRequest, ConversationResponse, ErrorResponse
 from forge_gateway.security import security_dependency
@@ -23,11 +24,39 @@ router = APIRouter(
 )
 
 _forge_agent: Any = None
+_config: ForgeConfig | None = None
 
 
 def set_agent(agent: Any) -> None:
     global _forge_agent
     _forge_agent = agent
+
+
+def set_config(config: ForgeConfig | None) -> None:
+    global _config
+    _config = config
+
+
+def _resolve_persona(agent_name: str | None) -> AgentDef | None:
+    """Resolve an agent persona name to its AgentDef from config.
+
+    Returns None when no persona is specified (or the name is empty),
+    indicating the default agent behaviour should be used.
+
+    Raises HTTPException(404) when a non-empty name does not match any
+    configured persona.
+    """
+    if not agent_name:
+        return None
+
+    if _config is None:
+        raise HTTPException(status_code=404, detail="Unknown agent persona")
+
+    for agent_def in _config.agents.agents:
+        if agent_def.name == agent_name:
+            return agent_def
+
+    raise HTTPException(status_code=404, detail="Unknown agent persona")
 
 
 async def _sse_generator(
@@ -63,23 +92,27 @@ async def chat(request: ConversationRequest) -> ConversationResponse | Streaming
     if _forge_agent is None:
         raise HTTPException(status_code=503, detail="Agent not initialized")
 
+    persona = _resolve_persona(request.agent)
     session_id = request.session_id or str(uuid.uuid4())
 
     if request.stream:
-        return await _handle_streaming(request, session_id)
+        return await _handle_streaming(request, session_id, persona)
 
-    return await _handle_non_streaming(request, session_id)
+    return await _handle_non_streaming(request, session_id, persona)
 
 
 async def _handle_non_streaming(
     request: ConversationRequest,
     session_id: str,
+    persona: AgentDef | None = None,
 ) -> ConversationResponse:
     """Handle a standard (non-streaming) chat request."""
     try:
         run_result = await _forge_agent.run_conversational(
             message=request.message,
             session_id=session_id,
+            system_prompt_override=persona.system_prompt if persona else None,
+            model_name_override=persona.model if persona else None,
         )
         return ConversationResponse(
             message=run_result.output,
@@ -87,6 +120,8 @@ async def _handle_non_streaming(
             tools_used=run_result.tools_used,
             model=run_result.model_name,
         )
+    except HTTPException:
+        raise
     except Exception as e:
         logger.exception("Conversational request failed")
         raise HTTPException(status_code=500, detail=str(e)) from e
@@ -95,6 +130,7 @@ async def _handle_non_streaming(
 async def _handle_streaming(
     request: ConversationRequest,
     session_id: str,
+    persona: AgentDef | None = None,
 ) -> StreamingResponse:
     """Handle a streaming chat request, returning SSE."""
     try:
@@ -102,6 +138,8 @@ async def _handle_streaming(
             message=request.message,
             session_id=session_id,
             stream=True,
+            system_prompt_override=persona.system_prompt if persona else None,
+            model_name_override=persona.model if persona else None,
         )
     except Exception as e:
         logger.exception("Failed to start streaming response")

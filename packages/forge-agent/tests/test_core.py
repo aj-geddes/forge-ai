@@ -5,6 +5,8 @@ from __future__ import annotations
 import pytest
 from forge_agent.agent.core import ForgeAgent, ForgeRunResult
 from forge_config.schema import (
+    AgentDef,
+    AgentsConfig,
     ForgeConfig,
     HTTPMethod,
     LLMConfig,
@@ -21,6 +23,7 @@ from pydantic_ai.models.test import TestModel
 def _make_config(
     manual_tools: list[ManualTool] | None = None,
     system_prompt: str | None = None,
+    agents: list[AgentDef] | None = None,
 ) -> ForgeConfig:
     """Create a ForgeConfig for testing."""
     return ForgeConfig(
@@ -29,6 +32,7 @@ def _make_config(
             system_prompt=system_prompt,
         ),
         tools=ToolsConfig(manual_tools=manual_tools or []),
+        agents=AgentsConfig(agents=agents or []),
     )
 
 
@@ -173,3 +177,91 @@ class TestForgeAgentStructured:
 
         await agent.run_structured("Do something")
         assert agent._agent is not None
+
+
+class TestForgeAgentPersonaRouting:
+    """Tests for persona lookup and override support."""
+
+    def test_resolve_persona_found(self) -> None:
+        """resolve_persona returns the matching AgentDef."""
+        config = _make_config(
+            agents=[
+                AgentDef(name="coder", description="A coding assistant", system_prompt="Code only"),
+                AgentDef(name="writer", description="A writing assistant"),
+            ]
+        )
+        agent = ForgeAgent(config, model_override=TestModel())
+
+        persona = agent.resolve_persona("coder")
+        assert persona is not None
+        assert persona.name == "coder"
+        assert persona.system_prompt == "Code only"
+
+    def test_resolve_persona_not_found(self) -> None:
+        """resolve_persona returns None for unknown names."""
+        config = _make_config(agents=[AgentDef(name="coder", description="A coding assistant")])
+        agent = ForgeAgent(config, model_override=TestModel())
+
+        assert agent.resolve_persona("unknown") is None
+
+    def test_resolve_persona_empty_agents_list(self) -> None:
+        """resolve_persona returns None when no agents are configured."""
+        config = _make_config()
+        agent = ForgeAgent(config, model_override=TestModel())
+
+        assert agent.resolve_persona("anything") is None
+
+    @pytest.mark.anyio
+    async def test_run_conversational_with_system_prompt_override(self) -> None:
+        """Persona system_prompt override creates a new agent with that prompt."""
+        config = _make_config(system_prompt="Default prompt")
+        agent = ForgeAgent(config, model_override=TestModel())
+
+        result = await agent.run_conversational(
+            "Hello!",
+            system_prompt_override="Custom persona prompt",
+        )
+        assert isinstance(result, ForgeRunResult)
+        assert isinstance(result.output, str)
+
+    @pytest.mark.anyio
+    async def test_run_structured_with_system_prompt_override(self) -> None:
+        """Persona system_prompt override works for structured runs."""
+        config = _make_config(system_prompt="Default prompt")
+        agent = ForgeAgent(config, model_override=TestModel())
+
+        result = await agent.run_structured(
+            "Do something",
+            system_prompt_override="Custom persona prompt",
+        )
+        assert isinstance(result, ForgeRunResult)
+
+    @pytest.mark.anyio
+    async def test_run_conversational_no_override_uses_default(self) -> None:
+        """When no overrides are given, the default cached agent is used."""
+        config = _make_config()
+        agent = ForgeAgent(config, model_override=TestModel())
+        await agent.initialize()
+
+        default_agent = agent._agent
+        result = await agent.run_conversational("Hello!")
+        assert isinstance(result, ForgeRunResult)
+        # Default agent should not have been replaced.
+        assert agent._agent is default_agent
+
+    @pytest.mark.anyio
+    async def test_run_conversational_stream_with_override(self) -> None:
+        """Streaming with persona overrides works correctly."""
+        config = _make_config()
+        agent = ForgeAgent(config, model_override=TestModel())
+
+        result = await agent.run_conversational(
+            "Hello!",
+            stream=True,
+            system_prompt_override="Stream persona prompt",
+        )
+        assert hasattr(result, "__aiter__")
+        chunks: list[str] = []
+        async for chunk in result:
+            chunks.append(chunk)
+        assert len(chunks) > 0

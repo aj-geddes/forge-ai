@@ -8,6 +8,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from forge_agent.agent.core import ForgeRunResult
+from forge_config.schema import AgentDef, AgentsConfig, ForgeConfig, LLMConfig
 from forge_gateway.routes import programmatic
 from pydantic import BaseModel
 
@@ -37,8 +38,10 @@ def client(mock_agent: AsyncMock) -> TestClient:
     app = FastAPI()
     app.include_router(programmatic.router)
     programmatic.set_agent(mock_agent)
+    programmatic.set_config(None)
     yield TestClient(app)
     programmatic.set_agent(None)
+    programmatic.set_config(None)
 
 
 class TestInvokeEndpoint:
@@ -216,3 +219,119 @@ class TestInvokeToolsUsedAndModel:
         data = response.json()
         assert data["tools_used"] == ["web_search"]
         assert len(data["tools_used"]) == 1
+
+
+class TestInvokePersonaRouting:
+    """Tests for agent persona routing in the invoke endpoint."""
+
+    @pytest.fixture
+    def config_with_personas(self) -> ForgeConfig:
+        return ForgeConfig(
+            llm=LLMConfig(default_model="gpt-4o"),
+            agents=AgentsConfig(
+                agents=[
+                    AgentDef(
+                        name="coder",
+                        description="A coding assistant",
+                        system_prompt="You are a coding assistant.",
+                        model="gpt-4o-mini",
+                    ),
+                    AgentDef(
+                        name="writer",
+                        description="A writing assistant",
+                        system_prompt="You are a creative writer.",
+                    ),
+                ]
+            ),
+        )
+
+    @pytest.fixture
+    def persona_client(
+        self, mock_agent: AsyncMock, config_with_personas: ForgeConfig
+    ) -> TestClient:
+        app = FastAPI()
+        app.include_router(programmatic.router)
+        programmatic.set_agent(mock_agent)
+        programmatic.set_config(config_with_personas)
+        yield TestClient(app)
+        programmatic.set_agent(None)
+        programmatic.set_config(None)
+
+    def test_invoke_with_known_persona(
+        self, persona_client: TestClient, mock_agent: AsyncMock
+    ) -> None:
+        """Invoking with a known persona passes overrides to the agent."""
+        response = persona_client.post(
+            "/v1/agent/invoke",
+            json={"intent": "write code", "agent": "coder"},
+        )
+        assert response.status_code == 200
+
+        call_kwargs = mock_agent.run_structured.call_args.kwargs
+        assert call_kwargs["system_prompt_override"] == "You are a coding assistant."
+        assert call_kwargs["model_name_override"] == "gpt-4o-mini"
+
+    def test_invoke_with_unknown_persona_returns_404(self, persona_client: TestClient) -> None:
+        """Invoking with an unknown persona returns 404."""
+        response = persona_client.post(
+            "/v1/agent/invoke",
+            json={"intent": "do something", "agent": "nonexistent"},
+        )
+        assert response.status_code == 404
+        assert "Unknown agent persona" in response.json()["detail"]
+
+    def test_invoke_without_persona_uses_defaults(
+        self, persona_client: TestClient, mock_agent: AsyncMock
+    ) -> None:
+        """Invoking without agent field passes None overrides."""
+        response = persona_client.post(
+            "/v1/agent/invoke",
+            json={"intent": "do something"},
+        )
+        assert response.status_code == 200
+
+        call_kwargs = mock_agent.run_structured.call_args.kwargs
+        assert call_kwargs["system_prompt_override"] is None
+        assert call_kwargs["model_name_override"] is None
+
+    def test_invoke_with_empty_agent_uses_defaults(
+        self, persona_client: TestClient, mock_agent: AsyncMock
+    ) -> None:
+        """Invoking with agent="" is treated the same as omitting it."""
+        response = persona_client.post(
+            "/v1/agent/invoke",
+            json={"intent": "do something", "agent": ""},
+        )
+        assert response.status_code == 200
+
+        call_kwargs = mock_agent.run_structured.call_args.kwargs
+        assert call_kwargs["system_prompt_override"] is None
+        assert call_kwargs["model_name_override"] is None
+
+    def test_invoke_persona_without_model_override(
+        self, persona_client: TestClient, mock_agent: AsyncMock
+    ) -> None:
+        """A persona with no model override passes None for model_name_override."""
+        response = persona_client.post(
+            "/v1/agent/invoke",
+            json={"intent": "write essay", "agent": "writer"},
+        )
+        assert response.status_code == 200
+
+        call_kwargs = mock_agent.run_structured.call_args.kwargs
+        assert call_kwargs["system_prompt_override"] == "You are a creative writer."
+        assert call_kwargs["model_name_override"] is None
+
+    def test_invoke_persona_no_config_returns_404(self, mock_agent: AsyncMock) -> None:
+        """When no config is loaded, any persona name returns 404."""
+        app = FastAPI()
+        app.include_router(programmatic.router)
+        programmatic.set_agent(mock_agent)
+        programmatic.set_config(None)
+        tc = TestClient(app)
+        response = tc.post(
+            "/v1/agent/invoke",
+            json={"intent": "test", "agent": "coder"},
+        )
+        assert response.status_code == 404
+        programmatic.set_agent(None)

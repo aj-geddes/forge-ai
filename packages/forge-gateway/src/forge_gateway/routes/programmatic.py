@@ -6,6 +6,7 @@ import logging
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
+from forge_config.schema import AgentDef, ForgeConfig
 from pydantic import BaseModel
 
 from forge_gateway.models import ErrorResponse, InvokeRequest, InvokeResponse
@@ -22,11 +23,39 @@ router = APIRouter(
 
 # Set by app lifespan
 _forge_agent: Any = None
+_config: ForgeConfig | None = None
 
 
 def set_agent(agent: Any) -> None:
     global _forge_agent
     _forge_agent = agent
+
+
+def set_config(config: ForgeConfig | None) -> None:
+    global _config
+    _config = config
+
+
+def _resolve_persona(agent_name: str | None) -> AgentDef | None:
+    """Resolve an agent persona name to its AgentDef from config.
+
+    Returns None when no persona is specified (or the name is empty),
+    indicating the default agent behaviour should be used.
+
+    Raises HTTPException(404) when a non-empty name does not match any
+    configured persona.
+    """
+    if not agent_name:
+        return None
+
+    if _config is None:
+        raise HTTPException(status_code=404, detail="Unknown agent persona")
+
+    for agent_def in _config.agents.agents:
+        if agent_def.name == agent_name:
+            return agent_def
+
+    raise HTTPException(status_code=404, detail="Unknown agent persona")
 
 
 def _resolve_output_schema(
@@ -52,12 +81,16 @@ async def invoke(request: InvokeRequest) -> InvokeResponse:
     if _forge_agent is None:
         raise HTTPException(status_code=503, detail="Agent not initialized")
 
+    persona = _resolve_persona(request.agent)
+
     try:
         output_schema = _resolve_output_schema(request.output_schema)
         run_result = await _forge_agent.run_structured(
             intent=request.intent,
             params=request.params,
             output_schema=output_schema,
+            system_prompt_override=persona.system_prompt if persona else None,
+            model_name_override=persona.model if persona else None,
         )
         return InvokeResponse(
             result=run_result.output,
@@ -65,6 +98,8 @@ async def invoke(request: InvokeRequest) -> InvokeResponse:
             tools_used=run_result.tools_used,
             model=run_result.model_name,
         )
+    except HTTPException:
+        raise
     except Exception as e:
         logger.exception("Agent invocation failed")
         raise HTTPException(status_code=500, detail=str(e)) from e
