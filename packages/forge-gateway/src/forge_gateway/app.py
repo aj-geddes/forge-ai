@@ -20,12 +20,18 @@ from forge_gateway.security import set_security_gate
 logger = logging.getLogger("forge.gateway")
 
 
-def _make_reload_callback(config_path: str) -> Callable[[Path], None]:
-    """Create a config-reload callback bound to a specific config path.
+def _make_reload_callback(
+    config_path: str,
+    agent: object | None = None,
+) -> Callable[[Path], None]:
+    """Create a config-reload callback bound to a specific config path and agent.
 
     The returned callable accepts a ``Path`` argument (provided by ConfigWatcher)
-    and reloads the config, updating admin state and API key auth.  The existing
-    agent reference is preserved across reloads.
+    and reloads the config, updating admin state, API key auth, security gate,
+    tool surface, MCP server, and the A2A agent card.
+
+    The agent reference is captured in the closure so that async tool rebuilds
+    can be scheduled when the config file changes on disk.
     """
 
     def _on_config_change(changed_path: Path) -> None:
@@ -40,11 +46,73 @@ def _make_reload_callback(config_path: str) -> Callable[[Path], None]:
             admin.set_state(config=new_config, config_path=config_path)
             set_api_key_config(new_config.security.api_keys)
             _init_security_gate(new_config)
-            _refresh_agent_card(new_config)
+
+            # Schedule async tool surface + MCP rebuild
+            _schedule_tool_rebuild(new_config, agent)
+
+            _refresh_agent_card(new_config, agent)
         except Exception:
             logger.exception("Failed to reload config from %s", changed_path)
 
     return _on_config_change
+
+
+def _schedule_tool_rebuild(config: object, agent: object | None) -> None:
+    """Schedule an async rebuild of the tool surface and MCP server.
+
+    Called from the synchronous config-change callback.  Uses
+    ``asyncio.ensure_future`` to run the coroutine on the current event loop.
+    """
+    import asyncio
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        logger.warning("No running event loop — skipping tool surface rebuild")
+        return
+
+    loop.create_task(_rebuild_tool_surface(config, agent))
+
+
+async def _rebuild_tool_surface(config: object, agent: object | None) -> None:
+    """Rebuild the agent tool surface and MCP server from a new config.
+
+    Each step is independent and errors are logged without propagating,
+    so a failure in one subsystem does not block the others.
+    """
+    from forge_config.schema import ForgeConfig
+
+    if not isinstance(config, ForgeConfig):
+        return
+
+    # 1. Rebuild the agent's tool registry
+    if agent is not None:
+        try:
+            registry = getattr(agent, "_registry", None)
+            if registry is not None:
+                swapped = await registry.build_and_swap(config)
+                if swapped:
+                    logger.info(
+                        "Tool surface rebuilt: %d tools (version %s)",
+                        registry.tool_count,
+                        registry.version,
+                    )
+                else:
+                    logger.info("Tool surface unchanged, skipping rebuild")
+            else:
+                logger.debug("Agent has no _registry attribute, skipping tool rebuild")
+        except Exception:
+            logger.exception("Failed to rebuild tool surface during config reload")
+
+    # 2. Rebuild the MCP server with updated tools
+    if agent is not None:
+        try:
+            registry = getattr(agent, "_registry", None)
+            if registry is not None:
+                mcp.rebuild_mcp_server(registry)
+                logger.info("MCP server rebuilt with %d tools", registry.tool_count)
+        except Exception:
+            logger.exception("Failed to rebuild MCP server during config reload")
 
 
 def _refresh_agent_card(config: object | None, agent: object | None = None) -> None:
@@ -184,7 +252,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             try:
                 from forge_config import ConfigWatcher
 
-                callback = _make_reload_callback(config_path)
+                callback = _make_reload_callback(config_path, agent=agent)
                 watcher = ConfigWatcher(config_path, on_change=callback)
                 watcher.start()
             except ImportError:

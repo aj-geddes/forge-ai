@@ -2,14 +2,21 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi import FastAPI
-from forge_gateway.app import create_app, lifespan
+from forge_gateway.app import (
+    _make_reload_callback,
+    _rebuild_tool_surface,
+    _schedule_tool_rebuild,
+    create_app,
+    lifespan,
+)
 from forge_gateway.routes import health
 
 # ---------------------------------------------------------------------------
@@ -588,3 +595,269 @@ class TestLifespanHealthState:
 
         assert health._ready is False
         assert health._started is False
+
+
+# ---------------------------------------------------------------------------
+# 7. Config reload callback rebuilds agent tools and MCP server
+# ---------------------------------------------------------------------------
+
+
+class TestReloadCallbackToolRebuild:
+    """Verify the reload callback triggers build_and_swap and rebuild_mcp_server."""
+
+    async def test_reload_callback_schedules_tool_rebuild(
+        self,
+        mock_config: MagicMock,
+        mock_watcher: MagicMock,
+        config_file: Path,
+    ) -> None:
+        """Reload callback should call _schedule_tool_rebuild with new config and agent."""
+        app = FastAPI(lifespan=lifespan)
+
+        new_config = MagicMock()
+        new_config.metadata.name = "updated-forge"
+        new_config.security.api_keys = None
+
+        captured_callback: Any = None
+
+        def capture_watcher(*args: Any, **kwargs: Any) -> MagicMock:
+            nonlocal captured_callback
+            captured_callback = kwargs.get("on_change")
+            return mock_watcher
+
+        with (
+            patch.dict("os.environ", {"FORGE_CONFIG_PATH": str(config_file)}),
+            patch("forge_config.load_config", return_value=mock_config) as mock_load,
+            patch("forge_config.ConfigWatcher", side_effect=capture_watcher),
+            patch("forge_gateway.app._schedule_tool_rebuild") as mock_schedule,
+        ):
+            async with lifespan(app):
+                mock_load.return_value = new_config
+                mock_schedule.reset_mock()
+
+                captured_callback(config_file)
+
+                mock_schedule.assert_called_once()
+                call_args = mock_schedule.call_args
+                assert call_args[0][0] is new_config
+                # Agent should be present (captured during lifespan startup)
+                assert call_args[0][1] is not None
+
+    async def test_reload_callback_refreshes_agent_card_with_agent(
+        self,
+        mock_config: MagicMock,
+        mock_watcher: MagicMock,
+        config_file: Path,
+    ) -> None:
+        """Reload callback should pass both config and agent to _refresh_agent_card."""
+        app = FastAPI(lifespan=lifespan)
+
+        new_config = MagicMock()
+        new_config.metadata.name = "updated-forge"
+        new_config.security.api_keys = None
+
+        captured_callback: Any = None
+
+        def capture_watcher(*args: Any, **kwargs: Any) -> MagicMock:
+            nonlocal captured_callback
+            captured_callback = kwargs.get("on_change")
+            return mock_watcher
+
+        with (
+            patch.dict("os.environ", {"FORGE_CONFIG_PATH": str(config_file)}),
+            patch("forge_config.load_config", return_value=mock_config) as mock_load,
+            patch("forge_config.ConfigWatcher", side_effect=capture_watcher),
+            patch("forge_gateway.app._refresh_agent_card") as mock_refresh,
+        ):
+            async with lifespan(app):
+                mock_load.return_value = new_config
+                mock_refresh.reset_mock()
+
+                captured_callback(config_file)
+
+                mock_refresh.assert_called_once()
+                call_args = mock_refresh.call_args
+                assert call_args[0][0] is new_config
+                # Agent should be present (captured during lifespan startup)
+                assert call_args[0][1] is not None
+
+
+class TestRebuildToolSurface:
+    """Unit tests for the _rebuild_tool_surface async function."""
+
+    async def test_rebuild_calls_build_and_swap(self) -> None:
+        """_rebuild_tool_surface should call build_and_swap on the agent registry."""
+        from forge_config.schema import ForgeConfig
+
+        config = ForgeConfig()
+        mock_registry = AsyncMock()
+        mock_registry.build_and_swap.return_value = True
+        mock_registry.tool_count = 3
+        mock_registry.version = "abc123"
+
+        mock_agent = MagicMock()
+        mock_agent._registry = mock_registry
+
+        with patch("forge_gateway.app.mcp"):
+            await _rebuild_tool_surface(config, mock_agent)
+
+        mock_registry.build_and_swap.assert_awaited_once_with(config)
+
+    async def test_rebuild_calls_rebuild_mcp_server(self) -> None:
+        """_rebuild_tool_surface should rebuild the MCP server after tool swap."""
+        from forge_config.schema import ForgeConfig
+
+        config = ForgeConfig()
+        mock_registry = AsyncMock()
+        mock_registry.build_and_swap.return_value = True
+        mock_registry.tool_count = 5
+
+        mock_agent = MagicMock()
+        mock_agent._registry = mock_registry
+
+        with patch("forge_gateway.app.mcp") as mock_mcp_module:
+            await _rebuild_tool_surface(config, mock_agent)
+
+        mock_mcp_module.rebuild_mcp_server.assert_called_once_with(mock_registry)
+
+    async def test_rebuild_skips_when_no_agent(self) -> None:
+        """_rebuild_tool_surface should be a no-op when agent is None."""
+        from forge_config.schema import ForgeConfig
+
+        config = ForgeConfig()
+
+        with patch("forge_gateway.app.mcp") as mock_mcp_module:
+            # Should not raise
+            await _rebuild_tool_surface(config, None)
+
+        mock_mcp_module.rebuild_mcp_server.assert_not_called()
+
+    async def test_rebuild_skips_when_config_not_forge_config(self) -> None:
+        """_rebuild_tool_surface should skip when config is not a ForgeConfig."""
+        mock_agent = MagicMock()
+
+        with patch("forge_gateway.app.mcp") as mock_mcp_module:
+            await _rebuild_tool_surface("not-a-config", mock_agent)
+
+        mock_mcp_module.rebuild_mcp_server.assert_not_called()
+
+    async def test_rebuild_handles_build_and_swap_failure(self) -> None:
+        """_rebuild_tool_surface should log but not raise on build_and_swap failure."""
+        from forge_config.schema import ForgeConfig
+
+        config = ForgeConfig()
+        mock_registry = AsyncMock()
+        mock_registry.build_and_swap.side_effect = RuntimeError("build failed")
+
+        mock_agent = MagicMock()
+        mock_agent._registry = mock_registry
+
+        with patch("forge_gateway.app.mcp") as mock_mcp_module:
+            # Should not raise
+            await _rebuild_tool_surface(config, mock_agent)
+
+        # MCP rebuild should still be attempted even if build_and_swap fails
+        mock_mcp_module.rebuild_mcp_server.assert_called_once_with(mock_registry)
+
+    async def test_rebuild_handles_mcp_rebuild_failure(self) -> None:
+        """_rebuild_tool_surface should log but not raise on MCP rebuild failure."""
+        from forge_config.schema import ForgeConfig
+
+        config = ForgeConfig()
+        mock_registry = AsyncMock()
+        mock_registry.build_and_swap.return_value = True
+        mock_registry.tool_count = 2
+
+        mock_agent = MagicMock()
+        mock_agent._registry = mock_registry
+
+        with patch("forge_gateway.app.mcp") as mock_mcp_module:
+            mock_mcp_module.rebuild_mcp_server.side_effect = RuntimeError("MCP failed")
+            # Should not raise
+            await _rebuild_tool_surface(config, mock_agent)
+
+        mock_registry.build_and_swap.assert_awaited_once()
+
+    async def test_rebuild_skips_when_agent_has_no_registry(self) -> None:
+        """_rebuild_tool_surface should skip when agent has no _registry attribute."""
+        from forge_config.schema import ForgeConfig
+
+        config = ForgeConfig()
+        mock_agent = MagicMock(spec=[])  # No attributes at all
+
+        with patch("forge_gateway.app.mcp") as mock_mcp_module:
+            await _rebuild_tool_surface(config, mock_agent)
+
+        mock_mcp_module.rebuild_mcp_server.assert_not_called()
+
+
+class TestScheduleToolRebuild:
+    """Unit tests for the _schedule_tool_rebuild synchronous function."""
+
+    async def test_schedule_creates_task_on_running_loop(self) -> None:
+        """_schedule_tool_rebuild should create an asyncio task when a loop is running."""
+        from forge_config.schema import ForgeConfig
+
+        config = ForgeConfig()
+        mock_agent = MagicMock()
+        mock_agent._registry = AsyncMock()
+        mock_agent._registry.build_and_swap.return_value = False
+
+        with patch("forge_gateway.app.mcp"):
+            # We're in an async test, so a loop is running
+            _schedule_tool_rebuild(config, mock_agent)
+
+            # Give the event loop a chance to run the scheduled task
+            await asyncio.sleep(0.01)
+
+    def test_schedule_skips_when_no_running_loop(self) -> None:
+        """_schedule_tool_rebuild should not raise when no event loop is running."""
+        from forge_config.schema import ForgeConfig
+
+        config = ForgeConfig()
+
+        # Should not raise — logs a warning instead
+        _schedule_tool_rebuild(config, None)
+
+
+class TestMakeReloadCallbackAgent:
+    """Test that _make_reload_callback captures the agent reference."""
+
+    def test_callback_captures_agent(self) -> None:
+        """The closure returned by _make_reload_callback should capture the agent."""
+        mock_agent = MagicMock()
+
+        new_config = MagicMock()
+        new_config.metadata.name = "test"
+        new_config.security.api_keys = None
+
+        callback = _make_reload_callback("/tmp/forge.yaml", agent=mock_agent)
+
+        with (
+            patch("forge_config.load_config", return_value=new_config),
+            patch("forge_gateway.app._schedule_tool_rebuild") as mock_schedule,
+            patch("forge_gateway.app._init_security_gate"),
+            patch("forge_gateway.app._refresh_agent_card"),
+        ):
+            callback(Path("/tmp/forge.yaml"))
+
+            # Agent should be passed to _schedule_tool_rebuild
+            mock_schedule.assert_called_once_with(new_config, mock_agent)
+
+    def test_callback_without_agent(self) -> None:
+        """The callback should pass None when no agent was provided."""
+        new_config = MagicMock()
+        new_config.metadata.name = "test"
+        new_config.security.api_keys = None
+
+        callback = _make_reload_callback("/tmp/forge.yaml")
+
+        with (
+            patch("forge_config.load_config", return_value=new_config),
+            patch("forge_gateway.app._schedule_tool_rebuild") as mock_schedule,
+            patch("forge_gateway.app._init_security_gate"),
+            patch("forge_gateway.app._refresh_agent_card"),
+        ):
+            callback(Path("/tmp/forge.yaml"))
+
+            mock_schedule.assert_called_once_with(new_config, None)
