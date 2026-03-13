@@ -13,7 +13,7 @@ from fastapi.staticfiles import StaticFiles
 
 from forge_gateway.auth import set_api_key_config
 from forge_gateway.middleware.logging import RequestLoggingMiddleware
-from forge_gateway.routes import a2a, admin, conversational, health, metrics, programmatic
+from forge_gateway.routes import a2a, admin, conversational, health, mcp, metrics, programmatic
 from forge_gateway.security import set_security_gate
 
 logger = logging.getLogger("forge.gateway")
@@ -77,6 +77,31 @@ def _init_security_gate(config: object | None) -> None:
         set_security_gate(None)
 
 
+def _init_mcp_server(app: FastAPI, agent: object, config: object) -> None:
+    """Build the FastMCP server from the agent's tool registry and mount it.
+
+    When the agent has an initialized tool registry, this creates an MCP
+    server exposing those tools and mounts its ASGI app at ``/mcp``.
+    Failures are logged but do not prevent the gateway from starting.
+    """
+    try:
+        from forge_agent import ForgeAgent
+        from forge_config.schema import ForgeConfig
+
+        if not isinstance(agent, ForgeAgent) or not isinstance(config, ForgeConfig):
+            return
+
+        server_name = config.metadata.name or "Forge AI"
+        mcp_server = mcp.build_mcp_server(agent.registry, name=server_name)
+        mcp_app = mcp.get_mcp_asgi_app(mcp_server)
+        app.mount("/mcp", mcp_app, name="mcp")
+        logger.info("MCP server mounted at /mcp with %d tools", agent.registry.tool_count)
+    except ImportError:
+        logger.debug("MCP dependencies not available, skipping MCP server")
+    except Exception:
+        logger.exception("Failed to initialize MCP server")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Application lifespan: build tools on startup, drain on shutdown."""
@@ -110,6 +135,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 programmatic.set_agent(agent)
                 conversational.set_agent(agent)
                 a2a.set_agent(agent)
+
+                # Build MCP server from the agent's tool registry
+                _init_mcp_server(app, agent, config)
 
                 logger.info("Agent initialized successfully")
             except ImportError:
