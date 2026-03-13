@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import inspect
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
-from forge_agent.builder.workflow import WorkflowBuilder
+from forge_agent.builder.workflow import WorkflowBuilder, _default_executor
 from forge_config.schema import (
     ParameterDef,
     ParamType,
@@ -145,16 +146,60 @@ class TestWorkflowBuilder:
         assert "always_runs" in call_log
 
     @pytest.mark.anyio
-    async def test_default_executor_returns_stub(self) -> None:
-        """Without a custom executor, the default stub executor is used."""
-        workflow = _make_workflow(steps=[WorkflowStep(tool="some_tool", params={"key": "value"})])
+    async def test_default_executor_raises_error(self) -> None:
+        """_default_executor should raise RuntimeError, not return stub data."""
+        with pytest.raises(RuntimeError, match="No tool_executor provided"):
+            await _default_executor("some_tool", {"key": "value"})
 
-        builder = WorkflowBuilder(workflow)
+    @pytest.mark.anyio
+    async def test_workflow_executor_invokes_registered_tool(self) -> None:
+        """A registry-provided executor should invoke the registered tool."""
+        mock_tool = AsyncMock(return_value={"result": "success"})
+
+        async def registry_executor(tool_name: str, params: dict[str, Any]) -> Any:
+            if tool_name == "my_tool":
+                return await mock_tool(**params)
+            raise RuntimeError(f"Unknown tool: {tool_name}")
+
+        workflow = _make_workflow(
+            steps=[
+                WorkflowStep(
+                    tool="my_tool",
+                    params={"x": 1, "y": 2},
+                    output_as="step_result",
+                ),
+            ]
+        )
+
+        builder = WorkflowBuilder(workflow, tool_executor=registry_executor)
         tool = builder.build()
         result = await tool.function()
 
-        assert result["result"]["status"] == "stub"
-        assert result["result"]["tool"] == "some_tool"
+        mock_tool.assert_awaited_once_with(x=1, y=2)
+        assert result["step_result"] == {"result": "success"}
+        assert result["result"] == {"result": "success"}
+
+    @pytest.mark.anyio
+    async def test_workflow_executor_raises_on_unknown_tool(self) -> None:
+        """Executing a step that references an unregistered tool should raise."""
+
+        async def strict_executor(tool_name: str, params: dict[str, Any]) -> Any:
+            known_tools = {"known_tool"}
+            if tool_name not in known_tools:
+                raise RuntimeError(f"Tool '{tool_name}' not found in registry")
+            return {"ok": True}
+
+        workflow = _make_workflow(
+            steps=[
+                WorkflowStep(tool="nonexistent_tool", params={"a": "b"}),
+            ]
+        )
+
+        builder = WorkflowBuilder(workflow, tool_executor=strict_executor)
+        tool = builder.build()
+
+        with pytest.raises(RuntimeError, match="not found in registry"):
+            await tool.function()
 
     @pytest.mark.anyio
     async def test_input_params_available_in_context(self) -> None:

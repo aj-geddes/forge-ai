@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from forge_agent.builder.registry import ToolSurfaceRegistry
@@ -227,3 +227,49 @@ class TestToolSurfaceRegistry:
         tools = registry.tools
         tools.clear()
         assert registry.tool_count == 1  # Internal list unchanged
+
+    @pytest.mark.anyio
+    async def test_registry_passes_executor_to_workflow_builder(
+        self,
+    ) -> None:
+        """_build_tools should pass a non-None tool_executor to WorkflowBuilder."""
+        registry = ToolSurfaceRegistry()
+        config = ForgeConfig(
+            tools=ToolsConfig(
+                workflows=[
+                    Workflow(
+                        name="wf_with_executor",
+                        description="Workflow that needs an executor",
+                        steps=[
+                            WorkflowStep(tool="step_a"),
+                        ],
+                    )
+                ]
+            )
+        )
+
+        with patch(
+            "forge_agent.builder.registry.WorkflowBuilder",
+            wraps=None,
+        ) as mock_wb_cls:
+            # Set up the mock to return a Tool-like object.
+            mock_builder = MagicMock()
+            mock_tool = MagicMock(spec=Tool)
+            mock_tool.name = "wf_with_executor"
+            mock_builder.build.return_value = mock_tool
+            mock_wb_cls.return_value = mock_builder
+
+            await registry.build_and_swap(config)
+
+            mock_wb_cls.assert_called_once()
+            call_kwargs = mock_wb_cls.call_args
+            # The WorkflowBuilder should receive a tool_executor argument
+            # that is not None (i.e., a real executor, not the default).
+            if call_kwargs.kwargs:
+                executor = call_kwargs.kwargs.get("tool_executor")
+            else:
+                # Positional: WorkflowBuilder(workflow, tool_executor)
+                executor = call_kwargs.args[1] if len(call_kwargs.args) > 1 else None
+            assert executor is not None, (
+                "_build_tools must pass a non-None tool_executor to WorkflowBuilder"
+            )

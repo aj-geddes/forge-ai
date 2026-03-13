@@ -39,7 +39,8 @@ class WorkflowBuilder:
         workflow: The Workflow configuration.
         tool_executor: An async callable that executes a named tool
             with given parameters. Signature: (tool_name, params) -> result.
-            If not provided, a default executor that returns stub data is used.
+            If not provided, a default executor that raises RuntimeError
+            is used to prevent silent stub execution.
     """
 
     def __init__(
@@ -187,18 +188,23 @@ async def _execute_workflow(
     return results
 
 
-async def _default_executor(tool_name: str, params: dict[str, Any]) -> dict[str, Any]:
-    """Default stub executor for tools not yet wired up.
+async def _default_executor(tool_name: str, params: dict[str, Any]) -> Any:
+    """Default executor that raises an error when no real executor is wired.
+
+    This should never be reached in production. If it is, it means a
+    WorkflowBuilder was created without a tool_executor, which would
+    cause workflow steps to silently return fake data.
 
     Args:
         tool_name: The name of the tool to execute.
         params: The parameters for the tool.
 
-    Returns:
-        A stub result dict.
+    Raises:
+        RuntimeError: Always, to prevent silent stub execution.
     """
-    return {
-        "status": "stub",
-        "tool": tool_name,
-        "params": params,
-    }
+    msg = (
+        f"No tool_executor provided for workflow step '{tool_name}'. "
+        "WorkflowBuilder requires a real tool_executor to invoke tools. "
+        "The default stub executor is not intended for production use."
+    )
+    raise RuntimeError(msg)
