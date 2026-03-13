@@ -396,7 +396,7 @@ class TestStreamingErrors:
 
         error_event = _parse_sse_payload(events[1])
         assert "error" in error_event
-        assert "LLM connection lost" in error_event["error"]
+        assert error_event["error"] == "Internal server error"
 
         assert events[2] == "data: [DONE]"
 
@@ -478,7 +478,7 @@ class TestStreamingErrors:
 
         error_event = _parse_sse_payload(events[1])
         assert "error" in error_event
-        assert "mid-stream failure" in error_event["error"]
+        assert error_event["error"] == "Internal server error"
 
         assert events[2] == "data: [DONE]"
 
@@ -874,3 +874,53 @@ class TestChatPersonaRouting:
         call_kwargs = mock_agent.run_conversational.call_args.kwargs
         assert call_kwargs["system_prompt_override"] == "You are a coding assistant."
         assert call_kwargs["model_name_override"] == "gpt-4o-mini"
+
+
+# ---------------------------------------------------------------------------
+# 11. Error detail redaction: internal details must not leak to clients
+# ---------------------------------------------------------------------------
+
+
+class TestErrorDetailRedaction:
+    """HTTP 500 and SSE error events must not leak internal error details."""
+
+    def test_chat_internal_error_does_not_leak_details(
+        self, client: TestClient, mock_agent: AsyncMock
+    ) -> None:
+        """Non-streaming 500 response must redact exception details."""
+        mock_agent.run_conversational.side_effect = ValueError("secret internal path /etc/db.conf")
+        response = client.post(
+            "/v1/chat/completions",
+            json={"message": "Hi"},
+        )
+        assert response.status_code == 500
+        detail = response.json()["detail"]
+        assert detail == "Internal server error"
+        assert "/etc/db.conf" not in detail
+        assert "secret" not in detail
+
+    def test_streaming_error_does_not_leak_details(
+        self, client: TestClient, mock_agent: AsyncMock
+    ) -> None:
+        """SSE error events during streaming must not leak exception messages."""
+
+        async def _failing_stream() -> AsyncIterator[str]:
+            yield "partial"
+            raise ValueError("secret internal path /etc/db.conf")
+
+        mock_agent.run_conversational.return_value = _failing_stream()
+        response = client.post(
+            "/v1/chat/completions",
+            json={"message": "Hi", "stream": True, "session_id": "s-redact"},
+        )
+        events = _parse_sse_events(response.text)
+        # Should have: partial chunk, error event, [DONE]
+        assert len(events) == 3
+
+        error_event = _parse_sse_payload(events[1])
+        assert "error" in error_event
+        assert error_event["error"] == "Internal server error"
+        assert "/etc/db.conf" not in error_event["error"]
+        assert "secret" not in error_event["error"]
+
+        assert events[2] == "data: [DONE]"

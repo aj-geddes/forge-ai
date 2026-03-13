@@ -335,3 +335,22 @@ class TestInvokePersonaRouting:
         )
         assert response.status_code == 404
         programmatic.set_agent(None)
+
+
+class TestErrorDetailRedaction:
+    """HTTP 500 responses must not leak internal error details to clients."""
+
+    def test_invoke_internal_error_does_not_leak_details(
+        self, client: TestClient, mock_agent: AsyncMock
+    ) -> None:
+        """Internal exception messages must be redacted from 500 responses."""
+        mock_agent.run_structured.side_effect = ValueError("secret internal path /etc/db.conf")
+        response = client.post(
+            "/v1/agent/invoke",
+            json={"intent": "fail"},
+        )
+        assert response.status_code == 500
+        detail = response.json()["detail"]
+        assert detail == "Internal server error"
+        assert "/etc/db.conf" not in detail
+        assert "secret" not in detail

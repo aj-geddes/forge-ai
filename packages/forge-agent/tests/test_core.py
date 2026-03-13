@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock, patch
+
 import pytest
 from forge_agent.agent.core import ForgeAgent, ForgeRunResult
 from forge_config.schema import (
@@ -377,3 +379,35 @@ class TestForgeAgentMaxTurns:
         assert isinstance(result, ForgeRunResult)
         call_kwargs = mock_run.call_args.kwargs
         assert "usage_limits" not in call_kwargs
+
+
+class TestAgentNotInitializedErrors:
+    """Assert statements replaced with RuntimeError for uninitialized agent."""
+
+    @pytest.mark.anyio
+    async def test_run_conversational_without_init_raises_runtime_error(
+        self,
+    ) -> None:
+        """Calling run_conversational when init fails to set _agent raises RuntimeError."""
+        config = _make_config()
+        agent = ForgeAgent(config, model_override=TestModel())
+
+        # Stub initialize so it completes without setting _agent.
+        with patch.object(agent, "initialize", new_callable=AsyncMock) as mock_init:
+            mock_init.return_value = None
+            with pytest.raises(RuntimeError, match="not initialized"):
+                await agent.run_conversational("Hello!")
+
+    @pytest.mark.anyio
+    async def test_run_structured_without_init_raises_runtime_error(
+        self,
+    ) -> None:
+        """Calling run_structured when init fails to set _agent raises RuntimeError."""
+        config = _make_config()
+        agent = ForgeAgent(config, model_override=TestModel())
+
+        # Stub initialize so it completes without setting _agent.
+        with patch.object(agent, "initialize", new_callable=AsyncMock) as mock_init:
+            mock_init.return_value = None
+            with pytest.raises(RuntimeError, match="not initialized"):
+                await agent.run_structured("Do something")

@@ -210,7 +210,8 @@ class ForgeAgent:
         else:
             if self._agent is None:
                 await self.initialize()
-            assert self._agent is not None
+            if self._agent is None:
+                raise RuntimeError("Agent not initialized; call initialize() first")
             agent = self._agent
 
         message_history = None
@@ -271,7 +272,8 @@ class ForgeAgent:
         """
         agent = agent_override or self._agent
         context = self._context
-        assert agent is not None
+        if agent is None:
+            raise RuntimeError("Agent not initialized; call initialize() first")
 
         stream_kwargs: dict[str, Any] = {
             "message_history": message_history,
@@ -325,7 +327,8 @@ class ForgeAgent:
         else:
             if self._agent is None:
                 await self.initialize()
-            assert self._agent is not None
+            if self._agent is None:
+                raise RuntimeError("Agent not initialized; call initialize() first")
             agent = self._agent
 
         prompt = intent

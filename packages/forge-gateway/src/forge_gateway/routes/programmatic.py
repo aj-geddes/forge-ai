@@ -91,4 +91,4 @@ async def invoke(request: InvokeRequest) -> InvokeResponse:
         raise
     except Exception as e:
         logger.exception("Agent invocation failed")
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        raise HTTPException(status_code=500, detail="Internal server error") from e

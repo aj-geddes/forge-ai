@@ -62,9 +62,9 @@ async def _sse_generator(
         async for text in chunks:
             payload = json.dumps({"chunk": text, "session_id": session_id})
             yield f"data: {payload}\n\n"
-    except Exception as exc:
+    except Exception:
         logger.exception("Error during streaming response")
-        error_payload = json.dumps({"error": str(exc), "session_id": session_id})
+        error_payload = json.dumps({"error": "Internal server error", "session_id": session_id})
         yield f"data: {error_payload}\n\n"
     finally:
         yield "data: [DONE]\n\n"
@@ -113,7 +113,7 @@ async def _handle_non_streaming(
         raise
     except Exception as e:
         logger.exception("Conversational request failed")
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        raise HTTPException(status_code=500, detail="Internal server error") from e
 
 
 async def _handle_streaming(
@@ -133,7 +133,7 @@ async def _handle_streaming(
         )
     except Exception as e:
         logger.exception("Failed to start streaming response")
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        raise HTTPException(status_code=500, detail="Internal server error") from e
 
     return StreamingResponse(
         _sse_generator(chunks, session_id),
