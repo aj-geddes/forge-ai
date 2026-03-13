@@ -6,11 +6,14 @@ import logging
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 
+from forge_gateway.auth import set_api_key_config
 from forge_gateway.middleware.logging import RequestLoggingMiddleware
-from forge_gateway.routes import a2a, conversational, health, metrics, programmatic
+from forge_gateway.routes import a2a, admin, conversational, health, metrics, programmatic
 
 logger = logging.getLogger("forge.gateway")
 
@@ -26,6 +29,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         # Try to initialize the agent from config
         config_path = os.environ.get("FORGE_CONFIG_PATH", "forge.yaml")
+        config = None
+        agent = None
 
         try:
             from forge_config import load_config
@@ -54,6 +59,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         except Exception:
             logger.warning("No config loaded, running with defaults")
 
+        # Wire admin state and API key auth
+        admin.set_state(config=config, config_path=config_path, agent=agent)
+        if config is not None:
+            set_api_key_config(config.security.api_keys)
+
         health.set_ready(True)
         logger.info("Forge Gateway ready")
 
@@ -77,11 +87,22 @@ def create_app() -> FastAPI:
     # Middleware
     app.add_middleware(RequestLoggingMiddleware)
 
-    # Routes
+    # API Routes
     app.include_router(health.router)
     app.include_router(programmatic.router)
     app.include_router(conversational.router)
     app.include_router(a2a.router)
     app.include_router(metrics.router)
+    app.include_router(admin.router)
+
+    # Serve frontend SPA if static directory exists
+    static_dir = Path(__file__).parent.parent.parent.parent / "static"
+    if not static_dir.exists():
+        # Also check for an absolute /app/static path (Docker)
+        static_dir = Path("/app/static")
+
+    if static_dir.exists():
+        app.mount("/", StaticFiles(directory=str(static_dir), html=True), name="ui")
+        logger.info("Serving UI from %s", static_dir)
 
     return app

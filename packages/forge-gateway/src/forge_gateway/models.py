@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from enum import Enum
 from typing import Any
 
 from pydantic import BaseModel, Field
+
+# --- Agent API models ---
 
 
 class InvokeRequest(BaseModel):
@@ -58,3 +61,74 @@ class HealthResponse(BaseModel):
     status: str
     version: str = ""
     components: dict[str, str] = Field(default_factory=dict)
+
+
+# --- Admin API models ---
+
+
+class AdminConfigResponse(BaseModel):
+    """Response containing the current config (secrets redacted)."""
+
+    config: dict[str, Any]
+    path: str = ""
+
+
+class AdminConfigUpdateRequest(BaseModel):
+    """Request to update the config."""
+
+    config: dict[str, Any]
+
+
+class AdminConfigUpdateResponse(BaseModel):
+    """Response from a config update operation."""
+
+    success: bool
+    reloaded: bool = False
+    message: str = ""
+
+
+class AdminToolInfo(BaseModel):
+    """Metadata about a registered tool."""
+
+    name: str
+    description: str = ""
+    source: str = "configured"
+
+
+class AdminToolPreviewRequest(BaseModel):
+    """Request to preview tools from an OpenAPI source."""
+
+    source: dict[str, Any]
+
+
+class AdminToolPreviewResponse(BaseModel):
+    """Response from a tool preview (dry-run) operation."""
+
+    tools: list[AdminToolInfo] = Field(default_factory=list)
+    count: int = 0
+
+
+class AdminSessionResponse(BaseModel):
+    """Metadata about an active session."""
+
+    session_id: str
+    message_count: int = 0
+    agent: str | None = None
+
+
+class AdminPeerStatus(str, Enum):
+    """Peer connection status."""
+
+    REACHABLE = "reachable"
+    UNREACHABLE = "unreachable"
+    UNKNOWN = "unknown"
+
+
+class AdminPeerResponse(BaseModel):
+    """Metadata about a configured peer."""
+
+    name: str
+    endpoint: str
+    trust_level: str = "low"
+    capabilities: list[str] = Field(default_factory=list)
+    status: AdminPeerStatus = AdminPeerStatus.UNKNOWN
