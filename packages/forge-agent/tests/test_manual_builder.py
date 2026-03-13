@@ -9,13 +9,18 @@ from unittest.mock import AsyncMock, MagicMock
 import httpx
 import pytest
 from forge_agent.builder.manual import ManualToolBuilder
+from forge_config.exceptions import SecretResolutionError
 from forge_config.schema import (
+    AuthConfig,
+    AuthType,
     HTTPMethod,
     ManualTool,
     ManualToolAPI,
     ParameterDef,
     ParamType,
     ResponseMapping,
+    SecretRef,
+    SecretSource,
 )
 
 
@@ -183,3 +188,132 @@ class TestManualToolBuilder:
         params = list(sig.parameters.values())
         annotations = [p.annotation for p in params]
         assert annotations == [str, int, float, bool, list, dict]
+
+
+# ---------------------------------------------------------------------------
+# Test: ManualToolBuilder secret resolution
+# ---------------------------------------------------------------------------
+
+
+class _StubResolver:
+    """Test double that returns predictable values for secret refs."""
+
+    def __init__(self, secrets: dict[str, str]) -> None:
+        self._secrets = secrets
+
+    def resolve(self, ref: SecretRef) -> str:
+        if ref.name in self._secrets:
+            return self._secrets[ref.name]
+        msg = f"Secret '{ref.name}' not found"
+        raise SecretResolutionError(msg)
+
+
+class TestManualToolBuilderAuth:
+    """Tests for ManualToolBuilder secret resolution."""
+
+    @pytest.mark.anyio
+    async def test_bearer_auth_resolved_at_build_time(self) -> None:
+        """Bearer auth should resolve the token and include it in requests."""
+        config = ManualTool(
+            name="authed_tool",
+            description="Tool with bearer auth",
+            api=ManualToolAPI(
+                url="https://api.example.com/protected",
+                auth=AuthConfig(
+                    type=AuthType.BEARER,
+                    token=SecretRef(source=SecretSource.ENV, name="TOKEN"),
+                ),
+            ),
+        )
+        resolver = _StubResolver({"TOKEN": "real-token-value"})
+
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"ok": True}
+        mock_response.raise_for_status.return_value = None
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.request = AsyncMock(return_value=mock_response)
+
+        builder = ManualToolBuilder(config, http_client=mock_client, secret_resolver=resolver)
+        tool = builder.build()
+        await tool.function()
+
+        call_kwargs = mock_client.request.call_args
+        headers = call_kwargs.kwargs["headers"]
+        assert headers["Authorization"] == "Bearer real-token-value"
+
+    @pytest.mark.anyio
+    async def test_api_key_auth_resolved_at_build_time(self) -> None:
+        """API key auth should resolve the key and include it in requests."""
+        config = ManualTool(
+            name="key_tool",
+            description="Tool with API key auth",
+            api=ManualToolAPI(
+                url="https://api.example.com/data",
+                auth=AuthConfig(
+                    type=AuthType.API_KEY,
+                    token=SecretRef(source=SecretSource.ENV, name="API_KEY"),
+                    header_name="X-Api-Key",
+                ),
+            ),
+        )
+        resolver = _StubResolver({"API_KEY": "key-12345"})
+
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"ok": True}
+        mock_response.raise_for_status.return_value = None
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.request = AsyncMock(return_value=mock_response)
+
+        builder = ManualToolBuilder(config, http_client=mock_client, secret_resolver=resolver)
+        tool = builder.build()
+        await tool.function()
+
+        call_kwargs = mock_client.request.call_args
+        headers = call_kwargs.kwargs["headers"]
+        assert headers["X-Api-Key"] == "key-12345"
+
+    def test_auth_without_resolver_raises_at_build_time(self) -> None:
+        """Auth configured without a resolver should fail fast at build time."""
+        config = ManualTool(
+            name="fail_tool",
+            description="Should fail",
+            api=ManualToolAPI(
+                url="https://api.example.com/x",
+                auth=AuthConfig(
+                    type=AuthType.BEARER,
+                    token=SecretRef(source=SecretSource.ENV, name="TOKEN"),
+                ),
+            ),
+        )
+        builder = ManualToolBuilder(config)  # No resolver
+
+        with pytest.raises(SecretResolutionError, match="SecretResolver"):
+            builder.build()
+
+    def test_missing_secret_raises_at_build_time(self) -> None:
+        """A resolver that fails should propagate the error at build time."""
+        config = ManualTool(
+            name="fail_tool",
+            description="Should fail",
+            api=ManualToolAPI(
+                url="https://api.example.com/x",
+                auth=AuthConfig(
+                    type=AuthType.API_KEY,
+                    token=SecretRef(source=SecretSource.ENV, name="MISSING"),
+                    header_name="X-Key",
+                ),
+            ),
+        )
+        resolver = _StubResolver({})
+
+        builder = ManualToolBuilder(config, secret_resolver=resolver)
+
+        with pytest.raises(SecretResolutionError, match="MISSING"):
+            builder.build()
+
+    def test_no_auth_works_without_resolver(self) -> None:
+        """AuthType.NONE should work fine without a resolver."""
+        config = _make_manual_tool()
+        builder = ManualToolBuilder(config)  # No resolver, no auth
+        tool = builder.build()
+        assert tool.name == "test_tool"

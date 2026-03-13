@@ -11,8 +11,11 @@ import re
 from typing import Any
 
 import httpx
-from forge_config.schema import AuthType, ManualTool, ManualToolAPI, ParamType
+from forge_config.schema import ManualTool, ManualToolAPI, ParamType
+from forge_config.secret_resolver import SecretResolver
 from pydantic_ai.tools import Tool
+
+from forge_agent.builder.openapi import _resolve_auth_headers
 
 # Mapping from ParamType enum to Python annotation types.
 _PARAM_TYPE_MAP: dict[ParamType, type] = {
@@ -34,22 +37,36 @@ class ManualToolBuilder:
     """
 
     def __init__(
-        self, tool_config: ManualTool, http_client: httpx.AsyncClient | None = None
+        self,
+        tool_config: ManualTool,
+        http_client: httpx.AsyncClient | None = None,
+        secret_resolver: SecretResolver | None = None,
     ) -> None:
         self._config = tool_config
         self._http_client = http_client
+        self._secret_resolver = secret_resolver
 
     def build(self) -> Tool[None]:
         """Build a PydanticAI Tool from the manual tool configuration.
 
+        Auth secrets are resolved at build time so that failures
+        surface immediately rather than at request time.
+
         Returns:
             A PydanticAI Tool wrapping an async HTTP-calling function.
+
+        Raises:
+            SecretResolutionError: If auth is configured but the secret
+                cannot be resolved.
         """
         api_config = self._config.api
         tool_name = self._config.name
         tool_description = self._config.description
         param_defs = self._config.parameters
         http_client = self._http_client
+
+        # Resolve auth headers once at build time (fail-fast).
+        auth_headers = _resolve_auth_headers(api_config.auth, self._secret_resolver)
 
         # Build the parameter list for the function signature.
         params: list[inspect.Parameter] = []
@@ -73,7 +90,7 @@ class ManualToolBuilder:
             annotations[pdef.name] = _PARAM_TYPE_MAP.get(pdef.type, str)
 
         async def tool_func(**kwargs: Any) -> Any:
-            return await _execute_api_call(api_config, kwargs, http_client)
+            return await _execute_api_call(api_config, kwargs, auth_headers, http_client)
 
         # Assign the constructed signature and metadata.
         tool_func.__signature__ = sig  # type: ignore[attr-defined]
@@ -125,6 +142,7 @@ def _resolve_template(template: Any, params: dict[str, Any]) -> Any:
 async def _execute_api_call(
     api_config: ManualToolAPI,
     params: dict[str, Any],
+    auth_headers: dict[str, str],
     http_client: httpx.AsyncClient | None = None,
 ) -> Any:
     """Execute an HTTP API call based on ManualToolAPI configuration.
@@ -132,6 +150,7 @@ async def _execute_api_call(
     Args:
         api_config: The API call configuration.
         params: Parameter values from the tool invocation.
+        auth_headers: Pre-resolved authentication headers.
         http_client: Optional pre-configured httpx client.
 
     Returns:
@@ -139,10 +158,10 @@ async def _execute_api_call(
     """
     url = _resolve_template_string(api_config.resolved_url, params)
 
-    headers = {k: _resolve_template_string(v, params) for k, v in api_config.headers.items()}
-
-    # Apply authentication headers.
-    _apply_auth_headers(api_config, headers)
+    # Start with pre-resolved auth headers, then layer on config headers.
+    headers = dict(auth_headers)
+    for k, v in api_config.headers.items():
+        headers[k] = _resolve_template_string(v, params)
 
     body = None
     if api_config.body_template is not None:
@@ -173,30 +192,6 @@ async def _execute_api_call(
     finally:
         if should_close:
             await client.aclose()
-
-
-def _apply_auth_headers(api_config: ManualToolAPI, headers: dict[str, str]) -> None:
-    """Apply authentication headers based on AuthConfig.
-
-    Args:
-        api_config: The API configuration containing auth settings.
-        headers: Headers dict to mutate with auth values.
-    """
-    auth = api_config.auth
-    if auth.type == AuthType.NONE:
-        return
-
-    # In a real implementation, secrets would be resolved via forge-security.
-    # For now, we set placeholder values that tests can mock.
-    if auth.type == AuthType.BEARER:
-        headers[auth.header_name] = "Bearer <resolved-token>"
-    elif auth.type == AuthType.API_KEY:
-        headers[auth.header_name] = "<resolved-api-key>"
-    elif auth.type == AuthType.BASIC:
-        import base64
-
-        creds = base64.b64encode(b"<user>:<pass>").decode()
-        headers[auth.header_name] = f"Basic {creds}"
 
 
 def _apply_response_mapping(result: Any, api_config: ManualToolAPI) -> Any:

@@ -30,6 +30,11 @@ from forge_config.schema import (
     Workflow,
     WorkflowStep,
 )
+from forge_config.secret_resolver import (
+    CompositeSecretResolver,
+    EnvSecretResolver,
+    SecretResolver,
+)
 from forge_config.watcher import ConfigWatcher
 
 __all__ = [
@@ -37,10 +42,12 @@ __all__ = [
     "AgentWeaveConfig",
     "APIKeyConfig",
     "AuthConfig",
+    "CompositeSecretResolver",
     "ConfigError",
     "ConfigLoadError",
     "ConfigValidationError",
     "ConfigWatcher",
+    "EnvSecretResolver",
     "ForgeConfig",
     "ForgeMetadata",
     "LiteLLMConfig",
@@ -53,6 +60,7 @@ __all__ = [
     "ResponseMapping",
     "SecretRef",
     "SecretResolutionError",
+    "SecretResolver",
     "SecurityConfig",
     "ToolsConfig",
     "TrustLevel",

@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 
 from forge_config.schema import ForgeConfig
+from forge_config.secret_resolver import SecretResolver
 from forge_config.versioning import compute_surface_version
 from pydantic_ai.tools import Tool
 
@@ -28,10 +29,11 @@ class ToolSurfaceRegistry:
     via content hashing prevents unnecessary rebuilds.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, secret_resolver: SecretResolver | None = None) -> None:
         self._tools: list[Tool[None]] = []
         self._version: str = ""
         self._lock = asyncio.Lock()
+        self._secret_resolver = secret_resolver
 
     @property
     def tools(self) -> list[Tool[None]]:
@@ -97,15 +99,16 @@ class ToolSurfaceRegistry:
             Complete list of built tools.
         """
         tools: list[Tool[None]] = []
+        resolver = self._secret_resolver
 
         # Build OpenAPI tools (async since specs may be fetched remotely).
         for source in config.tools.openapi_sources:
-            openapi_builder = OpenAPIToolBuilder(source)
+            openapi_builder = OpenAPIToolBuilder(source, secret_resolver=resolver)
             tools.extend(await openapi_builder.build())
 
         # Build manual tools.
         for manual in config.tools.manual_tools:
-            manual_builder = ManualToolBuilder(manual)
+            manual_builder = ManualToolBuilder(manual, secret_resolver=resolver)
             tools.append(manual_builder.build())
 
         # Build workflow tools.

@@ -8,7 +8,12 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from forge_agent.builder.openapi import OpenAPIToolBuilder, _sanitize_name
+from forge_agent.builder.openapi import (
+    OpenAPIToolBuilder,
+    _resolve_auth_headers,
+    _sanitize_name,
+)
+from forge_config.exceptions import SecretResolutionError
 from forge_config.schema import AuthConfig, AuthType, OpenAPISource, SecretRef, SecretSource
 
 # ---------------------------------------------------------------------------
@@ -646,7 +651,7 @@ class TestOpenAPIToolBuilderHTTPCalls:
 
     @pytest.mark.anyio
     async def test_bearer_auth_headers_applied(self) -> None:
-        """Bearer auth should add an Authorization header."""
+        """Bearer auth should resolve the token and add an Authorization header."""
         source = _make_source(
             include_operations=["listPets"],
             auth=AuthConfig(
@@ -654,7 +659,12 @@ class TestOpenAPIToolBuilderHTTPCalls:
                 token=SecretRef(source=SecretSource.ENV, name="API_TOKEN"),
             ),
         )
-        builder = OpenAPIToolBuilder(source)
+
+        class StubResolver:
+            def resolve(self, ref: SecretRef) -> str:
+                return "my-secret-token"
+
+        builder = OpenAPIToolBuilder(source, secret_resolver=StubResolver())
 
         with patch.object(
             builder,
@@ -681,11 +691,11 @@ class TestOpenAPIToolBuilderHTTPCalls:
         call_kwargs = mock_client.request.call_args
         headers = call_kwargs.kwargs["headers"]
         assert "Authorization" in headers
-        assert headers["Authorization"].startswith("Bearer ")
+        assert headers["Authorization"] == "Bearer my-secret-token"
 
     @pytest.mark.anyio
     async def test_api_key_auth_headers_applied(self) -> None:
-        """API key auth should add the configured header."""
+        """API key auth should resolve the key and add the configured header."""
         source = _make_source(
             include_operations=["listPets"],
             auth=AuthConfig(
@@ -694,7 +704,12 @@ class TestOpenAPIToolBuilderHTTPCalls:
                 header_name="X-API-Key",
             ),
         )
-        builder = OpenAPIToolBuilder(source)
+
+        class StubResolver:
+            def resolve(self, ref: SecretRef) -> str:
+                return "my-api-key-value"
+
+        builder = OpenAPIToolBuilder(source, secret_resolver=StubResolver())
 
         with patch.object(
             builder,
@@ -721,6 +736,59 @@ class TestOpenAPIToolBuilderHTTPCalls:
         call_kwargs = mock_client.request.call_args
         headers = call_kwargs.kwargs["headers"]
         assert "X-API-Key" in headers
+        assert headers["X-API-Key"] == "my-api-key-value"
+
+    @pytest.mark.anyio
+    async def test_auth_without_resolver_raises(self) -> None:
+        """Auth configured without a SecretResolver should fail fast at build time."""
+        source = _make_source(
+            include_operations=["listPets"],
+            auth=AuthConfig(
+                type=AuthType.BEARER,
+                token=SecretRef(source=SecretSource.ENV, name="API_TOKEN"),
+            ),
+        )
+        builder = OpenAPIToolBuilder(source)  # No resolver
+
+        with (
+            patch.object(
+                builder,
+                "_fetch_remote_spec",
+                new_callable=AsyncMock,
+                return_value=_make_petstore_spec(),
+            ),
+            pytest.raises(SecretResolutionError, match="SecretResolver"),
+        ):
+            await builder.build()
+
+    @pytest.mark.anyio
+    async def test_auth_resolution_failure_raises(self) -> None:
+        """A resolver that fails should propagate the error at build time."""
+        source = _make_source(
+            include_operations=["listPets"],
+            auth=AuthConfig(
+                type=AuthType.BEARER,
+                token=SecretRef(source=SecretSource.ENV, name="MISSING_TOKEN"),
+            ),
+        )
+
+        class FailingResolver:
+            def resolve(self, ref: SecretRef) -> str:
+                msg = f"Secret '{ref.name}' not found"
+                raise SecretResolutionError(msg)
+
+        builder = OpenAPIToolBuilder(source, secret_resolver=FailingResolver())
+
+        with (
+            patch.object(
+                builder,
+                "_fetch_remote_spec",
+                new_callable=AsyncMock,
+                return_value=_make_petstore_spec(),
+            ),
+            pytest.raises(SecretResolutionError, match="MISSING_TOKEN"),
+        ):
+            await builder.build()
 
     @pytest.mark.anyio
     async def test_injected_http_client_used(self) -> None:
@@ -1075,3 +1143,86 @@ class TestOpenAPIToolBuilderEdgeCases:
         sig = inspect.signature(tools[0].function)
         # X-Request-Id gets sanitized to X_Request_Id.
         assert "X_Request_Id" in sig.parameters
+
+
+# ---------------------------------------------------------------------------
+# Test: _resolve_auth_headers unit tests
+# ---------------------------------------------------------------------------
+
+
+class _StubResolver:
+    """Test double that returns predictable values for secret refs."""
+
+    def __init__(self, secrets: dict[str, str]) -> None:
+        self._secrets = secrets
+
+    def resolve(self, ref: SecretRef) -> str:
+        if ref.name in self._secrets:
+            return self._secrets[ref.name]
+        msg = f"Secret '{ref.name}' not found"
+        raise SecretResolutionError(msg)
+
+
+class TestResolveAuthHeaders:
+    """Unit tests for _resolve_auth_headers."""
+
+    def test_none_auth_returns_empty_dict(self) -> None:
+        """AuthType.NONE should produce no headers."""
+        auth = AuthConfig(type=AuthType.NONE)
+        result = _resolve_auth_headers(auth, None)
+        assert result == {}
+
+    def test_bearer_resolves_token(self) -> None:
+        """Bearer auth should resolve the token SecretRef."""
+        auth = AuthConfig(
+            type=AuthType.BEARER,
+            token=SecretRef(source=SecretSource.ENV, name="TOKEN"),
+        )
+        resolver = _StubResolver({"TOKEN": "abc123"})
+        result = _resolve_auth_headers(auth, resolver)
+        assert result == {"Authorization": "Bearer abc123"}
+
+    def test_api_key_resolves_token(self) -> None:
+        """API key auth should resolve the token SecretRef."""
+        auth = AuthConfig(
+            type=AuthType.API_KEY,
+            token=SecretRef(source=SecretSource.ENV, name="KEY"),
+            header_name="X-Api-Key",
+        )
+        resolver = _StubResolver({"KEY": "secret-key"})
+        result = _resolve_auth_headers(auth, resolver)
+        assert result == {"X-Api-Key": "secret-key"}
+
+    def test_basic_resolves_username_and_password(self) -> None:
+        """Basic auth should resolve both username and password."""
+        import base64
+
+        auth = AuthConfig(
+            type=AuthType.BASIC,
+            username=SecretRef(source=SecretSource.ENV, name="USER"),
+            password=SecretRef(source=SecretSource.ENV, name="PASS"),
+        )
+        resolver = _StubResolver({"USER": "admin", "PASS": "s3cret"})
+        result = _resolve_auth_headers(auth, resolver)
+        expected_creds = base64.b64encode(b"admin:s3cret").decode()
+        assert result == {"Authorization": f"Basic {expected_creds}"}
+
+    def test_no_resolver_with_auth_raises(self) -> None:
+        """Auth requiring secrets without a resolver should raise."""
+        auth = AuthConfig(
+            type=AuthType.BEARER,
+            token=SecretRef(source=SecretSource.ENV, name="TOKEN"),
+        )
+        with pytest.raises(SecretResolutionError, match="SecretResolver"):
+            _resolve_auth_headers(auth, None)
+
+    def test_missing_secret_raises(self) -> None:
+        """A resolver that cannot find the secret should raise."""
+        auth = AuthConfig(
+            type=AuthType.API_KEY,
+            token=SecretRef(source=SecretSource.ENV, name="MISSING"),
+            header_name="X-Api-Key",
+        )
+        resolver = _StubResolver({})
+        with pytest.raises(SecretResolutionError, match="MISSING"):
+            _resolve_auth_headers(auth, resolver)

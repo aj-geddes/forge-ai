@@ -15,7 +15,9 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+from forge_config.exceptions import SecretResolutionError
 from forge_config.schema import AuthConfig, AuthType, OpenAPISource
+from forge_config.secret_resolver import SecretResolver
 from pydantic_ai.tools import Tool
 
 logger = logging.getLogger(__name__)
@@ -43,24 +45,33 @@ class OpenAPIToolBuilder:
         self,
         source: OpenAPISource,
         http_client: httpx.AsyncClient | None = None,
+        secret_resolver: SecretResolver | None = None,
     ) -> None:
         self._source = source
         self._http_client = http_client
+        self._secret_resolver = secret_resolver
 
     async def build(self) -> list[Tool[None]]:
         """Build tool definitions from the OpenAPI spec.
 
         Fetches/reads the spec, parses operations, applies filters,
-        and generates PydanticAI Tool objects.
+        and generates PydanticAI Tool objects. Auth secrets are resolved
+        at build time so that failures surface early.
 
         Returns:
             List of PydanticAI Tool objects, one per matching operation.
+
+        Raises:
+            SecretResolutionError: If auth is configured but the secret
+                cannot be resolved.
         """
         spec = await self._load_spec()
         base_url = self._extract_base_url(spec)
         operations = self._extract_operations(spec)
         filtered = self._filter_operations(operations)
-        return self._build_tools(filtered, base_url)
+        # Resolve auth headers once at build time (fail-fast).
+        auth_headers = _resolve_auth_headers(self._source.auth, self._secret_resolver)
+        return self._build_tools(filtered, base_url, auth_headers)
 
     async def _load_spec(self) -> dict[str, Any]:
         """Load the OpenAPI spec from URL, local path, or inline spec.
@@ -244,19 +255,20 @@ class OpenAPIToolBuilder:
         self,
         operations: list[dict[str, Any]],
         base_url: str,
+        auth_headers: dict[str, str],
     ) -> list[Tool[None]]:
         """Build PydanticAI Tool objects from parsed operations.
 
         Args:
             operations: The filtered list of operations.
             base_url: The base URL for API calls.
+            auth_headers: Pre-resolved authentication headers.
 
         Returns:
             List of PydanticAI Tool objects.
         """
         tools: list[Tool[None]] = []
         route_map = self._source.route_map
-        auth = self._source.auth
         prefix = self._source.prefix
         http_client = self._http_client
 
@@ -284,7 +296,7 @@ class OpenAPIToolBuilder:
                 base_url=base_url,
                 parameters=op["parameters"],
                 request_body=op["request_body"],
-                auth=auth,
+                auth_headers=auth_headers,
                 http_client=http_client,
             )
             tools.append(tool)
@@ -319,7 +331,7 @@ def _build_tool_function(
     base_url: str,
     parameters: list[dict[str, Any]],
     request_body: dict[str, Any] | None,
-    auth: AuthConfig,
+    auth_headers: dict[str, str],
     http_client: httpx.AsyncClient | None,
 ) -> Tool[None]:
     """Build a single PydanticAI Tool for an OpenAPI operation.
@@ -335,7 +347,7 @@ def _build_tool_function(
         base_url: The base URL for the API.
         parameters: OpenAPI parameter definitions.
         request_body: OpenAPI requestBody definition or None.
-        auth: Authentication configuration.
+        auth_headers: Pre-resolved authentication headers.
         http_client: Optional pre-configured httpx client.
 
     Returns:
@@ -412,7 +424,7 @@ def _build_tool_function(
             query_params=query_param_names,
             header_params=header_param_names,
             has_body=has_body,
-            auth=auth,
+            auth_headers=auth_headers,
             http_client=http_client,
             call_kwargs=kwargs,
         )
@@ -426,25 +438,73 @@ def _build_tool_function(
     return Tool(tool_func, name=name)
 
 
-def _apply_auth_headers(auth: AuthConfig, headers: dict[str, str]) -> None:
-    """Apply authentication headers based on AuthConfig.
+def _resolve_auth_headers(
+    auth: AuthConfig,
+    resolver: SecretResolver | None,
+) -> dict[str, str]:
+    """Resolve authentication secrets and return headers to apply.
+
+    Secrets are resolved once at build time so that missing or
+    misconfigured secrets surface immediately rather than at
+    request time.
 
     Args:
         auth: The authentication configuration.
-        headers: Headers dict to mutate with auth values.
+        resolver: Secret resolver for looking up secret values.
+
+    Returns:
+        A dict of header-name to header-value for authentication.
+
+    Raises:
+        SecretResolutionError: If auth requires a secret but no
+            resolver is provided, or if the secret cannot be resolved.
     """
     if auth.type == AuthType.NONE:
-        return
+        return {}
+
+    if resolver is None:
+        msg = f"Auth type '{auth.type.value}' requires a SecretResolver, but none was provided"
+        raise SecretResolutionError(msg)
 
     if auth.type == AuthType.BEARER:
-        headers[auth.header_name] = "Bearer <resolved-token>"
-    elif auth.type == AuthType.API_KEY:
-        headers[auth.header_name] = "<resolved-api-key>"
-    elif auth.type == AuthType.BASIC:
-        import base64
+        return _resolve_bearer_headers(auth, resolver)
+    if auth.type == AuthType.API_KEY:
+        return _resolve_api_key_headers(auth, resolver)
+    if auth.type == AuthType.BASIC:
+        return _resolve_basic_headers(auth, resolver)
 
-        creds = base64.b64encode(b"<user>:<pass>").decode()
-        headers[auth.header_name] = f"Basic {creds}"
+    return {}
+
+
+def _resolve_bearer_headers(auth: AuthConfig, resolver: SecretResolver) -> dict[str, str]:
+    """Resolve bearer token auth into headers."""
+    if auth.token is None:
+        msg = "Bearer auth requires a token SecretRef"
+        raise SecretResolutionError(msg)
+    token = resolver.resolve(auth.token)
+    return {auth.header_name: f"Bearer {token}"}
+
+
+def _resolve_api_key_headers(auth: AuthConfig, resolver: SecretResolver) -> dict[str, str]:
+    """Resolve API key auth into headers."""
+    if auth.token is None:
+        msg = "API key auth requires a token SecretRef"
+        raise SecretResolutionError(msg)
+    api_key = resolver.resolve(auth.token)
+    return {auth.header_name: api_key}
+
+
+def _resolve_basic_headers(auth: AuthConfig, resolver: SecretResolver) -> dict[str, str]:
+    """Resolve basic auth credentials into headers."""
+    import base64
+
+    if auth.username is None or auth.password is None:
+        msg = "Basic auth requires both username and password SecretRefs"
+        raise SecretResolutionError(msg)
+    username = resolver.resolve(auth.username)
+    password = resolver.resolve(auth.password)
+    creds = base64.b64encode(f"{username}:{password}".encode()).decode()
+    return {auth.header_name: f"Basic {creds}"}
 
 
 async def _execute_openapi_call(
@@ -456,7 +516,7 @@ async def _execute_openapi_call(
     query_params: set[str],
     header_params: set[str],
     has_body: bool,
-    auth: AuthConfig,
+    auth_headers: dict[str, str],
     http_client: httpx.AsyncClient | None,
     call_kwargs: dict[str, Any],
 ) -> Any:
@@ -470,7 +530,7 @@ async def _execute_openapi_call(
         query_params: Set of query parameter names.
         header_params: Set of header parameter names.
         has_body: Whether the operation expects a JSON body.
-        auth: Authentication configuration.
+        auth_headers: Pre-resolved authentication headers.
         http_client: Optional pre-configured httpx client.
         call_kwargs: The keyword arguments from the tool invocation.
 
@@ -493,15 +553,12 @@ async def _execute_openapi_call(
         if safe_name in call_kwargs and call_kwargs[safe_name] is not None:
             query[param_name] = call_kwargs[safe_name]
 
-    # Collect header parameters.
-    headers: dict[str, str] = {}
+    # Collect header parameters — start with pre-resolved auth headers.
+    headers: dict[str, str] = dict(auth_headers)
     for param_name in header_params:
         safe_name = _sanitize_name(param_name)
         if safe_name in call_kwargs and call_kwargs[safe_name] is not None:
             headers[param_name] = str(call_kwargs[safe_name])
-
-    # Apply auth headers.
-    _apply_auth_headers(auth, headers)
 
     # Extract body.
     body = call_kwargs.get("body") if has_body else None
