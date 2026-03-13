@@ -223,24 +223,34 @@ class SecurityGate:
     async def authenticate(self, caller_id: str) -> str:
         """Resolve and return the verified caller identity string.
 
-        When ``_jwt_secret`` is configured and *caller_id* looks like a
-        JWT (contains two dots), the token is decoded and verified using
-        HS256.  The ``sub`` claim is returned as the authenticated
-        identity.
+        When ``_jwt_secret`` is configured, the method attempts to
+        decode *caller_id* as a JWT using HS256.  PyJWT's exception
+        hierarchy distinguishes three outcomes:
 
-        When no ``_jwt_secret`` is configured, the method falls through
-        to trust-as-is behaviour for dev/testing compatibility and logs
-        a warning once.
+        * **Successful decode** -- the ``sub`` claim is returned as
+          the authenticated identity.
+        * **Valid JWT structure but verification failed**
+          (``InvalidSignatureError``, ``ExpiredSignatureError``, or
+          other ``InvalidTokenError`` subclasses that are *not* plain
+          ``DecodeError``) -- the token is a real JWT that failed
+          validation, so the request is **denied** via
+          ``JWTAuthenticationError``.
+        * **Not a JWT at all** (``DecodeError``, excluding its
+          ``InvalidSignatureError`` subclass) -- the input is not a
+          valid JWT (e.g. an API key, semver string, or SPIFFE ID),
+          so the method falls through to trust-as-is behaviour.
+
+        When no ``_jwt_secret`` is configured, *caller_id* is trusted
+        as-is for dev/testing compatibility and a warning is logged
+        once.
         """
         # Ensure our own identity is available
         _our_id = await self._identity.get_identity()
 
-        looks_like_jwt = caller_id.count(".") == 2
-
-        if self._jwt_secret is not None and looks_like_jwt:
+        if self._jwt_secret is not None:
             return self._verify_jwt(caller_id)
 
-        if self._jwt_secret is None and not self._jwt_warning_logged:
+        if not self._jwt_warning_logged:
             logger.warning(
                 "No jwt_secret configured — caller_id trusted as-is. "
                 "Set security.jwt_secret in config for production use."
@@ -250,10 +260,33 @@ class SecurityGate:
         return caller_id
 
     def _verify_jwt(self, token: str) -> str:
-        """Decode a JWT token and return the ``sub`` claim.
+        """Attempt to decode *token* as a JWT, falling back to raw identity.
 
-        Raises ``GateResult`` denial indirectly by re-raising
-        ``jwt.PyJWTError`` so the caller can handle it.
+        Uses PyJWT's exception hierarchy to distinguish "not a JWT"
+        from "is a JWT but failed verification":
+
+        * ``InvalidSignatureError`` (subclass of ``DecodeError``) is
+          caught **first** -- the token has valid JWT structure but
+          the signature does not match.  **Denied.**
+        * ``ExpiredSignatureError`` / other ``InvalidTokenError`` --
+          the token is a real JWT but a claim check failed (expired,
+          invalid issuer, etc.).  **Denied.**
+        * ``DecodeError`` (excluding ``InvalidSignatureError``) --
+          the input is structurally not a JWT (wrong number of
+          segments, bad base-64, etc.).  **Fall through** and return
+          the raw token as the identity.
+
+        Returns
+        -------
+        str
+            The ``sub`` claim from a valid JWT, or the raw *token*
+            string when the input is not a JWT.
+
+        Raises
+        ------
+        JWTAuthenticationError
+            When the token is a structurally valid JWT that fails
+            signature or claim verification.
         """
         try:
             payload: dict[str, Any] = jwt.decode(
@@ -262,7 +295,27 @@ class SecurityGate:
                 algorithms=["HS256"],
                 options={"verify_aud": False},
             )
-        except jwt.PyJWTError as exc:
+        except jwt.exceptions.InvalidSignatureError as exc:
+            # Valid JWT structure but the signature doesn't match
+            # our secret -- this is a real JWT that must be denied.
+            # Caught before DecodeError because it is a subclass.
+            msg = f"JWT verification failed: {exc}"
+            raise JWTAuthenticationError(msg) from exc
+        except jwt.exceptions.ExpiredSignatureError as exc:
+            # Valid JWT that has expired -- deny.
+            msg = f"JWT verification failed: {exc}"
+            raise JWTAuthenticationError(msg) from exc
+        except jwt.exceptions.DecodeError:
+            # Not a valid JWT at all (bad segments, bad base-64,
+            # etc.) -- treat the raw caller_id as a plain identity.
+            logger.debug(
+                "caller_id is not a valid JWT; treating as raw identity",
+            )
+            return token
+        except jwt.exceptions.InvalidTokenError as exc:
+            # Any other token-validation failure (invalid issuer,
+            # immature signature, etc.) -- the token IS a JWT but
+            # fails a claim check.  Deny.
             msg = f"JWT verification failed: {exc}"
             raise JWTAuthenticationError(msg) from exc
 

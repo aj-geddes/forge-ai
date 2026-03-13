@@ -222,12 +222,26 @@ class TestJWTAuthentication:
     async def test_authenticate_with_non_jwt_token_and_secret(self):
         """When jwt_secret is set but token is not a JWT, it passes through.
 
-        Tokens without two dots are not treated as JWTs, so the raw
-        value is returned (this handles API keys, SPIFFE IDs, etc.).
+        Non-JWT tokens (plain strings, dotted API keys, semver strings,
+        SPIFFE IDs) pass through as raw identities because they fail
+        structural JWT decoding.
         """
         gate = _make_gate(jwt_secret=JWT_SECRET)
-        identity = await gate.authenticate("plain-api-key")
-        assert identity == "plain-api-key"
+
+        # Plain string with no dots
+        assert await gate.authenticate("plain-api-key") == "plain-api-key"
+
+        # Dotted API key
+        assert await gate.authenticate("my.api.key") == "my.api.key"
+
+        # Semver-like string
+        assert await gate.authenticate("1.2.3") == "1.2.3"
+
+        # SPIFFE ID with dots
+        assert (
+            await gate.authenticate("spiffe://domain/path.to.service")
+            == "spiffe://domain/path.to.service"
+        )
 
     async def test_valid_jwt_through_full_pipeline(self):
         """A valid JWT flows through the full __call__ pipeline."""
@@ -264,3 +278,35 @@ class TestJWTAuthentication:
         warning_msgs = [r.message for r in caplog.records if "jwt_secret" in r.message]
         # Warning should appear exactly once (not on the second call)
         assert len(warning_msgs) == 1
+
+    async def test_dotted_api_key_passes_through_with_jwt_secret(self):
+        """A dotted API key like 'my.api.key' is not a JWT and passes through."""
+        gate = _make_gate(jwt_secret=JWT_SECRET)
+        identity = await gate.authenticate("my.api.key")
+        assert identity == "my.api.key"
+
+    async def test_semver_string_passes_through_with_jwt_secret(self):
+        """A semver-like string '1.2.3' passes through as raw identity."""
+        gate = _make_gate(jwt_secret=JWT_SECRET)
+        identity = await gate.authenticate("1.2.3")
+        assert identity == "1.2.3"
+
+    async def test_spiffe_id_passes_through_with_jwt_secret(self):
+        """A SPIFFE ID passes through as raw identity even with jwt_secret."""
+        gate = _make_gate(jwt_secret=JWT_SECRET)
+        spiffe = "spiffe://example.org/ns/prod/sa/agent"
+        identity = await gate.authenticate(spiffe)
+        assert identity == spiffe
+
+    async def test_valid_jwt_wrong_signature_denied(self):
+        """A properly formatted JWT with wrong signature is denied, not passed through."""
+        gate = _make_gate(jwt_secret=JWT_SECRET)
+        token = _make_jwt(sub="attacker", secret=WRONG_SECRET)
+        with pytest.raises(JWTAuthenticationError, match="JWT verification failed"):
+            await gate.authenticate(token)
+
+    async def test_malformed_base64_jwt_passes_through(self):
+        """A string with two dots but invalid base64 passes through as raw identity."""
+        gate = _make_gate(jwt_secret=JWT_SECRET)
+        identity = await gate.authenticate("not.valid.base64jwt")
+        assert identity == "not.valid.base64jwt"
