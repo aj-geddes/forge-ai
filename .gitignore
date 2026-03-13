@@ -44,3 +44,15 @@ Thumbs.db
 
 # Vendored dependencies (for Docker build)
 vendor/
+
+# Node.js (forge-ui)
+node_modules/
+
+# Screenshots and test artifacts
+*.png
+e2e-screenshots/
+e2e-tests/e2e-screenshots/
+
+# Tool/IDE artifacts
+.playwright-mcp/
+.claude/
