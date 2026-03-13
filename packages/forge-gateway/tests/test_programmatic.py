@@ -7,14 +7,28 @@ from unittest.mock import AsyncMock
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from forge_agent.agent.core import ForgeRunResult
 from forge_gateway.routes import programmatic
 from pydantic import BaseModel
+
+
+def _mock_run_result(
+    output: object = None,
+    tools_used: list[str] | None = None,
+    model_name: str | None = None,
+) -> ForgeRunResult:
+    """Create a ForgeRunResult for testing."""
+    return ForgeRunResult(
+        output=output if output is not None else {"answer": "42"},
+        tools_used=tools_used or [],
+        model_name=model_name,
+    )
 
 
 @pytest.fixture
 def mock_agent() -> AsyncMock:
     agent = AsyncMock()
-    agent.run_structured.return_value = {"answer": "42"}
+    agent.run_structured.return_value = _mock_run_result()
     return agent
 
 
@@ -55,7 +69,9 @@ class TestInvokeEndpoint:
         self, client: TestClient, mock_agent: AsyncMock
     ) -> None:
         """When output_schema is a JSON Schema dict, the agent receives a BaseModel class."""
-        mock_agent.run_structured.return_value = {"name": "Alice", "age": 30}
+        mock_agent.run_structured.return_value = _mock_run_result(
+            output={"name": "Alice", "age": 30}
+        )
         response = client.post(
             "/v1/agent/invoke",
             json={
@@ -104,3 +120,99 @@ class TestInvokeEndpoint:
             },
         )
         assert response.status_code == 500
+
+
+class TestInvokeToolsUsedAndModel:
+    """Verify tools_used and model fields are populated in invoke responses."""
+
+    def test_invoke_includes_tools_used_when_tools_called(
+        self, client: TestClient, mock_agent: AsyncMock
+    ) -> None:
+        """When tools are invoked, tools_used contains their names."""
+        mock_agent.run_structured.return_value = _mock_run_result(
+            output={"summary": "done"},
+            tools_used=["search_api", "fetch_url"],
+        )
+        response = client.post(
+            "/v1/agent/invoke",
+            json={"intent": "summarize page"},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["tools_used"] == ["search_api", "fetch_url"]
+
+    def test_invoke_includes_model_string(self, client: TestClient, mock_agent: AsyncMock) -> None:
+        """The model field reflects the LLM model used for the run."""
+        mock_agent.run_structured.return_value = _mock_run_result(
+            model_name="gpt-4o-2024-05-13",
+        )
+        response = client.post(
+            "/v1/agent/invoke",
+            json={"intent": "test"},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["model"] == "gpt-4o-2024-05-13"
+
+    def test_invoke_empty_tools_used_when_no_tools_called(
+        self, client: TestClient, mock_agent: AsyncMock
+    ) -> None:
+        """When no tools are invoked, tools_used is an empty list."""
+        mock_agent.run_structured.return_value = _mock_run_result(
+            tools_used=[],
+        )
+        response = client.post(
+            "/v1/agent/invoke",
+            json={"intent": "simple question"},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["tools_used"] == []
+
+    def test_invoke_model_none_when_not_available(
+        self, client: TestClient, mock_agent: AsyncMock
+    ) -> None:
+        """When no model info is available, model is None."""
+        mock_agent.run_structured.return_value = _mock_run_result(
+            model_name=None,
+        )
+        response = client.post(
+            "/v1/agent/invoke",
+            json={"intent": "test"},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["model"] is None
+
+    def test_invoke_tools_used_and_model_together(
+        self, client: TestClient, mock_agent: AsyncMock
+    ) -> None:
+        """Both tools_used and model are present in the same response."""
+        mock_agent.run_structured.return_value = _mock_run_result(
+            output={"result": "computed"},
+            tools_used=["calculator", "database_query"],
+            model_name="claude-3-opus-20240229",
+        )
+        response = client.post(
+            "/v1/agent/invoke",
+            json={"intent": "compute and store"},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["tools_used"] == ["calculator", "database_query"]
+        assert data["model"] == "claude-3-opus-20240229"
+        assert data["result"] == {"result": "computed"}
+
+    def test_invoke_single_tool_used(self, client: TestClient, mock_agent: AsyncMock) -> None:
+        """A single tool in tools_used is returned as a one-element list."""
+        mock_agent.run_structured.return_value = _mock_run_result(
+            tools_used=["web_search"],
+        )
+        response = client.post(
+            "/v1/agent/invoke",
+            json={"intent": "search"},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["tools_used"] == ["web_search"]
+        assert len(data["tools_used"]) == 1

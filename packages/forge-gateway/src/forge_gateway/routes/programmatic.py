@@ -54,14 +54,16 @@ async def invoke(request: InvokeRequest) -> InvokeResponse:
 
     try:
         output_schema = _resolve_output_schema(request.output_schema)
-        result = await _forge_agent.run_structured(
+        run_result = await _forge_agent.run_structured(
             intent=request.intent,
             params=request.params,
             output_schema=output_schema,
         )
         return InvokeResponse(
-            result=result,
+            result=run_result.output,
             session_id=request.session_id,
+            tools_used=run_result.tools_used,
+            model=run_result.model_name,
         )
     except Exception as e:
         logger.exception("Agent invocation failed")

@@ -72,11 +72,11 @@ async def submit_task(request: A2ATaskRequest) -> A2ATaskResponse:
         raise HTTPException(status_code=503, detail="Agent not initialized")
 
     try:
-        result = await _forge_agent.run_structured(
+        run_result = await _forge_agent.run_structured(
             intent=request.task_type,
             params=request.payload,
         )
-        return A2ATaskResponse(status="completed", result=result)
+        return A2ATaskResponse(status="completed", result=run_result.output)
     except Exception as e:
         logger.exception("A2A task failed")
         return A2ATaskResponse(status="failed", error=str(e))

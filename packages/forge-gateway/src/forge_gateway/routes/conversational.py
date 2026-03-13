@@ -77,13 +77,15 @@ async def _handle_non_streaming(
 ) -> ConversationResponse:
     """Handle a standard (non-streaming) chat request."""
     try:
-        result = await _forge_agent.run_conversational(
+        run_result = await _forge_agent.run_conversational(
             message=request.message,
             session_id=session_id,
         )
         return ConversationResponse(
-            message=result,
+            message=run_result.output,
             session_id=session_id,
+            tools_used=run_result.tools_used,
+            model=run_result.model_name,
         )
     except Exception as e:
         logger.exception("Conversational request failed")

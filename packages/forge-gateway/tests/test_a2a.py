@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from forge_agent.agent.core import ForgeRunResult
 from forge_gateway.routes import a2a
 from forge_gateway.routes.a2a import AgentCard
 
@@ -12,7 +13,7 @@ from forge_gateway.routes.a2a import AgentCard
 @pytest.fixture
 def mock_agent() -> AsyncMock:
     agent = AsyncMock()
-    agent.run_structured.return_value = {"processed": True}
+    agent.run_structured.return_value = ForgeRunResult(output={"processed": True})
     return agent
 
 

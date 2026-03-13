@@ -8,16 +8,54 @@ structured run methods.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from dataclasses import dataclass, field
 from typing import Any
 
 from forge_config.schema import ForgeConfig
 from pydantic import BaseModel
 from pydantic_ai import Agent as PydanticAIAgent
+from pydantic_ai.messages import ModelMessage, ModelResponse, ToolCallPart
 from pydantic_ai.models import Model
 
 from forge_agent.agent.context import ConversationContext
 from forge_agent.agent.llm import LLMRouter
 from forge_agent.builder.registry import ToolSurfaceRegistry
+
+
+@dataclass
+class ForgeRunResult:
+    """Wraps agent output with metadata about the run.
+
+    Attributes:
+        output: The agent's output (string for conversational, dict/BaseModel for structured).
+        tools_used: List of tool names invoked during the run.
+        model_name: The LLM model identifier used for the run.
+    """
+
+    output: Any
+    tools_used: list[str] = field(default_factory=list)
+    model_name: str | None = None
+
+
+def _extract_tools_used(messages: list[ModelMessage]) -> list[str]:
+    """Extract unique tool names from PydanticAI message history, preserving call order."""
+    seen: set[str] = set()
+    tools: list[str] = []
+    for msg in messages:
+        if isinstance(msg, ModelResponse):
+            for part in msg.parts:
+                if isinstance(part, ToolCallPart) and part.tool_name not in seen:
+                    seen.add(part.tool_name)
+                    tools.append(part.tool_name)
+    return tools
+
+
+def _extract_model_name(messages: list[ModelMessage]) -> str | None:
+    """Extract the model name from the last ModelResponse in the message history."""
+    for msg in reversed(messages):
+        if isinstance(msg, ModelResponse) and msg.model_name:
+            return msg.model_name
+    return None
 
 
 class ForgeAgent:
@@ -103,7 +141,7 @@ class ForgeAgent:
         message: str,
         session_id: str | None = None,
         stream: bool = False,
-    ) -> str | AsyncIterator[str]:
+    ) -> ForgeRunResult | AsyncIterator[str]:
         """Run a conversational interaction with the agent.
 
         Args:
@@ -112,8 +150,8 @@ class ForgeAgent:
             stream: If True, return an async iterator of text chunks.
 
         Returns:
-            The agent's string response, or an async iterator of chunks
-            if stream=True.
+            A ForgeRunResult containing the response and metadata,
+            or an async iterator of chunks if stream=True.
         """
         if self._agent is None:
             await self.initialize()
@@ -132,11 +170,17 @@ class ForgeAgent:
             message_history=message_history,
         )
 
+        all_msgs = list(result.all_messages())
+
         # Store messages in context.
         if session_id:
-            self._context.add_messages(session_id, list(result.all_messages()))
+            self._context.add_messages(session_id, all_msgs)
 
-        return result.output
+        return ForgeRunResult(
+            output=result.output,
+            tools_used=_extract_tools_used(all_msgs),
+            model_name=_extract_model_name(all_msgs),
+        )
 
     def _make_stream(
         self,
@@ -177,7 +221,7 @@ class ForgeAgent:
         intent: str,
         params: dict[str, Any] | None = None,
         output_schema: type[BaseModel] | None = None,
-    ) -> BaseModel | dict[str, Any]:
+    ) -> ForgeRunResult:
         """Run a structured interaction that returns typed output.
 
         Args:
@@ -186,7 +230,7 @@ class ForgeAgent:
             output_schema: A Pydantic BaseModel class for the output type.
 
         Returns:
-            An instance of output_schema if provided, otherwise a dict.
+            A ForgeRunResult containing the output and run metadata.
         """
         if self._agent is None:
             await self.initialize()
@@ -200,7 +244,15 @@ class ForgeAgent:
 
         if output_schema is not None:
             structured_result = await self._agent.run(prompt, output_type=output_schema)
-            return structured_result.output
+            output: Any = structured_result.output
+            all_msgs = list(structured_result.all_messages())
         else:
             text_result = await self._agent.run(prompt)
-            return {"result": text_result.output}
+            output = {"result": text_result.output}
+            all_msgs = list(text_result.all_messages())
+
+        return ForgeRunResult(
+            output=output,
+            tools_used=_extract_tools_used(all_msgs),
+            model_name=_extract_model_name(all_msgs),
+        )

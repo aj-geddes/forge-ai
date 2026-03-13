@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from forge_agent.agent.core import ForgeAgent
+from forge_agent.agent.core import ForgeAgent, ForgeRunResult
 from forge_config.schema import (
     ForgeConfig,
     HTTPMethod,
@@ -73,13 +73,15 @@ class TestForgeAgentConversational:
     """Tests for ForgeAgent.run_conversational."""
 
     @pytest.mark.anyio
-    async def test_run_conversational_returns_string(self) -> None:
+    async def test_run_conversational_returns_forge_run_result(self) -> None:
         config = _make_config()
         agent = ForgeAgent(config, model_override=TestModel())
 
         result = await agent.run_conversational("Hello!")
-        assert isinstance(result, str)
-        assert len(result) > 0
+        assert isinstance(result, ForgeRunResult)
+        assert isinstance(result.output, str)
+        assert len(result.output) > 0
+        assert isinstance(result.tools_used, list)
 
     @pytest.mark.anyio
     async def test_run_conversational_auto_initializes(self) -> None:
@@ -88,7 +90,7 @@ class TestForgeAgentConversational:
 
         # Should auto-initialize on first call.
         result = await agent.run_conversational("Hello!")
-        assert isinstance(result, str)
+        assert isinstance(result, ForgeRunResult)
         assert agent._agent is not None
 
     @pytest.mark.anyio
@@ -98,11 +100,11 @@ class TestForgeAgentConversational:
 
         # First message in session.
         result1 = await agent.run_conversational("Hello!", session_id="sess1")
-        assert isinstance(result1, str)
+        assert isinstance(result1, ForgeRunResult)
 
         # Second message should have context.
         result2 = await agent.run_conversational("Follow up", session_id="sess1")
-        assert isinstance(result2, str)
+        assert isinstance(result2, ForgeRunResult)
 
         # Session should have messages stored.
         assert agent.context.message_count("sess1") > 0
@@ -138,7 +140,9 @@ class TestForgeAgentStructured:
             "Create a person",
             output_schema=PersonOutput,
         )
-        assert isinstance(result, PersonOutput)
+        assert isinstance(result, ForgeRunResult)
+        assert isinstance(result.output, PersonOutput)
+        assert isinstance(result.tools_used, list)
 
     @pytest.mark.anyio
     async def test_run_structured_without_schema(self) -> None:
@@ -146,8 +150,9 @@ class TestForgeAgentStructured:
         agent = ForgeAgent(config, model_override=TestModel())
 
         result = await agent.run_structured("Do something")
-        assert isinstance(result, dict)
-        assert "result" in result
+        assert isinstance(result, ForgeRunResult)
+        assert isinstance(result.output, dict)
+        assert "result" in result.output
 
     @pytest.mark.anyio
     async def test_run_structured_with_params(self) -> None:
@@ -158,7 +163,8 @@ class TestForgeAgentStructured:
             "Generate report",
             params={"format": "pdf", "pages": 5},
         )
-        assert isinstance(result, dict)
+        assert isinstance(result, ForgeRunResult)
+        assert isinstance(result.output, dict)
 
     @pytest.mark.anyio
     async def test_run_structured_auto_initializes(self) -> None:

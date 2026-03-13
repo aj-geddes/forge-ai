@@ -45,6 +45,7 @@ class ConversationResponse(BaseModel):
     message: str
     session_id: str
     tools_used: list[str] = Field(default_factory=list)
+    model: str | None = None
 
 
 class ErrorResponse(BaseModel):

@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import FastAPI
+from forge_agent.agent.core import ForgeRunResult
 from forge_gateway.routes import conversational
 from httpx import ASGITransport, AsyncClient
 from starlette.testclient import TestClient
@@ -38,9 +39,11 @@ async def _async_iter_error(*items: str, error: Exception | None = None) -> Asyn
 
 @pytest.fixture()
 def mock_agent() -> AsyncMock:
-    """Mock agent that returns a fixed string for non-streaming calls."""
+    """Mock agent that returns a ForgeRunResult for non-streaming calls."""
     agent = AsyncMock()
-    agent.run_conversational.return_value = "Hello! How can I help?"
+    agent.run_conversational.return_value = ForgeRunResult(
+        output="Hello! How can I help?",
+    )
     return agent
 
 
@@ -638,3 +641,105 @@ class TestMultipleChunks:
         assert chunk1["session_id"] == "sync-s"
 
         assert events[2] == "data: [DONE]"
+
+
+# ---------------------------------------------------------------------------
+# 9. tools_used and model fields in conversational responses
+# ---------------------------------------------------------------------------
+
+
+class TestConversationalToolsUsedAndModel:
+    """Verify tools_used and model fields are populated in chat responses."""
+
+    def test_chat_includes_tools_used_when_tools_called(
+        self, client: TestClient, mock_agent: AsyncMock
+    ) -> None:
+        """When tools are invoked, tools_used contains their names."""
+        mock_agent.run_conversational.return_value = ForgeRunResult(
+            output="Here are the results.",
+            tools_used=["web_search", "summarize"],
+            model_name="gpt-4o",
+        )
+        response = client.post(
+            "/v1/chat/completions",
+            json={"message": "Search for something"},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["tools_used"] == ["web_search", "summarize"]
+
+    def test_chat_includes_model_string(self, client: TestClient, mock_agent: AsyncMock) -> None:
+        """The model field reflects the LLM model used for the run."""
+        mock_agent.run_conversational.return_value = ForgeRunResult(
+            output="Response text.",
+            model_name="claude-3-opus-20240229",
+        )
+        response = client.post(
+            "/v1/chat/completions",
+            json={"message": "Hello"},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["model"] == "claude-3-opus-20240229"
+
+    def test_chat_empty_tools_used_when_no_tools_called(
+        self, client: TestClient, mock_agent: AsyncMock
+    ) -> None:
+        """When no tools are invoked, tools_used is an empty list."""
+        mock_agent.run_conversational.return_value = ForgeRunResult(
+            output="Just a plain answer.",
+            tools_used=[],
+        )
+        response = client.post(
+            "/v1/chat/completions",
+            json={"message": "What is 2+2?"},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["tools_used"] == []
+
+    def test_chat_model_none_when_not_available(
+        self, client: TestClient, mock_agent: AsyncMock
+    ) -> None:
+        """When no model info is available, model is None."""
+        mock_agent.run_conversational.return_value = ForgeRunResult(
+            output="Answer.",
+            model_name=None,
+        )
+        response = client.post(
+            "/v1/chat/completions",
+            json={"message": "Hi"},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["model"] is None
+
+    def test_chat_tools_used_and_model_together(
+        self, client: TestClient, mock_agent: AsyncMock
+    ) -> None:
+        """Both tools_used and model are present in the same response."""
+        mock_agent.run_conversational.return_value = ForgeRunResult(
+            output="Found and analyzed the data.",
+            tools_used=["fetch_data", "analyze"],
+            model_name="gpt-4o-mini",
+        )
+        response = client.post(
+            "/v1/chat/completions",
+            json={"message": "Analyze this"},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["message"] == "Found and analyzed the data."
+        assert data["tools_used"] == ["fetch_data", "analyze"]
+        assert data["model"] == "gpt-4o-mini"
+
+    def test_chat_default_fixture_has_empty_tools_and_no_model(self, client: TestClient) -> None:
+        """The default mock agent fixture returns empty tools_used and no model."""
+        response = client.post(
+            "/v1/chat/completions",
+            json={"message": "Hi"},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["tools_used"] == []
+        assert data["model"] is None

@@ -120,12 +120,12 @@ def _make_gated_app(
         from forge_gateway.models import InvokeRequest
 
         req = InvokeRequest(**body)
-        result = await mock_agent.run_structured(
+        run_result = await mock_agent.run_structured(
             intent=req.intent,
             params=req.params,
             output_schema=None,
         )
-        return {"result": result, "session_id": req.session_id}
+        return {"result": run_result.output, "session_id": req.session_id}
 
     # --- Conversational route with gate ---
     @app.post("/v1/chat/completions")
@@ -137,11 +137,11 @@ def _make_gated_app(
         from forge_gateway.models import ConversationRequest
 
         req = ConversationRequest(**body)
-        result = await mock_agent.run_conversational(
+        run_result = await mock_agent.run_conversational(
             message=req.message,
             session_id=req.session_id or "auto-session",
         )
-        return {"message": result, "session_id": req.session_id or "auto-session"}
+        return {"message": run_result.output, "session_id": req.session_id or "auto-session"}
 
     # --- A2A route with gate ---
     @app.post("/a2a/tasks")
@@ -153,11 +153,11 @@ def _make_gated_app(
         from forge_gateway.routes.a2a import A2ATaskRequest
 
         req = A2ATaskRequest(**body)
-        result = await mock_agent.run_structured(
+        run_result = await mock_agent.run_structured(
             intent=req.task_type,
             params=req.payload,
         )
-        return {"status": "completed", "result": result}
+        return {"status": "completed", "result": run_result.output}
 
     return app
 
@@ -196,9 +196,11 @@ def _make_mock_gate(
 @pytest.fixture()
 def mock_agent() -> AsyncMock:
     """Mock agent for route handlers."""
+    from forge_agent.agent.core import ForgeRunResult
+
     agent = AsyncMock()
-    agent.run_structured.return_value = {"answer": "42"}
-    agent.run_conversational.return_value = "Hello from the agent!"
+    agent.run_structured.return_value = ForgeRunResult(output={"answer": "42"})
+    agent.run_conversational.return_value = ForgeRunResult(output="Hello from the agent!")
     return agent
 
 
