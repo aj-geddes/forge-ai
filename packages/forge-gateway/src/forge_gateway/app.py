@@ -9,6 +9,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from forge_gateway.auth import set_api_key_config
@@ -183,6 +184,27 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         health.set_started(False)
 
 
+def _resolve_cors_origins() -> list[str]:
+    """Read ``allowed_origins`` from the config file for CORS setup.
+
+    Falls back to ``["*"]`` with a logged warning when the config cannot be
+    loaded or no origins are explicitly configured.
+    """
+    config_path = os.environ.get("FORGE_CONFIG_PATH", "forge.yaml")
+    try:
+        from forge_config import load_config
+
+        config = load_config(config_path)
+        origins: list[str] = config.security.allowed_origins
+        if origins:
+            return origins
+    except Exception:
+        logger.debug("Could not load config for CORS origins, using permissive defaults")
+
+    logger.warning("CORS allowed_origins not configured — defaulting to ['*'] (dev mode)")
+    return ["*"]
+
+
 def create_app() -> FastAPI:
     """Create the FastAPI application."""
     app = FastAPI(
@@ -192,7 +214,15 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
-    # Middleware
+    # Middleware — CORS must be added before startup
+    origins = _resolve_cors_origins()
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
     app.add_middleware(RequestLoggingMiddleware)
 
     # API Routes
