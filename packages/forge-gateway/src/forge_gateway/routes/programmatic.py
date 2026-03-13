@@ -5,15 +5,20 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from forge_gateway.models import ErrorResponse, InvokeRequest, InvokeResponse
 from forge_gateway.schema import json_schema_to_model
+from forge_gateway.security import security_dependency
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/v1/agent", tags=["programmatic"])
+router = APIRouter(
+    prefix="/v1/agent",
+    tags=["programmatic"],
+    dependencies=[Depends(security_dependency)],
+)
 
 # Set by app lifespan
 _forge_agent: Any = None

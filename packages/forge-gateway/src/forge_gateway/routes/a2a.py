@@ -5,8 +5,10 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
+
+from forge_gateway.security import security_dependency
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +61,11 @@ def set_agent(agent: Any) -> None:
     _forge_agent = agent
 
 
-@router.post("/tasks", response_model=A2ATaskResponse)
+@router.post(
+    "/tasks",
+    response_model=A2ATaskResponse,
+    dependencies=[Depends(security_dependency)],
+)
 async def submit_task(request: A2ATaskRequest) -> A2ATaskResponse:
     """Handle incoming A2A task requests."""
     if _forge_agent is None:

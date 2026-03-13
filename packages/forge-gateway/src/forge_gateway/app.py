@@ -14,6 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from forge_gateway.auth import set_api_key_config
 from forge_gateway.middleware.logging import RequestLoggingMiddleware
 from forge_gateway.routes import a2a, admin, conversational, health, metrics, programmatic
+from forge_gateway.security import set_security_gate
 
 logger = logging.getLogger("forge.gateway")
 
@@ -37,10 +38,43 @@ def _make_reload_callback(config_path: str) -> Callable[[Path], None]:
             # Preserve the current agent reference across config reloads
             admin.set_state(config=new_config, config_path=config_path)
             set_api_key_config(new_config.security.api_keys)
+            _init_security_gate(new_config)
         except Exception:
             logger.exception("Failed to reload config from %s", changed_path)
 
     return _on_config_change
+
+
+def _init_security_gate(config: object | None) -> None:
+    """Build and wire a ``SecurityGate`` from the loaded config.
+
+    When *config* is ``None`` or its ``security.agentweave.enabled`` flag is
+    ``False``, the gate is set to ``None`` which activates development mode
+    (unauthenticated access with a logged warning).
+    """
+    from forge_config.schema import ForgeConfig
+
+    if config is None or not isinstance(config, ForgeConfig):
+        set_security_gate(None)
+        return
+
+    if not config.security.agentweave.enabled:
+        logger.info("AgentWeave security disabled in config — development mode active")
+        set_security_gate(None)
+        return
+
+    try:
+        from forge_security import SecurityGate
+
+        gate = SecurityGate.from_config(config.security)
+        set_security_gate(gate)
+        logger.info(
+            "SecurityGate initialized for trust domain '%s'",
+            config.security.agentweave.trust_domain,
+        )
+    except Exception:
+        logger.exception("Failed to initialize SecurityGate — falling back to development mode")
+        set_security_gate(None)
 
 
 @asynccontextmanager
@@ -86,10 +120,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         except Exception:
             logger.warning("No config loaded, running with defaults")
 
-        # Wire admin state and API key auth
+        # Wire admin state, API key auth, and SecurityGate
         admin.set_state(config=config, config_path=config_path, agent=agent)
         if config is not None:
             set_api_key_config(config.security.api_keys)
+        _init_security_gate(config)
 
         # Start config file watcher for hot-reload
         if config is not None and Path(config_path).exists():
