@@ -13,6 +13,7 @@ Covers:
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Iterator
+from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -887,3 +888,663 @@ class TestRedactSecrets:
         admin._redact_secrets(data)
         assert data["name"] == "test"
         assert data["value"] == 42
+
+
+# =========================================================================
+# 10. Coverage for missed lines — update_config edge cases (lines 112-123)
+# =========================================================================
+
+
+@pytest.mark.usefixtures("_wire_admin", "_wire_auth")
+class TestUpdateConfigEdgeCases:
+    """Cover update_config branches: OSError on write, agent reload paths."""
+
+    async def test_update_config_write_failure_returns_500(
+        self,
+        async_client: httpx.AsyncClient,
+        auth_headers: dict[str, str],
+    ) -> None:
+        """Line 112-113: OSError when writing config to disk returns 500."""
+        import unittest.mock
+
+        admin.set_state(
+            config=ForgeConfig(),
+            config_path="/nonexistent/dir/forge.yaml",
+            agent=None,
+        )
+
+        new_config = ForgeConfig()
+        with unittest.mock.patch.object(
+            Path, "write_text", side_effect=OSError("Permission denied")
+        ):
+            resp = await async_client.put(
+                "/v1/admin/config",
+                json={"config": new_config.model_dump(mode="json")},
+                headers=auth_headers,
+            )
+        assert resp.status_code == 500
+        assert "Failed to write config" in resp.json()["detail"]
+
+    async def test_update_config_with_agent_reload_success(
+        self,
+        async_client: httpx.AsyncClient,
+        auth_headers: dict[str, str],
+        tmp_path: Any,
+    ) -> None:
+        """Lines 117-121: agent exists with registry, build_and_swap succeeds."""
+        from unittest.mock import AsyncMock
+
+        config_file = tmp_path / "forge.yaml"
+        config_file.write_text("metadata:\n  name: old\n")
+
+        mock_registry = MagicMock()
+        mock_registry.build_and_swap = AsyncMock(return_value=True)
+        mock_agent = MagicMock()
+        mock_agent._registry = mock_registry
+
+        admin.set_state(
+            config=ForgeConfig(),
+            config_path=str(config_file),
+            agent=mock_agent,
+        )
+
+        new_config = ForgeConfig()
+        resp = await async_client.put(
+            "/v1/admin/config",
+            json={"config": new_config.model_dump(mode="json")},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["success"] is True
+        assert data["reloaded"] is True
+        assert "tools reloaded" in data["message"]
+        mock_registry.build_and_swap.assert_awaited_once()
+
+    async def test_update_config_with_agent_reload_failure(
+        self,
+        async_client: httpx.AsyncClient,
+        auth_headers: dict[str, str],
+        tmp_path: Any,
+    ) -> None:
+        """Lines 122-123: agent reload raises exception, logged but not fatal."""
+        from unittest.mock import AsyncMock
+
+        config_file = tmp_path / "forge.yaml"
+        config_file.write_text("metadata:\n  name: old\n")
+
+        mock_registry = MagicMock()
+        mock_registry.build_and_swap = AsyncMock(side_effect=RuntimeError("reload failed"))
+        mock_agent = MagicMock()
+        mock_agent._registry = mock_registry
+
+        admin.set_state(
+            config=ForgeConfig(),
+            config_path=str(config_file),
+            agent=mock_agent,
+        )
+
+        new_config = ForgeConfig()
+        resp = await async_client.put(
+            "/v1/admin/config",
+            json={"config": new_config.model_dump(mode="json")},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["success"] is True
+        assert data["reloaded"] is False
+
+    async def test_update_config_agent_without_registry(
+        self,
+        async_client: httpx.AsyncClient,
+        auth_headers: dict[str, str],
+        tmp_path: Any,
+    ) -> None:
+        """Lines 119-120: agent exists but has no _registry attribute."""
+        config_file = tmp_path / "forge.yaml"
+        config_file.write_text("metadata:\n  name: old\n")
+
+        mock_agent = MagicMock(spec=[])  # No attributes at all
+        admin.set_state(
+            config=ForgeConfig(),
+            config_path=str(config_file),
+            agent=mock_agent,
+        )
+
+        new_config = ForgeConfig()
+        resp = await async_client.put(
+            "/v1/admin/config",
+            json={"config": new_config.model_dump(mode="json")},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["success"] is True
+        assert data["reloaded"] is False
+
+
+# =========================================================================
+# 11. Coverage for missed lines — list_tools with no registry (line 155)
+# =========================================================================
+
+
+@pytest.mark.usefixtures("_wire_auth")
+class TestListToolsNoRegistry:
+    """Cover list_tools when agent exists but has no _registry."""
+
+    async def test_list_tools_agent_without_registry_returns_empty(
+        self,
+        async_client: httpx.AsyncClient,
+        auth_headers: dict[str, str],
+    ) -> None:
+        """Line 155: agent exists but no _registry -> return []."""
+        mock_agent = MagicMock(spec=[])  # No _registry attribute
+        admin.set_state(
+            config=ForgeConfig(),
+            config_path="/tmp/test.yaml",  # noqa: S108
+            agent=mock_agent,
+        )
+
+        resp = await async_client.get("/v1/admin/tools", headers=auth_headers)
+        assert resp.status_code == 200
+        assert resp.json() == []
+
+        # Cleanup
+        admin.set_state(config=None, config_path="", agent=None)
+
+
+# =========================================================================
+# 12. Coverage for missed lines — preview_tools (lines 176-196)
+# =========================================================================
+
+
+@pytest.mark.usefixtures("_wire_admin", "_wire_auth")
+class TestPreviewTools:
+    """Cover preview_tools success and error paths."""
+
+    async def test_preview_tools_success(
+        self,
+        async_client: httpx.AsyncClient,
+        auth_headers: dict[str, str],
+    ) -> None:
+        """Lines 176-194: successful tool preview returns tool list."""
+        import unittest.mock
+
+        mock_tool_1 = MagicMock()
+        mock_tool_1.name = "get_users"
+        mock_tool_1.description = "Fetch users"
+
+        mock_tool_2 = MagicMock()
+        mock_tool_2.name = "create_user"
+        mock_tool_2.description = "Create a user"
+
+        mock_builder = MagicMock()
+        mock_builder.build = unittest.mock.AsyncMock(return_value=[mock_tool_1, mock_tool_2])
+
+        with (
+            unittest.mock.patch(
+                "forge_agent.builder.openapi.OpenAPIToolBuilder", return_value=mock_builder
+            ),
+            unittest.mock.patch(
+                "forge_config.schema.OpenAPISource.model_validate", return_value=MagicMock()
+            ),
+        ):
+            resp = await async_client.post(
+                "/v1/admin/tools/preview",
+                json={"source": {"url": "https://example.com/openapi.json"}},
+                headers=auth_headers,
+            )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["count"] == 2
+        assert len(data["tools"]) == 2
+        assert data["tools"][0]["name"] == "get_users"
+        assert data["tools"][0]["source"] == "openapi"
+        assert data["tools"][1]["name"] == "create_user"
+
+    async def test_preview_tools_import_error(
+        self,
+        async_client: httpx.AsyncClient,
+        auth_headers: dict[str, str],
+    ) -> None:
+        """Lines 195-196: exception during preview returns 400."""
+        import unittest.mock
+
+        with unittest.mock.patch.dict("sys.modules", {"forge_agent.builder.openapi": None}):
+            resp = await async_client.post(
+                "/v1/admin/tools/preview",
+                json={"source": {"url": "https://example.com/openapi.json"}},
+                headers=auth_headers,
+            )
+        assert resp.status_code == 400
+
+    async def test_preview_tools_validation_error(
+        self,
+        async_client: httpx.AsyncClient,
+        auth_headers: dict[str, str],
+    ) -> None:
+        """Lines 195-196: invalid source data raises validation error -> 400."""
+        import unittest.mock
+
+        with unittest.mock.patch(
+            "forge_config.schema.OpenAPISource.model_validate",
+            side_effect=ValueError("Invalid source config"),
+        ):
+            # Patch the import so it doesn't fail first
+            mock_module = MagicMock()
+            with unittest.mock.patch.dict(
+                "sys.modules", {"forge_agent.builder.openapi": mock_module}
+            ):
+                resp = await async_client.post(
+                    "/v1/admin/tools/preview",
+                    json={"source": {"bad": "data"}},
+                    headers=auth_headers,
+                )
+        assert resp.status_code == 400
+
+
+# =========================================================================
+# 13. Coverage for missed lines — list_sessions with data (lines 211-226)
+# =========================================================================
+
+
+@pytest.mark.usefixtures("_wire_auth")
+class TestListSessionsWithData:
+    """Cover list_sessions when agent has context with sessions."""
+
+    async def test_list_sessions_with_sessions(
+        self,
+        async_client: httpx.AsyncClient,
+        auth_headers: dict[str, str],
+    ) -> None:
+        """Lines 211-226: agent has context with session store containing sessions."""
+        session1 = MagicMock()
+        session1.messages = ["msg1", "msg2", "msg3"]
+        session1.agent = "assistant"
+
+        session2 = MagicMock()
+        session2.messages = []
+        session2.agent = None
+
+        mock_context = MagicMock()
+        mock_context._sessions = {"sess-1": session1, "sess-2": session2}
+
+        mock_agent = MagicMock()
+        mock_agent._context = mock_context
+
+        admin.set_state(
+            config=ForgeConfig(),
+            config_path="/tmp/test.yaml",  # noqa: S108
+            agent=mock_agent,
+        )
+
+        resp = await async_client.get("/v1/admin/sessions", headers=auth_headers)
+        assert resp.status_code == 200
+        sessions = resp.json()
+        assert len(sessions) == 2
+
+        # Find each session in the response
+        sess_map = {s["session_id"]: s for s in sessions}
+        assert sess_map["sess-1"]["message_count"] == 3
+        assert sess_map["sess-1"]["agent"] == "assistant"
+        assert sess_map["sess-2"]["message_count"] == 0
+        assert sess_map["sess-2"]["agent"] is None
+
+        # Cleanup
+        admin.set_state(config=None, config_path="", agent=None)
+
+    async def test_list_sessions_agent_without_context(
+        self,
+        async_client: httpx.AsyncClient,
+        auth_headers: dict[str, str],
+    ) -> None:
+        """Lines 211-212: agent exists but has no _context attribute."""
+        mock_agent = MagicMock(spec=[])  # No _context attribute
+        admin.set_state(
+            config=ForgeConfig(),
+            config_path="/tmp/test.yaml",  # noqa: S108
+            agent=mock_agent,
+        )
+
+        resp = await async_client.get("/v1/admin/sessions", headers=auth_headers)
+        assert resp.status_code == 200
+        assert resp.json() == []
+
+        # Cleanup
+        admin.set_state(config=None, config_path="", agent=None)
+
+
+# =========================================================================
+# 14. Coverage for missed lines — delete_session success (lines 238-247)
+# =========================================================================
+
+
+@pytest.mark.usefixtures("_wire_auth")
+class TestDeleteSessionSuccess:
+    """Cover delete_session success and context-not-found paths."""
+
+    async def test_delete_session_success(
+        self,
+        async_client: httpx.AsyncClient,
+        auth_headers: dict[str, str],
+    ) -> None:
+        """Lines 242-247: session exists and is deleted successfully."""
+        session = MagicMock()
+        session.messages = ["msg1"]
+        session.agent = "assistant"
+
+        mock_context = MagicMock()
+        mock_context._sessions = {"target-session": session}
+
+        mock_agent = MagicMock()
+        mock_agent._context = mock_context
+
+        admin.set_state(
+            config=ForgeConfig(),
+            config_path="/tmp/test.yaml",  # noqa: S108
+            agent=mock_agent,
+        )
+
+        resp = await async_client.delete("/v1/admin/sessions/target-session", headers=auth_headers)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "deleted"
+        assert data["session_id"] == "target-session"
+        # Verify session was actually removed
+        assert "target-session" not in mock_context._sessions
+
+        # Cleanup
+        admin.set_state(config=None, config_path="", agent=None)
+
+    async def test_delete_session_not_found(
+        self,
+        async_client: httpx.AsyncClient,
+        auth_headers: dict[str, str],
+    ) -> None:
+        """Lines 243-244: session ID not in session store -> 404."""
+        mock_context = MagicMock()
+        mock_context._sessions = {"other-session": MagicMock()}
+
+        mock_agent = MagicMock()
+        mock_agent._context = mock_context
+
+        admin.set_state(
+            config=ForgeConfig(),
+            config_path="/tmp/test.yaml",  # noqa: S108
+            agent=mock_agent,
+        )
+
+        resp = await async_client.delete("/v1/admin/sessions/nonexistent", headers=auth_headers)
+        assert resp.status_code == 404
+        assert "not found" in resp.json()["detail"]
+
+        # Cleanup
+        admin.set_state(config=None, config_path="", agent=None)
+
+    async def test_delete_session_no_context(
+        self,
+        async_client: httpx.AsyncClient,
+        auth_headers: dict[str, str],
+    ) -> None:
+        """Lines 238-240: agent exists but has no _context -> 404."""
+        mock_agent = MagicMock(spec=[])  # No _context attribute
+        admin.set_state(
+            config=ForgeConfig(),
+            config_path="/tmp/test.yaml",  # noqa: S108
+            agent=mock_agent,
+        )
+
+        resp = await async_client.delete("/v1/admin/sessions/some-id", headers=auth_headers)
+        assert resp.status_code == 404
+        assert "context" in resp.json()["detail"].lower()
+
+        # Cleanup
+        admin.set_state(config=None, config_path="", agent=None)
+
+
+# =========================================================================
+# 15. Coverage for missed lines — list_peers with no config (line 260)
+# =========================================================================
+
+
+@pytest.mark.usefixtures("_wire_auth")
+class TestListPeersNoConfig:
+    """Cover list_peers when _config is None."""
+
+    async def test_list_peers_no_config_returns_empty(
+        self,
+        async_client: httpx.AsyncClient,
+        auth_headers: dict[str, str],
+    ) -> None:
+        """Line 260: _config is None -> return []."""
+        admin.set_state(config=None, config_path="", agent=None)
+
+        resp = await async_client.get("/v1/admin/peers", headers=auth_headers)
+        assert resp.status_code == 200
+        assert resp.json() == []
+
+        # Cleanup
+        admin.set_state(config=None, config_path="", agent=None)
+
+
+# =========================================================================
+# 16. Coverage for missed lines — ping_peer edge cases (lines 285, 308-309)
+# =========================================================================
+
+
+@pytest.mark.usefixtures("_wire_auth")
+class TestPingPeerEdgeCases:
+    """Cover ping_peer when config is None and HTTP error paths."""
+
+    async def test_ping_peer_no_config_returns_404(
+        self,
+        async_client: httpx.AsyncClient,
+        auth_headers: dict[str, str],
+    ) -> None:
+        """Line 285: _config is None -> 404."""
+        admin.set_state(config=None, config_path="", agent=None)
+
+        resp = await async_client.post("/v1/admin/peers/any-peer/ping", headers=auth_headers)
+        assert resp.status_code == 404
+        assert "No config loaded" in resp.json()["detail"]
+
+    async def test_ping_peer_http_error_returns_unreachable(
+        self,
+        async_client: httpx.AsyncClient,
+        auth_headers: dict[str, str],
+    ) -> None:
+        """Lines 308-309: HTTPError during ping returns unreachable status."""
+        import unittest.mock
+        from unittest.mock import AsyncMock
+
+        config = ForgeConfig(
+            agents=AgentsConfig(
+                peers=[
+                    PeerAgent(
+                        name="peer1",
+                        endpoint="http://peer1.example.com:8000",
+                        capabilities=["search"],
+                    )
+                ]
+            )
+        )
+        admin.set_state(config=config, config_path="/tmp/test.yaml", agent=None)  # noqa: S108
+
+        mock_http = AsyncMock()
+        mock_http.get = AsyncMock(side_effect=httpx.ConnectError("Connection refused"))
+        mock_http.__aenter__ = AsyncMock(return_value=mock_http)
+        mock_http.__aexit__ = AsyncMock(return_value=None)
+
+        with unittest.mock.patch("httpx.AsyncClient", return_value=mock_http):
+            resp = await async_client.post("/v1/admin/peers/peer1/ping", headers=auth_headers)
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["name"] == "peer1"
+        assert data["status"] == "unreachable"
+        assert "error" in data
+
+        # Cleanup
+        admin.set_state(config=None, config_path="", agent=None)
+
+    async def test_ping_peer_timeout_returns_unreachable(
+        self,
+        async_client: httpx.AsyncClient,
+        auth_headers: dict[str, str],
+    ) -> None:
+        """Lines 308-309: Timeout during ping returns unreachable status."""
+        import unittest.mock
+        from unittest.mock import AsyncMock
+
+        config = ForgeConfig(
+            agents=AgentsConfig(
+                peers=[
+                    PeerAgent(
+                        name="peer-timeout",
+                        endpoint="http://slow-peer.example.com:8000",
+                        capabilities=["compute"],
+                    )
+                ]
+            )
+        )
+        admin.set_state(config=config, config_path="/tmp/test.yaml", agent=None)  # noqa: S108
+
+        mock_http = AsyncMock()
+        mock_http.get = AsyncMock(side_effect=httpx.ReadTimeout("Request timed out"))
+        mock_http.__aenter__ = AsyncMock(return_value=mock_http)
+        mock_http.__aexit__ = AsyncMock(return_value=None)
+
+        with unittest.mock.patch("httpx.AsyncClient", return_value=mock_http):
+            resp = await async_client.post(
+                "/v1/admin/peers/peer-timeout/ping", headers=auth_headers
+            )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["name"] == "peer-timeout"
+        assert data["status"] == "unreachable"
+        assert "error" in data
+
+        # Cleanup
+        admin.set_state(config=None, config_path="", agent=None)
+
+    async def test_ping_peer_http_status_error_returns_unreachable(
+        self,
+        async_client: httpx.AsyncClient,
+        auth_headers: dict[str, str],
+    ) -> None:
+        """Lines 308-309: HTTP status error (e.g. 500) returns unreachable."""
+        import unittest.mock
+        from unittest.mock import AsyncMock
+
+        config = ForgeConfig(
+            agents=AgentsConfig(
+                peers=[
+                    PeerAgent(
+                        name="peer-500",
+                        endpoint="http://error-peer.example.com:8000",
+                        capabilities=[],
+                    )
+                ]
+            )
+        )
+        admin.set_state(config=config, config_path="/tmp/test.yaml", agent=None)  # noqa: S108
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 500
+        mock_request = httpx.Request("GET", "http://error-peer.example.com:8000/health/live")
+        mock_resp.raise_for_status = MagicMock(
+            side_effect=httpx.HTTPStatusError(
+                "Server Error", request=mock_request, response=mock_resp
+            )
+        )
+
+        mock_http = AsyncMock()
+        mock_http.get = AsyncMock(return_value=mock_resp)
+        mock_http.__aenter__ = AsyncMock(return_value=mock_http)
+        mock_http.__aexit__ = AsyncMock(return_value=None)
+
+        with unittest.mock.patch("httpx.AsyncClient", return_value=mock_http):
+            resp = await async_client.post("/v1/admin/peers/peer-500/ping", headers=auth_headers)
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["name"] == "peer-500"
+        assert data["status"] == "unreachable"
+        assert "error" in data
+
+        # Cleanup
+        admin.set_state(config=None, config_path="", agent=None)
+
+
+# =========================================================================
+# 17. Coverage for missed line — _classify_tool_source peer prefix (line 318)
+# =========================================================================
+
+
+class TestClassifyToolSource:
+    """Cover _classify_tool_source helper."""
+
+    def test_classify_peer_tool(self) -> None:
+        """Line 318: tool name starting with 'peer_' classified as 'peer'."""
+        assert admin._classify_tool_source("peer_search") == "peer"
+        assert admin._classify_tool_source("peer_execute") == "peer"
+
+    def test_classify_regular_tool(self) -> None:
+        """Line 319: non-peer tool classified as 'configured'."""
+        assert admin._classify_tool_source("search_api") == "configured"
+        assert admin._classify_tool_source("my_tool") == "configured"
+
+    def test_classify_tool_with_peer_in_middle(self) -> None:
+        """Tool with 'peer' in name but not as prefix is 'configured'."""
+        assert admin._classify_tool_source("my_peer_tool") == "configured"
+
+
+# =========================================================================
+# 18. Coverage for list_tools with peer-prefixed tools
+# =========================================================================
+
+
+@pytest.mark.usefixtures("_wire_auth")
+class TestListToolsWithPeerTools:
+    """Cover list_tools with peer-prefixed tools to hit line 318 via the endpoint."""
+
+    async def test_list_tools_with_peer_tools(
+        self,
+        async_client: httpx.AsyncClient,
+        auth_headers: dict[str, str],
+    ) -> None:
+        """Ensure peer tools are classified with source='peer'."""
+        mock_tool_regular = MagicMock()
+        mock_tool_regular.name = "search_api"
+        mock_tool_regular.description = "Search API"
+
+        mock_tool_peer = MagicMock()
+        mock_tool_peer.name = "peer_search"
+        mock_tool_peer.description = "Peer search tool"
+
+        mock_registry = MagicMock()
+        mock_registry.tools = [mock_tool_regular, mock_tool_peer]
+
+        mock_agent = MagicMock()
+        mock_agent._registry = mock_registry
+
+        admin.set_state(
+            config=ForgeConfig(),
+            config_path="/tmp/test.yaml",  # noqa: S108
+            agent=mock_agent,
+        )
+
+        resp = await async_client.get("/v1/admin/tools", headers=auth_headers)
+        assert resp.status_code == 200
+        tools = resp.json()
+        assert len(tools) == 2
+
+        tool_map = {t["name"]: t for t in tools}
+        assert tool_map["search_api"]["source"] == "configured"
+        assert tool_map["peer_search"]["source"] == "peer"
+
+        # Cleanup
+        admin.set_state(config=None, config_path="", agent=None)

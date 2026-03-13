@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -23,14 +24,70 @@ class AgentCard(BaseModel):
     capabilities: list[str] = Field(default_factory=list)
     version: str = "0.1.0"
     endpoint: str = ""
+    protocols: list[str] = Field(default_factory=list)
 
 
 _agent_card: AgentCard | None = None
 
 
 def set_agent_card(card: AgentCard) -> None:
+    """Set the module-level agent card for A2A discovery."""
     global _agent_card
     _agent_card = card
+
+
+def build_agent_card(
+    config: object,
+    agent: object | None = None,
+) -> AgentCard:
+    """Build an ``AgentCard`` from a loaded ``ForgeConfig`` and optional agent.
+
+    Extracts metadata (name, description, version) from the config and tool
+    names from the agent's registry when available.  The gateway endpoint URL
+    is derived from the ``FORGE_GATEWAY_URL`` environment variable, falling
+    back to ``http://localhost:8000``.
+    """
+    from forge_config.schema import ForgeConfig
+
+    if not isinstance(config, ForgeConfig):
+        return AgentCard(name="forge", description="Forge AI Agent")
+
+    # Gather tool names from the live registry when the agent is available.
+    capabilities: list[str] = []
+    try:
+        from forge_agent import ForgeAgent
+
+        if isinstance(agent, ForgeAgent):
+            capabilities = [t.name for t in agent.registry.tools]
+    except ImportError:
+        pass
+
+    # Derive the gateway endpoint from env or sensible default.
+    endpoint = os.environ.get("FORGE_GATEWAY_URL", "http://localhost:8000")
+
+    # Determine which protocols this gateway exposes.
+    protocols = ["a2a", "rest"]
+    if _has_mcp_support():
+        protocols.append("mcp")
+
+    return AgentCard(
+        name=config.metadata.name,
+        description=config.metadata.description or f"{config.metadata.name} AI Agent",
+        version=config.metadata.version,
+        capabilities=capabilities,
+        endpoint=endpoint,
+        protocols=protocols,
+    )
+
+
+def _has_mcp_support() -> bool:
+    """Return ``True`` when FastMCP dependencies are importable."""
+    try:
+        import fastmcp  # noqa: F401
+
+        return True
+    except ImportError:
+        return False
 
 
 @router.get("/agent-card", response_model=AgentCard)

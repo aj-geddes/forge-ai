@@ -40,10 +40,31 @@ def _make_reload_callback(config_path: str) -> Callable[[Path], None]:
             admin.set_state(config=new_config, config_path=config_path)
             set_api_key_config(new_config.security.api_keys)
             _init_security_gate(new_config)
+            _refresh_agent_card(new_config)
         except Exception:
             logger.exception("Failed to reload config from %s", changed_path)
 
     return _on_config_change
+
+
+def _refresh_agent_card(config: object | None, agent: object | None = None) -> None:
+    """Build an A2A agent card from *config* and set it for discovery.
+
+    Called during startup and on config hot-reload so the ``/a2a/agent-card``
+    endpoint always reflects the current configuration.
+    """
+    try:
+        from forge_gateway.routes.a2a import build_agent_card, set_agent_card
+
+        card = build_agent_card(config, agent)
+        set_agent_card(card)
+        logger.info(
+            "A2A agent card set: name=%s, capabilities=%d",
+            card.name,
+            len(card.capabilities),
+        )
+    except Exception:
+        logger.exception("Failed to build A2A agent card")
 
 
 def _init_security_gate(config: object | None) -> None:
@@ -145,6 +166,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 logger.warning("forge-agent not available, running in gateway-only mode")
             except Exception:
                 logger.exception("Failed to initialize agent")
+
+            # Populate the A2A agent card from config + live tool registry
+            _refresh_agent_card(config, agent)
 
         except Exception:
             logger.warning("No config loaded, running with defaults")
