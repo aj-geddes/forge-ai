@@ -1,30 +1,91 @@
-"""Tests for conversational endpoint."""
+"""Tests for conversational endpoint including SSE streaming support."""
 
+from __future__ import annotations
+
+import json
+from collections.abc import AsyncIterator
 from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import FastAPI
-from fastapi.testclient import TestClient
 from forge_gateway.routes import conversational
+from httpx import ASGITransport, AsyncClient
+from starlette.testclient import TestClient
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 
-@pytest.fixture
+async def _async_iter(*items: str) -> AsyncIterator[str]:
+    """Create an async iterator from a sequence of strings."""
+    for item in items:
+        yield item
+
+
+async def _async_iter_error(*items: str, error: Exception | None = None) -> AsyncIterator[str]:
+    """Async iterator that yields items, then raises an exception."""
+    for item in items:
+        yield item
+    if error is not None:
+        raise error
+
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
 def mock_agent() -> AsyncMock:
+    """Mock agent that returns a fixed string for non-streaming calls."""
     agent = AsyncMock()
     agent.run_conversational.return_value = "Hello! How can I help?"
     return agent
 
 
-@pytest.fixture
-def client(mock_agent: AsyncMock) -> TestClient:
-    app = FastAPI()
-    app.include_router(conversational.router)
+@pytest.fixture()
+def app(mock_agent: AsyncMock) -> FastAPI:
+    """FastAPI app wired up with the conversational router and mock agent."""
+    _app = FastAPI()
+    _app.include_router(conversational.router)
     conversational.set_agent(mock_agent)
-    yield TestClient(app)
+    yield _app  # type: ignore[misc]
     conversational.set_agent(None)
 
 
-class TestChatEndpoint:
+@pytest.fixture()
+def client(app: FastAPI) -> TestClient:
+    """Synchronous test client for non-streaming tests."""
+    return TestClient(app)
+
+
+@pytest.fixture()
+async def async_client(app: FastAPI) -> AsyncIterator[AsyncClient]:
+    """Async test client for streaming tests (httpx.AsyncClient)."""
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        yield ac
+
+
+def _parse_sse_events(text: str) -> list[str]:
+    """Split raw SSE text into individual event lines, filtering blanks."""
+    return [ln for ln in text.split("\n\n") if ln.strip()]
+
+
+def _parse_sse_payload(event_line: str) -> dict:
+    """Parse a 'data: {json}' line into a dict."""
+    return json.loads(event_line.removeprefix("data: "))
+
+
+# ---------------------------------------------------------------------------
+# 1. stream=False (default): returns normal JSON response
+# ---------------------------------------------------------------------------
+
+
+class TestNonStreamingChat:
+    """Existing non-streaming behaviour is preserved when stream=False (default)."""
+
     def test_chat_success(self, client: TestClient, mock_agent: AsyncMock) -> None:
         response = client.post(
             "/v1/chat/completions",
@@ -50,3 +111,530 @@ class TestChatEndpoint:
         tc = TestClient(app)
         response = tc.post("/v1/chat/completions", json={"message": "Hi"})
         assert response.status_code == 503
+
+    def test_chat_agent_error(self, client: TestClient, mock_agent: AsyncMock) -> None:
+        mock_agent.run_conversational.side_effect = RuntimeError("LLM timeout")
+        response = client.post(
+            "/v1/chat/completions",
+            json={"message": "Hi"},
+        )
+        assert response.status_code == 500
+
+    def test_stream_false_explicit(self, client: TestClient, mock_agent: AsyncMock) -> None:
+        """Explicitly passing stream=False uses the normal JSON path."""
+        response = client.post(
+            "/v1/chat/completions",
+            json={"message": "Hello", "stream": False},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["message"] == "Hello! How can I help?"
+        mock_agent.run_conversational.assert_called_once_with(
+            message="Hello",
+            session_id=data["session_id"],
+        )
+
+    def test_non_streaming_content_type(self, client: TestClient) -> None:
+        """Non-streaming responses return application/json."""
+        response = client.post(
+            "/v1/chat/completions",
+            json={"message": "Hi"},
+        )
+        assert "application/json" in response.headers["content-type"]
+
+
+# ---------------------------------------------------------------------------
+# 2. stream=True: returns SSE with text/event-stream content type
+# ---------------------------------------------------------------------------
+
+
+class TestStreamingContentType:
+    """Streaming responses use the correct SSE content type."""
+
+    async def test_streaming_content_type(
+        self, async_client: AsyncClient, mock_agent: AsyncMock
+    ) -> None:
+        mock_agent.run_conversational.return_value = _async_iter("Hello")
+        response = await async_client.post(
+            "/v1/chat/completions",
+            json={"message": "Hi", "stream": True},
+        )
+        assert response.headers["content-type"].startswith("text/event-stream")
+
+    async def test_streaming_calls_agent_with_stream_flag(
+        self, async_client: AsyncClient, mock_agent: AsyncMock
+    ) -> None:
+        """The agent is called with stream=True when the request asks for streaming."""
+        mock_agent.run_conversational.return_value = _async_iter("chunk")
+        await async_client.post(
+            "/v1/chat/completions",
+            json={"message": "Tell me a joke", "stream": True, "session_id": "s-flag"},
+        )
+        mock_agent.run_conversational.assert_called_once_with(
+            message="Tell me a joke",
+            session_id="s-flag",
+            stream=True,
+        )
+
+    def test_streaming_content_type_sync(self, client: TestClient, mock_agent: AsyncMock) -> None:
+        """Verify content type via sync TestClient as well."""
+        mock_agent.run_conversational.return_value = _async_iter("Hello")
+        response = client.post(
+            "/v1/chat/completions",
+            json={"message": "Hi", "stream": True},
+        )
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/event-stream")
+
+
+# ---------------------------------------------------------------------------
+# 3. stream=True: each chunk formatted as data: {json}\n\n
+# ---------------------------------------------------------------------------
+
+
+class TestSSEChunkFormat:
+    """Each streamed chunk follows the SSE data line protocol."""
+
+    async def test_chunk_is_json_data_line(
+        self, async_client: AsyncClient, mock_agent: AsyncMock
+    ) -> None:
+        mock_agent.run_conversational.return_value = _async_iter("Hello")
+        response = await async_client.post(
+            "/v1/chat/completions",
+            json={"message": "Hi", "stream": True},
+        )
+
+        events = _parse_sse_events(response.text)
+        # First event is a data chunk, last is [DONE]
+        chunk_line = events[0]
+        assert chunk_line.startswith("data: ")
+
+        payload = _parse_sse_payload(chunk_line)
+        assert payload["chunk"] == "Hello"
+
+    async def test_chunk_contains_session_id(
+        self, async_client: AsyncClient, mock_agent: AsyncMock
+    ) -> None:
+        mock_agent.run_conversational.return_value = _async_iter("Hi")
+        response = await async_client.post(
+            "/v1/chat/completions",
+            json={"message": "Hi", "stream": True, "session_id": "sess-42"},
+        )
+
+        events = _parse_sse_events(response.text)
+        payload = _parse_sse_payload(events[0])
+        assert payload["session_id"] == "sess-42"
+
+    async def test_all_data_lines_contain_valid_json(
+        self, async_client: AsyncClient, mock_agent: AsyncMock
+    ) -> None:
+        """All data lines (except [DONE]) contain valid JSON with a 'chunk' key."""
+        mock_agent.run_conversational.return_value = _async_iter("a", "b", "c")
+        response = await async_client.post(
+            "/v1/chat/completions",
+            json={"message": "Hi", "stream": True},
+        )
+
+        for line in _parse_sse_events(response.text):
+            raw = line.removeprefix("data: ")
+            if raw == "[DONE]":
+                continue
+            parsed = json.loads(raw)
+            assert "chunk" in parsed
+
+    def test_chunk_format_via_sync_client(self, client: TestClient, mock_agent: AsyncMock) -> None:
+        """SSE format validated with sync TestClient."""
+        mock_agent.run_conversational.return_value = _async_iter("Hello", " world")
+        response = client.post(
+            "/v1/chat/completions",
+            json={"message": "Hi", "stream": True, "session_id": "s1"},
+        )
+        events = _parse_sse_events(response.text)
+        assert len(events) == 3  # two chunks + [DONE]
+
+        chunk0 = _parse_sse_payload(events[0])
+        assert chunk0["chunk"] == "Hello"
+        assert chunk0["session_id"] == "s1"
+
+        chunk1 = _parse_sse_payload(events[1])
+        assert chunk1["chunk"] == " world"
+
+
+# ---------------------------------------------------------------------------
+# 4. stream=True: stream ends with data: [DONE]\n\n
+# ---------------------------------------------------------------------------
+
+
+class TestSSEDoneSentinel:
+    """Every stream terminates with a [DONE] sentinel."""
+
+    async def test_stream_ends_with_done(
+        self, async_client: AsyncClient, mock_agent: AsyncMock
+    ) -> None:
+        mock_agent.run_conversational.return_value = _async_iter("Hello", "World")
+        response = await async_client.post(
+            "/v1/chat/completions",
+            json={"message": "Hi", "stream": True},
+        )
+
+        assert response.text.rstrip().endswith("data: [DONE]")
+
+    async def test_done_sentinel_exact_format(
+        self, async_client: AsyncClient, mock_agent: AsyncMock
+    ) -> None:
+        """The sentinel is exactly 'data: [DONE]\\n\\n'."""
+        mock_agent.run_conversational.return_value = _async_iter("x")
+        response = await async_client.post(
+            "/v1/chat/completions",
+            json={"message": "Hi", "stream": True},
+        )
+
+        assert response.text.endswith("data: [DONE]\n\n")
+
+    async def test_done_is_last_event(
+        self, async_client: AsyncClient, mock_agent: AsyncMock
+    ) -> None:
+        """[DONE] is always the very last event in the stream."""
+        mock_agent.run_conversational.return_value = _async_iter("a", "b")
+        response = await async_client.post(
+            "/v1/chat/completions",
+            json={"message": "Hi", "stream": True},
+        )
+
+        events = _parse_sse_events(response.text)
+        assert events[-1] == "data: [DONE]"
+
+
+# ---------------------------------------------------------------------------
+# 5. stream=True: SSE headers present (Cache-Control, Connection)
+# ---------------------------------------------------------------------------
+
+
+class TestSSEHeaders:
+    """Streaming responses include SSE-required headers."""
+
+    async def test_cache_control_header(
+        self, async_client: AsyncClient, mock_agent: AsyncMock
+    ) -> None:
+        mock_agent.run_conversational.return_value = _async_iter("hi")
+        response = await async_client.post(
+            "/v1/chat/completions",
+            json={"message": "Hi", "stream": True},
+        )
+        assert response.headers.get("cache-control") == "no-cache"
+
+    async def test_connection_header(
+        self, async_client: AsyncClient, mock_agent: AsyncMock
+    ) -> None:
+        mock_agent.run_conversational.return_value = _async_iter("hi")
+        response = await async_client.post(
+            "/v1/chat/completions",
+            json={"message": "Hi", "stream": True},
+        )
+        assert response.headers.get("connection") == "keep-alive"
+
+    async def test_x_accel_buffering_header(
+        self, async_client: AsyncClient, mock_agent: AsyncMock
+    ) -> None:
+        """X-Accel-Buffering: no prevents nginx buffering of SSE."""
+        mock_agent.run_conversational.return_value = _async_iter("hi")
+        response = await async_client.post(
+            "/v1/chat/completions",
+            json={"message": "Hi", "stream": True},
+        )
+        assert response.headers.get("x-accel-buffering") == "no"
+
+    def test_sse_headers_via_sync_client(self, client: TestClient, mock_agent: AsyncMock) -> None:
+        """SSE headers present when verified via sync TestClient."""
+        mock_agent.run_conversational.return_value = _async_iter("Hi")
+        response = client.post(
+            "/v1/chat/completions",
+            json={"message": "Hi", "stream": True},
+        )
+        assert response.headers["cache-control"] == "no-cache"
+        assert response.headers["x-accel-buffering"] == "no"
+
+
+# ---------------------------------------------------------------------------
+# 6. Error during streaming: error event sent and stream closes
+# ---------------------------------------------------------------------------
+
+
+class TestStreamingErrors:
+    """Errors encountered mid-stream are delivered as error events."""
+
+    async def test_error_during_iteration_sends_error_event(
+        self, async_client: AsyncClient, mock_agent: AsyncMock
+    ) -> None:
+        """If the async iterator raises, an error data event is emitted."""
+        mock_agent.run_conversational.return_value = _async_iter_error(
+            "partial", error=RuntimeError("LLM connection lost")
+        )
+        response = await async_client.post(
+            "/v1/chat/completions",
+            json={"message": "Hi", "stream": True},
+        )
+
+        events = _parse_sse_events(response.text)
+        # Should have: partial chunk, error chunk, [DONE]
+        assert len(events) == 3
+
+        first = _parse_sse_payload(events[0])
+        assert first["chunk"] == "partial"
+
+        error_event = _parse_sse_payload(events[1])
+        assert "error" in error_event
+        assert "LLM connection lost" in error_event["error"]
+
+        assert events[2] == "data: [DONE]"
+
+    async def test_error_event_contains_session_id(
+        self, async_client: AsyncClient, mock_agent: AsyncMock
+    ) -> None:
+        mock_agent.run_conversational.return_value = _async_iter_error(
+            error=ValueError("bad input")
+        )
+        response = await async_client.post(
+            "/v1/chat/completions",
+            json={"message": "Hi", "stream": True, "session_id": "err-sess"},
+        )
+
+        events = _parse_sse_events(response.text)
+        error_event = _parse_sse_payload(events[0])
+        assert error_event["session_id"] == "err-sess"
+
+    async def test_stream_closes_after_error(
+        self, async_client: AsyncClient, mock_agent: AsyncMock
+    ) -> None:
+        """After an error event, only [DONE] follows -- no more data."""
+        mock_agent.run_conversational.return_value = _async_iter_error(
+            "a", "b", error=RuntimeError("boom")
+        )
+        response = await async_client.post(
+            "/v1/chat/completions",
+            json={"message": "Hi", "stream": True},
+        )
+
+        events = _parse_sse_events(response.text)
+        # "a", "b", error, [DONE]
+        assert len(events) == 4
+        assert events[-1] == "data: [DONE]"
+
+        error_payload = _parse_sse_payload(events[-2])
+        assert "error" in error_payload
+
+    async def test_agent_startup_error_returns_500(
+        self, async_client: AsyncClient, mock_agent: AsyncMock
+    ) -> None:
+        """If the agent raises before streaming starts, return HTTP 500."""
+        mock_agent.run_conversational.side_effect = RuntimeError("Init failed")
+        response = await async_client.post(
+            "/v1/chat/completions",
+            json={"message": "Hi", "stream": True},
+        )
+        assert response.status_code == 500
+
+    async def test_no_agent_returns_503_for_stream(self) -> None:
+        """stream=True with no agent configured returns 503."""
+        app = FastAPI()
+        app.include_router(conversational.router)
+        conversational.set_agent(None)
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+            response = await ac.post(
+                "/v1/chat/completions",
+                json={"message": "Hi", "stream": True},
+            )
+            assert response.status_code == 503
+
+    def test_error_during_iteration_via_sync_client(
+        self, client: TestClient, mock_agent: AsyncMock
+    ) -> None:
+        """Sync TestClient: error mid-stream sends error event + [DONE]."""
+
+        async def _failing_stream() -> AsyncIterator[str]:
+            yield "partial"
+            raise RuntimeError("mid-stream failure")
+
+        mock_agent.run_conversational.return_value = _failing_stream()
+        response = client.post(
+            "/v1/chat/completions",
+            json={"message": "Hi", "stream": True, "session_id": "s3"},
+        )
+        events = _parse_sse_events(response.text)
+        assert len(events) == 3
+
+        error_event = _parse_sse_payload(events[1])
+        assert "error" in error_event
+        assert "mid-stream failure" in error_event["error"]
+
+        assert events[2] == "data: [DONE]"
+
+
+# ---------------------------------------------------------------------------
+# 7. Empty stream: just sends [DONE]
+# ---------------------------------------------------------------------------
+
+
+class TestEmptyStream:
+    """An agent that yields no chunks still sends a valid [DONE] sentinel."""
+
+    async def test_empty_stream_sends_done(
+        self, async_client: AsyncClient, mock_agent: AsyncMock
+    ) -> None:
+        mock_agent.run_conversational.return_value = _async_iter()
+        response = await async_client.post(
+            "/v1/chat/completions",
+            json={"message": "Hi", "stream": True},
+        )
+
+        assert response.text.strip() == "data: [DONE]"
+
+    async def test_empty_stream_content_type(
+        self, async_client: AsyncClient, mock_agent: AsyncMock
+    ) -> None:
+        """Even an empty stream uses text/event-stream."""
+        mock_agent.run_conversational.return_value = _async_iter()
+        response = await async_client.post(
+            "/v1/chat/completions",
+            json={"message": "Hi", "stream": True},
+        )
+        assert response.headers["content-type"].startswith("text/event-stream")
+
+    async def test_empty_stream_has_sse_headers(
+        self, async_client: AsyncClient, mock_agent: AsyncMock
+    ) -> None:
+        mock_agent.run_conversational.return_value = _async_iter()
+        response = await async_client.post(
+            "/v1/chat/completions",
+            json={"message": "Hi", "stream": True},
+        )
+        assert response.headers.get("cache-control") == "no-cache"
+
+    async def test_empty_stream_no_data_chunks(
+        self, async_client: AsyncClient, mock_agent: AsyncMock
+    ) -> None:
+        """Empty stream has exactly one event: [DONE]."""
+        mock_agent.run_conversational.return_value = _async_iter()
+        response = await async_client.post(
+            "/v1/chat/completions",
+            json={"message": "Hi", "stream": True},
+        )
+
+        events = _parse_sse_events(response.text)
+        assert len(events) == 1
+        assert events[0] == "data: [DONE]"
+
+
+# ---------------------------------------------------------------------------
+# 8. Multiple chunks: all received in order
+# ---------------------------------------------------------------------------
+
+
+class TestMultipleChunks:
+    """Multiple chunks from the agent are delivered in the correct order."""
+
+    async def test_chunks_arrive_in_order(
+        self, async_client: AsyncClient, mock_agent: AsyncMock
+    ) -> None:
+        mock_agent.run_conversational.return_value = _async_iter("Once", " upon", " a", " time")
+        response = await async_client.post(
+            "/v1/chat/completions",
+            json={"message": "Tell me a story", "stream": True},
+        )
+
+        events = _parse_sse_events(response.text)
+        # 4 chunks + [DONE]
+        assert len(events) == 5
+
+        chunks = [_parse_sse_payload(ev)["chunk"] for ev in events[:-1]]
+        assert chunks == ["Once", " upon", " a", " time"]
+
+    async def test_many_chunks(self, async_client: AsyncClient, mock_agent: AsyncMock) -> None:
+        """Verify correctness with a large number of chunks."""
+        expected = [f"word_{i}" for i in range(50)]
+        mock_agent.run_conversational.return_value = _async_iter(*expected)
+        response = await async_client.post(
+            "/v1/chat/completions",
+            json={"message": "Go", "stream": True},
+        )
+
+        events = _parse_sse_events(response.text)
+        # 50 chunks + [DONE]
+        assert len(events) == 51
+
+        received = [_parse_sse_payload(ev)["chunk"] for ev in events[:-1]]
+        assert received == expected
+
+    async def test_chunks_preserve_whitespace_and_special_chars(
+        self, async_client: AsyncClient, mock_agent: AsyncMock
+    ) -> None:
+        """Chunks with special characters and whitespace are preserved via JSON encoding."""
+        special = ['{"key": "value"}', "  spaces  ", "tab\there"]
+        mock_agent.run_conversational.return_value = _async_iter(*special)
+        response = await async_client.post(
+            "/v1/chat/completions",
+            json={"message": "Special", "stream": True},
+        )
+
+        events = _parse_sse_events(response.text)
+        received = [_parse_sse_payload(ev)["chunk"] for ev in events[:-1]]
+        assert received == special
+
+    async def test_session_id_consistent_across_chunks(
+        self, async_client: AsyncClient, mock_agent: AsyncMock
+    ) -> None:
+        """All chunks in a stream carry the same session_id."""
+        mock_agent.run_conversational.return_value = _async_iter("a", "b", "c")
+        response = await async_client.post(
+            "/v1/chat/completions",
+            json={"message": "Hi", "stream": True, "session_id": "fixed-sess"},
+        )
+
+        events = _parse_sse_events(response.text)
+        for ev in events[:-1]:
+            payload = _parse_sse_payload(ev)
+            assert payload["session_id"] == "fixed-sess"
+
+    async def test_auto_generated_session_id_in_stream(
+        self, async_client: AsyncClient, mock_agent: AsyncMock
+    ) -> None:
+        """When no session_id is provided, an auto-generated one appears in all chunks."""
+        mock_agent.run_conversational.return_value = _async_iter("hello", "world")
+        response = await async_client.post(
+            "/v1/chat/completions",
+            json={"message": "Hi", "stream": True},
+        )
+
+        events = _parse_sse_events(response.text)
+        session_ids = set()
+        for ev in events[:-1]:
+            payload = _parse_sse_payload(ev)
+            sid = payload["session_id"]
+            assert sid  # Non-empty
+            session_ids.add(sid)
+
+        # All chunks share the same auto-generated session id
+        assert len(session_ids) == 1
+
+    def test_multiple_chunks_via_sync_client(
+        self, client: TestClient, mock_agent: AsyncMock
+    ) -> None:
+        """Sync TestClient: multiple chunks arrive in order."""
+        mock_agent.run_conversational.return_value = _async_iter("Hello", " world")
+        response = client.post(
+            "/v1/chat/completions",
+            json={"message": "Hi", "stream": True, "session_id": "sync-s"},
+        )
+        events = _parse_sse_events(response.text)
+        assert len(events) == 3  # 2 chunks + [DONE]
+
+        chunk0 = _parse_sse_payload(events[0])
+        assert chunk0["chunk"] == "Hello"
+        assert chunk0["session_id"] == "sync-s"
+
+        chunk1 = _parse_sse_payload(events[1])
+        assert chunk1["chunk"] == " world"
+        assert chunk1["session_id"] == "sync-s"
+
+        assert events[2] == "data: [DONE]"
