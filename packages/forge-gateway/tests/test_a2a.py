@@ -80,7 +80,30 @@ class TestA2ATask:
         assert response.status_code == 200
         data = response.json()
         assert data["status"] == "failed"
-        assert "Agent error" in data["error"]
+        assert data["error"] == "Internal server error"
+        # Must NOT leak the original exception message.
+        assert "Agent error" not in (data.get("error") or "")
+
+    def test_submit_task_error_does_not_leak_details(
+        self, client: TestClient, mock_agent: AsyncMock
+    ) -> None:
+        """A2A task errors must not expose internal exception messages."""
+        mock_agent.run_structured.side_effect = RuntimeError(
+            "Connection refused: postgres://admin:secret@db:5432/forge"
+        )
+        response = client.post(
+            "/a2a/tasks",
+            json={"task_type": "fail", "payload": {}},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "failed"
+        # Must contain a safe generic message.
+        assert data["error"] == "Internal server error"
+        # Must NOT contain the raw exception details.
+        assert "postgres" not in (data.get("error") or "")
+        assert "secret" not in (data.get("error") or "")
+        assert "Connection refused" not in (data.get("error") or "")
 
     def test_submit_task_returns_503_when_no_agent(self) -> None:
         """POST /a2a/tasks returns 503 when the agent is not initialized."""

@@ -411,3 +411,163 @@ class TestAgentNotInitializedErrors:
             mock_init.return_value = None
             with pytest.raises(RuntimeError, match="not initialized"):
                 await agent.run_structured("Do something")
+
+
+class TestModelSettingsWiring:
+    """Tests that LLMRouter.model_settings are passed to PydanticAI Agent."""
+
+    @pytest.mark.anyio
+    async def test_create_agent_passes_model_settings(self) -> None:
+        """model_settings from LLMRouter are forwarded to PydanticAI Agent."""
+        from unittest.mock import MagicMock
+
+        config = _make_config()
+        test_model = TestModel()
+        agent = ForgeAgent(config, model_override=test_model)
+
+        # Patch the LLM router to return specific model_settings.
+        agent._llm_router = MagicMock()
+        agent._llm_router.model_settings = {
+            "temperature": 0.7,
+            "max_tokens": 1000,
+        }
+        agent._llm_router.model_name = "test-model"
+        agent._llm_router.system_prompt = None
+
+        with patch(
+            "forge_agent.agent.core.PydanticAIAgent",
+        ) as mock_agent_cls:
+            mock_instance = MagicMock()
+            mock_agent_cls.return_value = mock_instance
+            agent._create_agent()
+
+        call_kwargs = mock_agent_cls.call_args.kwargs
+        assert "model_settings" in call_kwargs
+        assert call_kwargs["model_settings"]["temperature"] == 0.7
+        assert call_kwargs["model_settings"]["max_tokens"] == 1000
+
+    @pytest.mark.anyio
+    async def test_create_agent_skips_none_model_settings(self) -> None:
+        """When model_settings values are all None, Agent gets no model_settings."""
+        from unittest.mock import MagicMock
+
+        config = _make_config()
+        test_model = TestModel()
+        agent = ForgeAgent(config, model_override=test_model)
+
+        # Router returns settings where all passthrough values are None.
+        agent._llm_router = MagicMock()
+        agent._llm_router.model_settings = {
+            "temperature": None,
+            "max_tokens": None,
+        }
+        agent._llm_router.model_name = "test-model"
+        agent._llm_router.system_prompt = None
+
+        with patch(
+            "forge_agent.agent.core.PydanticAIAgent",
+        ) as mock_agent_cls:
+            mock_instance = MagicMock()
+            mock_agent_cls.return_value = mock_instance
+            agent._create_agent()
+
+        call_kwargs = mock_agent_cls.call_args.kwargs
+        # None values should be filtered out, so no model_settings kwarg.
+        assert "model_settings" not in call_kwargs
+
+    @pytest.mark.anyio
+    async def test_create_agent_skips_empty_model_settings(self) -> None:
+        """When model_settings is empty dict, Agent gets no model_settings."""
+        from unittest.mock import MagicMock
+
+        config = _make_config()
+        test_model = TestModel()
+        agent = ForgeAgent(config, model_override=test_model)
+
+        agent._llm_router = MagicMock()
+        agent._llm_router.model_settings = {}
+        agent._llm_router.model_name = "test-model"
+        agent._llm_router.system_prompt = None
+
+        with patch(
+            "forge_agent.agent.core.PydanticAIAgent",
+        ) as mock_agent_cls:
+            mock_instance = MagicMock()
+            mock_agent_cls.return_value = mock_instance
+            agent._create_agent()
+
+        call_kwargs = mock_agent_cls.call_args.kwargs
+        assert "model_settings" not in call_kwargs
+
+    @pytest.mark.anyio
+    async def test_model_settings_passes_all_known_keys(self) -> None:
+        """All known keys (temperature, max_tokens, api_base) are forwarded."""
+        from unittest.mock import MagicMock
+
+        config = _make_config()
+        test_model = TestModel()
+        agent = ForgeAgent(config, model_override=test_model)
+
+        # Simulate sidecar mode: router includes api_base alongside
+        # temperature and max_tokens.
+        agent._llm_router = MagicMock()
+        agent._llm_router.model_settings = {
+            "temperature": 0.5,
+            "max_tokens": 2048,
+            "api_base": "http://localhost:4000",
+        }
+        agent._llm_router.model_name = "openai/gpt-4o"
+        agent._llm_router.system_prompt = None
+
+        with patch(
+            "forge_agent.agent.core.PydanticAIAgent",
+        ) as mock_agent_cls:
+            mock_instance = MagicMock()
+            mock_agent_cls.return_value = mock_instance
+            agent._create_agent()
+
+        call_kwargs = mock_agent_cls.call_args.kwargs
+        assert "model_settings" in call_kwargs
+        settings = call_kwargs["model_settings"]
+        # temperature, max_tokens, and api_base are all passthrough keys.
+        assert settings["temperature"] == 0.5
+        assert settings["max_tokens"] == 2048
+        assert settings["api_base"] == "http://localhost:4000"
+
+    @pytest.mark.anyio
+    async def test_model_settings_wired_through_run_conversational(
+        self,
+    ) -> None:
+        """run_conversational uses an agent created with model_settings."""
+        from unittest.mock import MagicMock
+
+        config = _make_config()
+        test_model = TestModel()
+        agent = ForgeAgent(config, model_override=test_model)
+
+        agent._llm_router = MagicMock()
+        agent._llm_router.model_settings = {
+            "temperature": 0.9,
+            "max_tokens": 512,
+        }
+        agent._llm_router.model_name = "test-model"
+        agent._llm_router.system_prompt = "Be helpful"
+
+        with patch(
+            "forge_agent.agent.core.PydanticAIAgent",
+        ) as mock_agent_cls:
+            mock_run_result = MagicMock()
+            mock_run_result.output = "Hi there"
+            mock_run_result.all_messages.return_value = []
+
+            mock_instance = AsyncMock()
+            mock_instance.run = AsyncMock(return_value=mock_run_result)
+            mock_agent_cls.return_value = mock_instance
+
+            result = await agent.run_conversational("Hello!")
+
+        assert isinstance(result, ForgeRunResult)
+        call_kwargs = mock_agent_cls.call_args.kwargs
+        assert "model_settings" in call_kwargs
+        assert call_kwargs["model_settings"]["temperature"] == 0.9
+        assert call_kwargs["model_settings"]["max_tokens"] == 512

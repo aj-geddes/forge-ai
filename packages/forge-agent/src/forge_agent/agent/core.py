@@ -16,6 +16,7 @@ from pydantic import BaseModel
 from pydantic_ai import Agent as PydanticAIAgent
 from pydantic_ai.messages import ModelMessage, ModelResponse, ToolCallPart
 from pydantic_ai.models import Model
+from pydantic_ai.settings import ModelSettings
 from pydantic_ai.usage import UsageLimits
 
 from forge_agent.agent.context import ConversationContext
@@ -137,6 +138,31 @@ class ForgeAgent:
         await self._registry.build_and_swap(self._config)
         self._agent = self._create_agent()
 
+    # Keys from LLMRouter.model_settings that should be forwarded to
+    # PydanticAI ModelSettings.  ``temperature`` and ``max_tokens`` are
+    # first-class ModelSettings fields; ``api_base`` is an extra key that
+    # PydanticAI forwards to the underlying LiteLLM provider for
+    # sidecar/external proxy modes.
+    _PASSTHROUGH_SETTINGS: frozenset[str] = frozenset({"temperature", "max_tokens", "api_base"})
+
+    def _build_model_settings(self) -> ModelSettings | None:
+        """Build a PydanticAI ``ModelSettings`` from the LLM router config.
+
+        Only includes settings that are not ``None`` so that PydanticAI
+        defaults are preserved for unset values.
+
+        Returns:
+            A ``ModelSettings`` dict, or ``None`` when no settings apply.
+        """
+        raw = self._llm_router.model_settings
+        filtered: dict[str, Any] = {
+            k: v for k, v in raw.items() if k in self._PASSTHROUGH_SETTINGS and v is not None
+        }
+        if not filtered:
+            return None
+        # ModelSettings is a TypedDict; cast via dict unpacking.
+        return ModelSettings(**filtered)  # type: ignore[typeddict-item, no-any-return]
+
     def _create_agent(
         self,
         output_type: type | None = None,
@@ -172,6 +198,10 @@ class ForgeAgent:
 
         if output_type is not None:
             kwargs["output_type"] = output_type
+
+        pydantic_model_settings = self._build_model_settings()
+        if pydantic_model_settings:
+            kwargs["model_settings"] = pydantic_model_settings
 
         return PydanticAIAgent(**kwargs)
 

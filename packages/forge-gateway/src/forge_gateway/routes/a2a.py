@@ -134,6 +134,6 @@ async def submit_task(request: A2ATaskRequest) -> A2ATaskResponse:
             params=request.payload,
         )
         return A2ATaskResponse(status="completed", result=run_result.output)
-    except Exception as e:
+    except Exception:
         logger.exception("A2A task failed")
-        return A2ATaskResponse(status="failed", error=str(e))
+        return A2ATaskResponse(status="failed", error="Internal server error")
