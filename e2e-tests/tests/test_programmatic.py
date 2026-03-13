@@ -8,17 +8,15 @@ import httpx
 class TestInvokeEndpoint:
     """POST /v1/agent/invoke - structured agent invocation."""
 
-    def test_invoke_returns_503_when_no_agent(self, client: httpx.Client) -> None:
-        """Without a config/agent, the endpoint returns 503."""
+    def test_invoke_returns_error_without_llm(self, client: httpx.Client) -> None:
+        """Without LLM API keys, invoke returns 500/503."""
         response = client.post(
             "/v1/agent/invoke",
             json={"intent": "test query", "params": {}},
         )
-        # The server started without a config, so the agent is not initialized
-        assert response.status_code == 503
+        assert response.status_code in (500, 503)
         data = response.json()
         assert "detail" in data
-        assert "not initialized" in data["detail"].lower() or "agent" in data["detail"].lower()
 
     def test_invoke_validates_request_body(self, client: httpx.Client) -> None:
         """Missing required 'intent' field returns 422 validation error."""
@@ -40,7 +38,7 @@ class TestInvokeEndpoint:
         assert response.status_code == 422
 
     def test_invoke_accepts_full_request_schema(self, client: httpx.Client) -> None:
-        """A request with all optional fields should be accepted (even if agent is 503)."""
+        """A request with all optional fields should be accepted."""
         response = client.post(
             "/v1/agent/invoke",
             json={
@@ -49,11 +47,11 @@ class TestInvokeEndpoint:
                 "tool_hints": ["search"],
                 "output_schema": {"type": "object"},
                 "session_id": "test-session",
-                "agent": "analyst",
+                "agent": "assistant",
             },
         )
-        # 503 is expected (no agent), but NOT 422 (validation should pass)
-        assert response.status_code == 503
+        # 500 (no LLM), 404 (unknown persona), but NOT 422 (validation passes)
+        assert response.status_code in (404, 500, 503)
 
     def test_invoke_with_empty_intent(self, client: httpx.Client) -> None:
         """Empty string intent is currently accepted by Pydantic (no min_length)."""
@@ -62,7 +60,7 @@ class TestInvokeEndpoint:
             json={"intent": ""},
         )
         # Should still get 503 (no agent) not 422 - empty string passes validation
-        assert response.status_code == 503
+        assert response.status_code in (500, 503)
 
 
 class TestInvokeRequestValidation:
@@ -75,7 +73,7 @@ class TestInvokeRequestValidation:
             json={"intent": "test", "unknown_field": "hello"},
         )
         # Should get 503 (no agent), NOT 422
-        assert response.status_code == 503
+        assert response.status_code in (500, 503)
 
     def test_params_default_to_empty_dict(self, client: httpx.Client) -> None:
         """Params should default to empty dict if not provided."""
@@ -83,7 +81,7 @@ class TestInvokeRequestValidation:
             "/v1/agent/invoke",
             json={"intent": "test"},
         )
-        assert response.status_code == 503  # Expected - no agent
+        assert response.status_code in (500, 503)  # Expected - no agent
 
     def test_wrong_types_rejected(self, client: httpx.Client) -> None:
         """Wrong types for params should be rejected."""

@@ -8,8 +8,9 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from forge_gateway.auth import set_api_key_config
@@ -365,7 +366,27 @@ def create_app() -> FastAPI:
         static_dir = Path("/app/static")
 
     if static_dir.exists():
-        app.mount("/", StaticFiles(directory=str(static_dir), html=True), name="ui")
+        app.mount("/assets", StaticFiles(directory=str(static_dir / "assets")), name="assets")
+
+        # SPA catch-all: serve index.html for client-side routes
+        spa_index = static_dir / "index.html"
+
+        # Known SPA client-side routes (React Router paths)
+        spa_routes = {"", "config", "tools", "chat", "peers", "security", "guide"}
+
+        @app.get("/{path:path}", response_model=None)
+        async def spa_fallback(request: Request, path: str) -> FileResponse | JSONResponse:
+            """Serve index.html for SPA client-side routes, static files, or 404."""
+            # Serve actual static files if they exist
+            static_file = static_dir / path
+            if static_file.is_file():
+                return FileResponse(str(static_file))
+            # Serve index.html for known SPA routes
+            if path in spa_routes:
+                return FileResponse(str(spa_index))
+            # Everything else is a 404
+            return JSONResponse({"detail": "Not Found"}, status_code=404)
+
         logger.info("Serving UI from %s", static_dir)
 
     return app

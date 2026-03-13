@@ -68,20 +68,20 @@ class TestSwaggerUI:
 
     def test_swagger_ui_loads(self, page: Page) -> None:
         """Swagger UI at /docs should render the API title."""
-        page.goto("http://127.0.0.1:8001/docs")
+        page.goto("https://forge-ai.hvs/docs")
         expect(page.locator("h1")).to_contain_text("Forge AI Gateway")
         page.screenshot(path="e2e-screenshots/swagger/01-swagger-loaded.png")
 
     def test_swagger_shows_all_tag_groups(self, page: Page) -> None:
         """All 5 tag groups should be visible."""
-        page.goto("http://127.0.0.1:8001/docs")
+        page.goto("https://forge-ai.hvs/docs")
         for tag in ["health", "programmatic", "conversational", "a2a", "metrics"]:
             locator = page.get_by_role("link", name=tag, exact=True)
             expect(locator).to_be_visible()
 
     def test_swagger_expand_health_live(self, page: Page) -> None:
         """Clicking a health endpoint should expand its details."""
-        page.goto("http://127.0.0.1:8001/docs")
+        page.goto("https://forge-ai.hvs/docs")
         page.get_by_role("button", name="GET /health/live Liveness").click()
         # After expanding, a "Try it out" button should appear
         expect(page.get_by_role("button", name="Try it out")).to_be_visible()
@@ -89,7 +89,7 @@ class TestSwaggerUI:
 
     def test_swagger_try_health_live(self, page: Page) -> None:
         """Execute the /health/live endpoint from Swagger UI."""
-        page.goto("http://127.0.0.1:8001/docs")
+        page.goto("https://forge-ai.hvs/docs")
         page.get_by_role("button", name="GET /health/live Liveness").click()
         page.get_by_role("button", name="Try it out").click()
         page.get_by_role("button", name="Execute").click()
@@ -110,7 +110,7 @@ class TestSwaggerUI:
 
     def test_redoc_loads(self, page: Page) -> None:
         """ReDoc at /redoc should render."""
-        page.goto("http://127.0.0.1:8001/redoc")
+        page.goto("https://forge-ai.hvs/redoc")
         expect(page.locator("h1")).to_contain_text("Forge AI Gateway")
         page.screenshot(path="e2e-screenshots/swagger/04-redoc.png")
 
@@ -126,7 +126,7 @@ class TestSwaggerResponsive:
 
     def test_swagger_mobile_viewport(self, page: Page) -> None:
         page.set_viewport_size(self.VIEWPORTS["mobile"])
-        page.goto("http://127.0.0.1:8001/docs")
+        page.goto("https://forge-ai.hvs/docs")
         expect(page.locator("h1")).to_be_visible()
         page.screenshot(
             path="e2e-screenshots/responsive/swagger-mobile.png",
@@ -135,7 +135,7 @@ class TestSwaggerResponsive:
 
     def test_swagger_tablet_viewport(self, page: Page) -> None:
         page.set_viewport_size(self.VIEWPORTS["tablet"])
-        page.goto("http://127.0.0.1:8001/docs")
+        page.goto("https://forge-ai.hvs/docs")
         expect(page.locator("h1")).to_be_visible()
         page.screenshot(
             path="e2e-screenshots/responsive/swagger-tablet.png",
@@ -144,7 +144,7 @@ class TestSwaggerResponsive:
 
     def test_swagger_desktop_viewport(self, page: Page) -> None:
         page.set_viewport_size(self.VIEWPORTS["desktop"])
-        page.goto("http://127.0.0.1:8001/docs")
+        page.goto("https://forge-ai.hvs/docs")
         expect(page.locator("h1")).to_be_visible()
         page.screenshot(
             path="e2e-screenshots/responsive/swagger-desktop.png",

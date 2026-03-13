@@ -7,6 +7,12 @@ license = {text = "Apache-2.0"}
 authors = [
     {name = "High Velocity Solutions LLC", email = "info@hvs.solutions"}
 ]
+dependencies = [
+    "forge-config",
+    "forge-security",
+    "forge-agent",
+    "forge-gateway",
+]
 
 [dependency-groups]
 dev = [
@@ -17,10 +23,6 @@ dev = [
     "ruff>=0.9",
     "mypy>=1.14",
     "types-PyYAML>=6.0",
-    "forge-config",
-    "forge-security",
-    "forge-agent",
-    "forge-gateway",
 ]
 
 [tool.uv.workspace]

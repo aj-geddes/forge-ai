@@ -912,13 +912,15 @@ requires-dist = [
 name = "forge-ai"
 version = "0.1.0"
 source = { virtual = "." }
-
-[package.dev-dependencies]
-dev = [
+dependencies = [
     { name = "forge-agent" },
     { name = "forge-config" },
     { name = "forge-gateway" },
     { name = "forge-security" },
+]
+
+[package.dev-dependencies]
+dev = [
     { name = "mypy" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
@@ -929,13 +931,15 @@ dev = [
 ]
 
 [package.metadata]
-
-[package.metadata.requires-dev]
-dev = [
+requires-dist = [
     { name = "forge-agent", editable = "packages/forge-agent" },
     { name = "forge-config", editable = "packages/forge-config" },
     { name = "forge-gateway", editable = "packages/forge-gateway" },
     { name = "forge-security", editable = "packages/forge-security" },
+]
+
+[package.metadata.requires-dev]
+dev = [
     { name = "mypy", specifier = ">=1.14" },
     { name = "pytest", specifier = ">=8.0" },
     { name = "pytest-asyncio", specifier = ">=0.25" },

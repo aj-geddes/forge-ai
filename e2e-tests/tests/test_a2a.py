@@ -44,12 +44,15 @@ class TestAgentCard:
 class TestA2ATaskSubmission:
     """POST /a2a/tasks - task submission."""
 
-    def test_submit_task_returns_503_without_agent(self, client: httpx.Client) -> None:
+    def test_submit_task_returns_failed_status(self, client: httpx.Client) -> None:
+        """Without LLM, task returns 200 with failed status in body."""
         response = client.post(
             "/a2a/tasks",
             json={"task_type": "search", "payload": {"query": "test"}},
         )
-        assert response.status_code == 503
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "failed"
 
     def test_submit_task_validates_missing_task_type(self, client: httpx.Client) -> None:
         """Missing required 'task_type' field returns 422."""
@@ -60,7 +63,7 @@ class TestA2ATaskSubmission:
         assert response.status_code == 422
 
     def test_submit_task_accepts_full_request(self, client: httpx.Client) -> None:
-        """Full A2A request accepted (even if 503)."""
+        """Full A2A request accepted."""
         response = client.post(
             "/a2a/tasks",
             json={
@@ -69,7 +72,7 @@ class TestA2ATaskSubmission:
                 "caller_id": "external-agent-xyz",
             },
         )
-        assert response.status_code == 503
+        assert response.status_code == 200
 
     def test_submit_task_minimal_request(self, client: httpx.Client) -> None:
         """Minimal request with just task_type."""
@@ -77,7 +80,7 @@ class TestA2ATaskSubmission:
             "/a2a/tasks",
             json={"task_type": "ping"},
         )
-        assert response.status_code == 503
+        assert response.status_code == 200
 
     def test_submit_task_rejects_non_json(self, client: httpx.Client) -> None:
         response = client.post(

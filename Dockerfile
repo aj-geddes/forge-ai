@@ -37,9 +37,9 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # Copy source code
 COPY forge-ai/packages/ packages/
 
-# Install workspace packages
+# Install workspace packages (non-editable so paths work in runtime image)
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev
+    uv sync --frozen --no-dev --no-editable
 
 # Stage 3: Runtime
 FROM python:3.12-slim-bookworm AS runtime
