@@ -140,6 +140,7 @@ class TestNonStreamingChat:
             session_id=data["session_id"],
             system_prompt_override=None,
             model_name_override=None,
+            max_turns_override=None,
         )
 
     def test_non_streaming_content_type(self, client: TestClient) -> None:
@@ -184,6 +185,7 @@ class TestStreamingContentType:
             stream=True,
             system_prompt_override=None,
             model_name_override=None,
+            max_turns_override=None,
         )
 
     def test_streaming_content_type_sync(self, client: TestClient, mock_agent: AsyncMock) -> None:

@@ -265,3 +265,115 @@ class TestForgeAgentPersonaRouting:
         async for chunk in result:
             chunks.append(chunk)
         assert len(chunks) > 0
+
+
+class TestForgeAgentMaxTurns:
+    """Tests for max_turns_override support in ForgeAgent methods."""
+
+    @pytest.mark.anyio
+    async def test_run_conversational_with_max_turns_override(self) -> None:
+        """run_conversational passes usage_limits to PydanticAI agent.run."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from pydantic_ai.usage import UsageLimits
+
+        config = _make_config()
+        test_model = TestModel()
+        agent = ForgeAgent(config, model_override=test_model)
+        await agent.initialize()
+
+        mock_result = MagicMock()
+        mock_result.output = "Hello!"
+        mock_result.all_messages.return_value = []
+        mock_run = AsyncMock(return_value=mock_result)
+
+        assert agent._agent is not None
+        with patch.object(agent._agent, "run", mock_run):
+            result = await agent.run_conversational(
+                "Hello!",
+                max_turns_override=5,
+            )
+
+        assert isinstance(result, ForgeRunResult)
+        usage_limits = mock_run.call_args.kwargs.get("usage_limits")
+        assert isinstance(usage_limits, UsageLimits)
+        assert usage_limits.request_limit == 5
+
+    @pytest.mark.anyio
+    async def test_run_structured_with_max_turns_override(self) -> None:
+        """run_structured passes usage_limits to PydanticAI agent.run."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from pydantic_ai.usage import UsageLimits
+
+        config = _make_config()
+        test_model = TestModel()
+        agent = ForgeAgent(config, model_override=test_model)
+        await agent.initialize()
+
+        mock_result = MagicMock()
+        mock_result.output = {"result": "done"}
+        mock_result.all_messages.return_value = []
+        mock_run = AsyncMock(return_value=mock_result)
+
+        assert agent._agent is not None
+        with patch.object(agent._agent, "run", mock_run):
+            result = await agent.run_structured(
+                "Do something",
+                max_turns_override=3,
+            )
+
+        assert isinstance(result, ForgeRunResult)
+        usage_limits = mock_run.call_args.kwargs.get("usage_limits")
+        assert isinstance(usage_limits, UsageLimits)
+        assert usage_limits.request_limit == 3
+
+    @pytest.mark.anyio
+    async def test_run_conversational_without_max_turns_uses_default(
+        self,
+    ) -> None:
+        """Without max_turns_override, no usage_limits kwarg is passed."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        config = _make_config()
+        test_model = TestModel()
+        agent = ForgeAgent(config, model_override=test_model)
+        await agent.initialize()
+
+        mock_result = MagicMock()
+        mock_result.output = "Hello!"
+        mock_result.all_messages.return_value = []
+        mock_run = AsyncMock(return_value=mock_result)
+
+        assert agent._agent is not None
+        with patch.object(agent._agent, "run", mock_run):
+            result = await agent.run_conversational("Hello!")
+
+        assert isinstance(result, ForgeRunResult)
+        call_kwargs = mock_run.call_args.kwargs
+        assert "usage_limits" not in call_kwargs
+
+    @pytest.mark.anyio
+    async def test_run_structured_without_max_turns_uses_default(
+        self,
+    ) -> None:
+        """Without max_turns_override, no usage_limits kwarg is passed."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        config = _make_config()
+        test_model = TestModel()
+        agent = ForgeAgent(config, model_override=test_model)
+        await agent.initialize()
+
+        mock_result = MagicMock()
+        mock_result.output = {"result": "done"}
+        mock_result.all_messages.return_value = []
+        mock_run = AsyncMock(return_value=mock_result)
+
+        assert agent._agent is not None
+        with patch.object(agent._agent, "run", mock_run):
+            result = await agent.run_structured("Do something")
+
+        assert isinstance(result, ForgeRunResult)
+        call_kwargs = mock_run.call_args.kwargs
+        assert "usage_limits" not in call_kwargs

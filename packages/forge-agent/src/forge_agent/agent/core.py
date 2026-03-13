@@ -16,6 +16,7 @@ from pydantic import BaseModel
 from pydantic_ai import Agent as PydanticAIAgent
 from pydantic_ai.messages import ModelMessage, ModelResponse, ToolCallPart
 from pydantic_ai.models import Model
+from pydantic_ai.usage import UsageLimits
 
 from forge_agent.agent.context import ConversationContext
 from forge_agent.agent.llm import LLMRouter
@@ -56,6 +57,22 @@ def _extract_model_name(messages: list[ModelMessage]) -> str | None:
         if isinstance(msg, ModelResponse) and msg.model_name:
             return msg.model_name
     return None
+
+
+def _build_usage_limits(max_turns: int | None) -> UsageLimits | None:
+    """Convert a max_turns integer into PydanticAI ``UsageLimits``.
+
+    Args:
+        max_turns: Maximum number of LLM request turns, or None to
+            leave unlimited (PydanticAI defaults apply).
+
+    Returns:
+        A ``UsageLimits`` with ``request_limit`` set, or None when
+        no limit is requested.
+    """
+    if max_turns is None:
+        return None
+    return UsageLimits(request_limit=max_turns)
 
 
 class ForgeAgent:
@@ -166,6 +183,7 @@ class ForgeAgent:
         *,
         system_prompt_override: str | None = None,
         model_name_override: str | None = None,
+        max_turns_override: int | None = None,
     ) -> ForgeRunResult | AsyncIterator[str]:
         """Run a conversational interaction with the agent.
 
@@ -175,6 +193,8 @@ class ForgeAgent:
             stream: If True, return an async iterator of text chunks.
             system_prompt_override: If set, replaces the default system prompt.
             model_name_override: If set, replaces the default model name.
+            max_turns_override: If set, limits the number of LLM request
+                turns via PydanticAI's ``usage_limits``.
 
         Returns:
             A ForgeRunResult containing the response and metadata,
@@ -197,13 +217,24 @@ class ForgeAgent:
         if session_id:
             message_history = self._context.get_messages(session_id) or None
 
-        if stream:
-            return self._make_stream(message, session_id, message_history, agent_override=agent)
+        usage_limits = _build_usage_limits(max_turns_override)
 
-        result = await agent.run(
-            message,
-            message_history=message_history,
-        )
+        if stream:
+            return self._make_stream(
+                message,
+                session_id,
+                message_history,
+                agent_override=agent,
+                usage_limits=usage_limits,
+            )
+
+        run_kwargs: dict[str, Any] = {
+            "message_history": message_history,
+        }
+        if usage_limits is not None:
+            run_kwargs["usage_limits"] = usage_limits
+
+        result = await agent.run(message, **run_kwargs)
 
         all_msgs = list(result.all_messages())
 
@@ -224,6 +255,7 @@ class ForgeAgent:
         message_history: list[Any] | None,
         *,
         agent_override: PydanticAIAgent[None] | None = None,
+        usage_limits: UsageLimits | None = None,
     ) -> AsyncIterator[str]:
         """Create an async iterator that streams the agent response.
 
@@ -232,6 +264,7 @@ class ForgeAgent:
             session_id: Optional session ID.
             message_history: Previous messages for context.
             agent_override: If set, use this agent instead of the default.
+            usage_limits: Optional limits on model request count.
 
         Returns:
             Async iterator yielding text chunks.
@@ -240,11 +273,14 @@ class ForgeAgent:
         context = self._context
         assert agent is not None
 
+        stream_kwargs: dict[str, Any] = {
+            "message_history": message_history,
+        }
+        if usage_limits is not None:
+            stream_kwargs["usage_limits"] = usage_limits
+
         async def _generate() -> AsyncIterator[str]:
-            async with agent.run_stream(
-                message,
-                message_history=message_history,
-            ) as stream:
+            async with agent.run_stream(message, **stream_kwargs) as stream:
                 async for text in stream.stream_output(debounce_by=None):
                     yield text
 
@@ -262,6 +298,7 @@ class ForgeAgent:
         *,
         system_prompt_override: str | None = None,
         model_name_override: str | None = None,
+        max_turns_override: int | None = None,
     ) -> ForgeRunResult:
         """Run a structured interaction that returns typed output.
 
@@ -271,6 +308,8 @@ class ForgeAgent:
             output_schema: A Pydantic BaseModel class for the output type.
             system_prompt_override: If set, replaces the default system prompt.
             model_name_override: If set, replaces the default model name.
+            max_turns_override: If set, limits the number of LLM request
+                turns via PydanticAI's ``usage_limits``.
 
         Returns:
             A ForgeRunResult containing the output and run metadata.
@@ -294,12 +333,17 @@ class ForgeAgent:
             param_str = ", ".join(f"{k}={v}" for k, v in params.items())
             prompt = f"{intent} (parameters: {param_str})"
 
+        usage_limits = _build_usage_limits(max_turns_override)
+        run_kwargs: dict[str, Any] = {}
+        if usage_limits is not None:
+            run_kwargs["usage_limits"] = usage_limits
+
         if output_schema is not None:
-            structured_result = await agent.run(prompt, output_type=output_schema)
+            structured_result = await agent.run(prompt, output_type=output_schema, **run_kwargs)
             output: Any = structured_result.output
             all_msgs = list(structured_result.all_messages())
         else:
-            text_result = await agent.run(prompt)
+            text_result = await agent.run(prompt, **run_kwargs)
             output = {"result": text_result.output}
             all_msgs = list(text_result.all_messages())
 

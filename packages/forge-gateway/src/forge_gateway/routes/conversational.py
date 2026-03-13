@@ -13,6 +13,7 @@ from fastapi.responses import StreamingResponse
 from forge_config.schema import AgentDef, ForgeConfig
 
 from forge_gateway.models import ConversationRequest, ConversationResponse, ErrorResponse
+from forge_gateway.routes.persona import resolve_persona
 from forge_gateway.security import security_dependency
 
 logger = logging.getLogger(__name__)
@@ -40,23 +41,10 @@ def set_config(config: ForgeConfig | None) -> None:
 def _resolve_persona(agent_name: str | None) -> AgentDef | None:
     """Resolve an agent persona name to its AgentDef from config.
 
-    Returns None when no persona is specified (or the name is empty),
-    indicating the default agent behaviour should be used.
-
-    Raises HTTPException(404) when a non-empty name does not match any
-    configured persona.
+    Delegates to the shared ``resolve_persona`` helper, passing the
+    module-level ``_config``.
     """
-    if not agent_name:
-        return None
-
-    if _config is None:
-        raise HTTPException(status_code=404, detail="Unknown agent persona")
-
-    for agent_def in _config.agents.agents:
-        if agent_def.name == agent_name:
-            return agent_def
-
-    raise HTTPException(status_code=404, detail="Unknown agent persona")
+    return resolve_persona(agent_name, _config)
 
 
 async def _sse_generator(
@@ -111,8 +99,9 @@ async def _handle_non_streaming(
         run_result = await _forge_agent.run_conversational(
             message=request.message,
             session_id=session_id,
-            system_prompt_override=persona.system_prompt if persona else None,
+            system_prompt_override=(persona.system_prompt if persona else None),
             model_name_override=persona.model if persona else None,
+            max_turns_override=(persona.max_turns if persona else None),
         )
         return ConversationResponse(
             message=run_result.output,
@@ -138,8 +127,9 @@ async def _handle_streaming(
             message=request.message,
             session_id=session_id,
             stream=True,
-            system_prompt_override=persona.system_prompt if persona else None,
+            system_prompt_override=(persona.system_prompt if persona else None),
             model_name_override=persona.model if persona else None,
+            max_turns_override=(persona.max_turns if persona else None),
         )
     except Exception as e:
         logger.exception("Failed to start streaming response")

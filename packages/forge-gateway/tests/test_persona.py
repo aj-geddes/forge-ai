@@ -773,3 +773,118 @@ class TestResolvePersonaFunction:
         with pytest.raises(HTTPException) as exc_info:
             programmatic._resolve_persona("anything")
         assert exc_info.value.status_code == 404
+
+
+# ===========================================================================
+# max_turns forwarding through persona -> agent call
+# ===========================================================================
+
+
+class TestMaxTurnsForwarding:
+    """Verify that a persona's max_turns is forwarded as max_turns_override
+    to the underlying ForgeAgent run methods via the route layer.
+    """
+
+    def test_invoke_persona_with_max_turns_forwards_override(
+        self, invoke_client: TestClient, mock_agent: AsyncMock
+    ) -> None:
+        """The coder persona (max_turns=5) passes max_turns_override=5."""
+        response = invoke_client.post(
+            "/v1/agent/invoke",
+            json={"intent": "write code", "agent": "coder"},
+        )
+        assert response.status_code == 200
+
+        call_kwargs = mock_agent.run_structured.call_args.kwargs
+        assert call_kwargs["max_turns_override"] == 5
+
+    def test_chat_persona_with_max_turns_forwards_override(
+        self, chat_client: TestClient, mock_agent: AsyncMock
+    ) -> None:
+        """The coder persona (max_turns=5) passes max_turns_override=5."""
+        response = chat_client.post(
+            "/v1/chat/completions",
+            json={"message": "Help me code", "agent": "coder"},
+        )
+        assert response.status_code == 200
+
+        call_kwargs = mock_agent.run_conversational.call_args.kwargs
+        assert call_kwargs["max_turns_override"] == 5
+
+    def test_invoke_persona_writer_max_turns_forwards_override(
+        self, invoke_client: TestClient, mock_agent: AsyncMock
+    ) -> None:
+        """The writer persona (max_turns=15) passes max_turns_override=15."""
+        response = invoke_client.post(
+            "/v1/agent/invoke",
+            json={"intent": "write essay", "agent": "writer"},
+        )
+        assert response.status_code == 200
+
+        call_kwargs = mock_agent.run_structured.call_args.kwargs
+        assert call_kwargs["max_turns_override"] == 15
+
+    def test_chat_persona_writer_max_turns_forwards_override(
+        self, chat_client: TestClient, mock_agent: AsyncMock
+    ) -> None:
+        """The writer persona (max_turns=15) passes max_turns_override=15."""
+        response = chat_client.post(
+            "/v1/chat/completions",
+            json={"message": "Write a poem", "agent": "writer"},
+        )
+        assert response.status_code == 200
+
+        call_kwargs = mock_agent.run_conversational.call_args.kwargs
+        assert call_kwargs["max_turns_override"] == 15
+
+    def test_invoke_no_persona_does_not_pass_max_turns(
+        self, invoke_client: TestClient, mock_agent: AsyncMock
+    ) -> None:
+        """When no persona is specified, max_turns_override is None."""
+        response = invoke_client.post(
+            "/v1/agent/invoke",
+            json={"intent": "test"},
+        )
+        assert response.status_code == 200
+
+        call_kwargs = mock_agent.run_structured.call_args.kwargs
+        assert call_kwargs["max_turns_override"] is None
+
+    def test_chat_no_persona_does_not_pass_max_turns(
+        self, chat_client: TestClient, mock_agent: AsyncMock
+    ) -> None:
+        """When no persona is specified, max_turns_override is None."""
+        response = chat_client.post(
+            "/v1/chat/completions",
+            json={"message": "Hi"},
+        )
+        assert response.status_code == 200
+
+        call_kwargs = mock_agent.run_conversational.call_args.kwargs
+        assert call_kwargs["max_turns_override"] is None
+
+    def test_invoke_minimal_persona_forwards_default_max_turns(
+        self, invoke_client: TestClient, mock_agent: AsyncMock
+    ) -> None:
+        """The minimal persona uses default max_turns=10, which is forwarded."""
+        response = invoke_client.post(
+            "/v1/agent/invoke",
+            json={"intent": "test", "agent": "minimal"},
+        )
+        assert response.status_code == 200
+
+        call_kwargs = mock_agent.run_structured.call_args.kwargs
+        assert call_kwargs["max_turns_override"] == 10
+
+    def test_chat_minimal_persona_forwards_default_max_turns(
+        self, chat_client: TestClient, mock_agent: AsyncMock
+    ) -> None:
+        """The minimal persona uses default max_turns=10, which is forwarded."""
+        response = chat_client.post(
+            "/v1/chat/completions",
+            json={"message": "Hi", "agent": "minimal"},
+        )
+        assert response.status_code == 200
+
+        call_kwargs = mock_agent.run_conversational.call_args.kwargs
+        assert call_kwargs["max_turns_override"] == 10
