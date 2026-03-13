@@ -314,6 +314,7 @@ class SecurityConfig(BaseModel):
 
     agentweave: AgentWeaveConfig = Field(default_factory=AgentWeaveConfig)
     api_keys: APIKeyConfig = Field(default_factory=APIKeyConfig)
+    jwt_secret: SecretRef | None = None
     rate_limit_rpm: int = 60
     allowed_origins: list[str] = Field(default_factory=lambda: ["*"])
 

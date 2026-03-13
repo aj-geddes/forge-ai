@@ -7,14 +7,18 @@ dependency.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
+import jwt
 from forge_config.schema import SecurityConfig
 
 from forge_security.audit import AuditLogger, ToolCallEvent
 from forge_security.identity import ForgeIdentityManager
 from forge_security.trust import PolicyDecision, TrustPolicyEnforcer
+
+logger = logging.getLogger("forge.security.middleware")
 
 # ---------------------------------------------------------------------------
 # Protocols for pluggable authorization
@@ -49,6 +53,10 @@ class GateResult:
     identity: str
     reason: str
     audit_event: ToolCallEvent | None = None
+
+
+class JWTAuthenticationError(Exception):
+    """Raised when JWT token verification fails."""
 
 
 # ---------------------------------------------------------------------------
@@ -88,11 +96,14 @@ class SecurityGate:
         trust_enforcer: TrustPolicyEnforcer,
         audit_logger: AuditLogger,
         authz_provider: AuthorizationProviderProtocol | None = None,
+        jwt_secret: str | None = None,
     ) -> None:
         self._identity = identity_manager
         self._trust = trust_enforcer
         self._audit = audit_logger
         self._authz = authz_provider
+        self._jwt_secret: str | None = jwt_secret
+        self._jwt_warning_logged: bool = False
 
     # -- factory ------------------------------------------------------------
 
@@ -101,6 +112,7 @@ class SecurityGate:
         cls,
         config: SecurityConfig,
         authz_provider: AuthorizationProviderProtocol | None = None,
+        jwt_secret: str | None = None,
     ) -> SecurityGate:
         """Build a ``SecurityGate`` from a ``SecurityConfig``."""
         identity_mgr = ForgeIdentityManager(
@@ -114,6 +126,7 @@ class SecurityGate:
             trust_enforcer=trust_enforcer,
             audit_logger=audit_logger,
             authz_provider=authz_provider,
+            jwt_secret=jwt_secret,
         )
 
     # -- main entry point ---------------------------------------------------
@@ -137,8 +150,22 @@ class SecurityGate:
 
         Returns a ``GateResult`` summarising the outcome.
         """
-        # 1. Authenticate
-        identity = await self.authenticate(caller_id)
+        # 1. Authenticate (JWT verification when configured)
+        try:
+            identity = await self.authenticate(caller_id)
+        except JWTAuthenticationError as exc:
+            event = await self._audit.log_tool_call(
+                caller_id=caller_id,
+                tool_name=tool_name,
+                allowed=False,
+                reason=str(exc),
+            )
+            return GateResult(
+                allowed=False,
+                identity=caller_id,
+                reason=str(exc),
+                audit_event=event,
+            )
 
         # 2. Trust policy (origin + rate limit)
         policy: PolicyDecision = await self._trust.evaluate(
@@ -194,15 +221,57 @@ class SecurityGate:
     # -- individual checks --------------------------------------------------
 
     async def authenticate(self, caller_id: str) -> str:
-        """Resolve and return the caller identity string.
+        """Resolve and return the verified caller identity string.
 
-        In the current implementation we trust the caller_id as-is and
-        cross-reference it with the identity manager.  A production
-        implementation would verify mTLS certificates or JWT tokens here.
+        When ``_jwt_secret`` is configured and *caller_id* looks like a
+        JWT (contains two dots), the token is decoded and verified using
+        HS256.  The ``sub`` claim is returned as the authenticated
+        identity.
+
+        When no ``_jwt_secret`` is configured, the method falls through
+        to trust-as-is behaviour for dev/testing compatibility and logs
+        a warning once.
         """
         # Ensure our own identity is available
         _our_id = await self._identity.get_identity()
+
+        looks_like_jwt = caller_id.count(".") == 2
+
+        if self._jwt_secret is not None and looks_like_jwt:
+            return self._verify_jwt(caller_id)
+
+        if self._jwt_secret is None and not self._jwt_warning_logged:
+            logger.warning(
+                "No jwt_secret configured — caller_id trusted as-is. "
+                "Set security.jwt_secret in config for production use."
+            )
+            self._jwt_warning_logged = True
+
         return caller_id
+
+    def _verify_jwt(self, token: str) -> str:
+        """Decode a JWT token and return the ``sub`` claim.
+
+        Raises ``GateResult`` denial indirectly by re-raising
+        ``jwt.PyJWTError`` so the caller can handle it.
+        """
+        try:
+            payload: dict[str, Any] = jwt.decode(
+                token,
+                self._jwt_secret,  # type: ignore[arg-type]
+                algorithms=["HS256"],
+                options={"verify_aud": False},
+            )
+        except jwt.PyJWTError as exc:
+            msg = f"JWT verification failed: {exc}"
+            raise JWTAuthenticationError(msg) from exc
+
+        sub: str | None = payload.get("sub")
+        if not sub:
+            msg = "JWT missing required 'sub' claim"
+            raise JWTAuthenticationError(msg)
+
+        return sub
 
     async def authorize_tool_call(
         self,

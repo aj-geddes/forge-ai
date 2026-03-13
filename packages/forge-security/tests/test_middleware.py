@@ -3,12 +3,19 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import jwt
+import pytest
 from forge_config.schema import SecurityConfig
 from forge_security.audit import AuditLogger
 from forge_security.identity import ForgeIdentityManager
-from forge_security.middleware import GateResult, SecurityGate
+from forge_security.middleware import (
+    GateResult,
+    JWTAuthenticationError,
+    SecurityGate,
+)
 from forge_security.trust import TrustPolicyEnforcer
 
 # ---------------------------------------------------------------------------
@@ -53,6 +60,7 @@ def _make_gate(
     authz=None,
     allowed_origins: list[str] | None = None,
     rate_limit_rpm: int = 60,
+    jwt_secret: str | None = None,
 ) -> SecurityGate:
     config = SecurityConfig(
         allowed_origins=allowed_origins if allowed_origins is not None else ["*"],
@@ -63,6 +71,7 @@ def _make_gate(
         trust_enforcer=TrustPolicyEnforcer(config),
         audit_logger=AuditLogger(),
         authz_provider=authz,
+        jwt_secret=jwt_secret,
     )
 
 
@@ -143,3 +152,115 @@ class TestSecurityGate:
         assert isinstance(result, GateResult)
         assert result.identity == "agent-x"
         assert result.reason == "all checks passed"
+
+
+# ---------------------------------------------------------------------------
+# JWT Authentication Tests
+# ---------------------------------------------------------------------------
+
+JWT_SECRET = "test-secret-key-for-jwt-hs256-min32bytes!"
+WRONG_SECRET = "wrong-secret-key-definitely-not-right!!"
+
+
+def _make_jwt(
+    sub: str | None = "agent-1",
+    secret: str = JWT_SECRET,
+    exp_delta: timedelta | None = None,
+    extra_claims: dict[str, Any] | None = None,
+) -> str:
+    """Create an HS256-signed JWT for testing."""
+    payload: dict[str, Any] = {}
+    if sub is not None:
+        payload["sub"] = sub
+    if exp_delta is not None:
+        payload["exp"] = datetime.now(tz=UTC) + exp_delta
+    else:
+        # Default: valid for 1 hour
+        payload["exp"] = datetime.now(tz=UTC) + timedelta(hours=1)
+    if extra_claims:
+        payload.update(extra_claims)
+    return jwt.encode(payload, secret, algorithm="HS256")
+
+
+class TestJWTAuthentication:
+    """Tests for JWT-based authentication in SecurityGate."""
+
+    async def test_authenticate_with_valid_jwt(self):
+        """A valid HS256 JWT with sub claim returns the subject."""
+        gate = _make_gate(jwt_secret=JWT_SECRET)
+        token = _make_jwt(sub="agent-1")
+        identity = await gate.authenticate(token)
+        assert identity == "agent-1"
+
+    async def test_authenticate_with_invalid_jwt_signature(self):
+        """A JWT signed with the wrong secret is rejected."""
+        gate = _make_gate(jwt_secret=JWT_SECRET)
+        token = _make_jwt(sub="agent-1", secret=WRONG_SECRET)
+        with pytest.raises(JWTAuthenticationError, match="JWT verification failed"):
+            await gate.authenticate(token)
+
+    async def test_authenticate_with_expired_jwt(self):
+        """An expired JWT is rejected."""
+        gate = _make_gate(jwt_secret=JWT_SECRET)
+        token = _make_jwt(sub="agent-1", exp_delta=timedelta(hours=-1))
+        with pytest.raises(JWTAuthenticationError, match="JWT verification failed"):
+            await gate.authenticate(token)
+
+    async def test_authenticate_with_missing_sub_claim(self):
+        """A valid JWT that lacks a 'sub' claim is rejected."""
+        gate = _make_gate(jwt_secret=JWT_SECRET)
+        token = _make_jwt(sub=None)
+        with pytest.raises(JWTAuthenticationError, match="missing required 'sub' claim"):
+            await gate.authenticate(token)
+
+    async def test_authenticate_without_jwt_secret_trusts_raw(self):
+        """Without jwt_secret configured, raw caller_id is trusted as-is."""
+        gate = _make_gate(jwt_secret=None)
+        identity = await gate.authenticate("raw-id")
+        assert identity == "raw-id"
+
+    async def test_authenticate_with_non_jwt_token_and_secret(self):
+        """When jwt_secret is set but token is not a JWT, it passes through.
+
+        Tokens without two dots are not treated as JWTs, so the raw
+        value is returned (this handles API keys, SPIFFE IDs, etc.).
+        """
+        gate = _make_gate(jwt_secret=JWT_SECRET)
+        identity = await gate.authenticate("plain-api-key")
+        assert identity == "plain-api-key"
+
+    async def test_valid_jwt_through_full_pipeline(self):
+        """A valid JWT flows through the full __call__ pipeline."""
+        gate = _make_gate(jwt_secret=JWT_SECRET)
+        token = _make_jwt(sub="pipeline-agent")
+        result = await gate(token, "search")
+        assert result.allowed is True
+        assert result.identity == "pipeline-agent"
+
+    async def test_invalid_jwt_through_full_pipeline_denied(self):
+        """An invalid JWT through __call__ returns a denied GateResult."""
+        gate = _make_gate(jwt_secret=JWT_SECRET)
+        token = _make_jwt(sub="agent-1", secret=WRONG_SECRET)
+        result = await gate(token, "search")
+        assert result.allowed is False
+        assert "JWT verification failed" in result.reason
+
+    async def test_jwt_with_additional_claims(self):
+        """Extra claims in the JWT do not interfere; sub is extracted."""
+        gate = _make_gate(jwt_secret=JWT_SECRET)
+        token = _make_jwt(
+            sub="agent-42",
+            extra_claims={"iss": "forge", "role": "admin", "org": "acme"},
+        )
+        identity = await gate.authenticate(token)
+        assert identity == "agent-42"
+
+    async def test_jwt_warning_logged_without_secret(self, caplog):
+        """A warning is logged once when no jwt_secret is configured."""
+        gate = _make_gate(jwt_secret=None)
+        with caplog.at_level("WARNING", logger="forge.security.middleware"):
+            await gate.authenticate("id-1")
+            await gate.authenticate("id-2")
+        warning_msgs = [r.message for r in caplog.records if "jwt_secret" in r.message]
+        # Warning should appear exactly once (not on the second call)
+        assert len(warning_msgs) == 1

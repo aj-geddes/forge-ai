@@ -137,6 +137,31 @@ def _refresh_agent_card(config: object | None, agent: object | None = None) -> N
         logger.exception("Failed to build A2A agent card")
 
 
+def _resolve_jwt_secret(config: object) -> str | None:
+    """Resolve the JWT secret from config using the secret resolver.
+
+    Returns ``None`` when no ``jwt_secret`` is configured, which causes
+    ``SecurityGate`` to operate in trust-as-is dev mode.
+    """
+    from forge_config.schema import ForgeConfig
+
+    if not isinstance(config, ForgeConfig):
+        return None
+
+    ref = config.security.jwt_secret
+    if ref is None:
+        return None
+
+    try:
+        from forge_config import CompositeSecretResolver
+
+        resolver = CompositeSecretResolver()
+        return resolver.resolve(ref)
+    except Exception:
+        logger.warning("Could not resolve jwt_secret — JWT verification disabled")
+        return None
+
+
 def _init_security_gate(config: object | None) -> None:
     """Build and wire a ``SecurityGate`` from the loaded config.
 
@@ -158,7 +183,11 @@ def _init_security_gate(config: object | None) -> None:
     try:
         from forge_security import SecurityGate
 
-        gate = SecurityGate.from_config(config.security)
+        jwt_secret = _resolve_jwt_secret(config)
+        gate = SecurityGate.from_config(
+            config.security,
+            jwt_secret=jwt_secret,
+        )
         set_security_gate(gate)
         logger.info(
             "SecurityGate initialized for trust domain '%s'",

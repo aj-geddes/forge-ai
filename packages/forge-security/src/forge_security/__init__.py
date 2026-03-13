@@ -6,7 +6,11 @@ from forge_security.identity import (
     ForgeKeypair,
     MockIdentityProvider,
 )
-from forge_security.middleware import GateResult, SecurityGate
+from forge_security.middleware import (
+    GateResult,
+    JWTAuthenticationError,
+    SecurityGate,
+)
 from forge_security.rate_limit import RateLimitResult, SlidingWindowRateLimiter
 from forge_security.secrets import ForgeCompositeSecretResolver, K8sSecretResolver
 from forge_security.signing import MessageSigner, SignedMessage
@@ -36,4 +40,5 @@ __all__ = [
     # Middleware
     "SecurityGate",
     "GateResult",
+    "JWTAuthenticationError",
 ]
