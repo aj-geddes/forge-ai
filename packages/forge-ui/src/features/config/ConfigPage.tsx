@@ -39,7 +39,7 @@ export function ConfigPage() {
         });
       },
     });
-  }, [draft, updateConfig, setOriginal, toast]);
+  }, [draft, updateConfig, refetch, toast]);
 
   const handleReload = useCallback(() => {
     resetDraft();

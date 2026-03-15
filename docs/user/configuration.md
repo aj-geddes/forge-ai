@@ -231,7 +231,7 @@ tools:
           type: string
           description: "Contact email"
           required: true
-      steps:
+{% raw %}      steps:
         - tool: lookup_contact
           params:
             email: "{{ email }}"
@@ -239,7 +239,7 @@ tools:
         - tool: get_weather
           params:
             location: "{{ contact.city }}"
-          output_as: weather
+          output_as: weather{% endraw %}
           condition: "contact.city is not None"
 ```
 
