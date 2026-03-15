@@ -12,44 +12,102 @@ nav_order: 4
 
 The `Dockerfile` uses a three-stage build to produce a minimal runtime image targeting less than 200MB.
 
-```mermaid
-flowchart TD
-    subgraph Stage1["Stage 1: UI Builder"]
-        direction TB
-        N1["FROM node:22-slim"]
-        N2["npm ci (install deps)"]
-        N3["npm run build (Vite)"]
-        N4["/ui/dist (static assets)"]
-        N1 --> N2 --> N3 --> N4
-    end
+<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 1rem; padding: 1.5rem; background: var(--color-bg-secondary, #f8fafc); border-radius: 8px; border: 1px solid var(--color-border, #e2e8f0);">
 
-    subgraph Stage2["Stage 2: Python Builder"]
-        direction TB
-        P1["FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim"]
-        P2["Copy agentweave dependency"]
-        P3["Copy pyproject.toml + uv.lock"]
-        P4["uv sync --frozen --no-dev --no-install-workspace"]
-        P5["Copy source code"]
-        P6["uv sync --frozen --no-dev --no-editable"]
-        P7["/build/forge-ai/.venv"]
-        P1 --> P2 --> P3 --> P4 --> P5 --> P6 --> P7
-    end
+  <!-- Stage 1: UI Builder -->
+  <div style="padding: 1rem; background: white; border: 2px solid #1e1b4b; border-radius: 8px;">
+    <div style="font-weight: 700; color: #1e1b4b; margin-bottom: 0.75rem; padding-bottom: 0.5rem; border-bottom: 2px solid #e2e8f0;">Stage 1: UI Builder</div>
+    <div style="font-size: 0.8rem; color: #64748b;">
+      <div style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.375rem;">
+        <span style="display: inline-block; width: 1.25rem; height: 1.25rem; background: #eef2ff; color: #4338ca; border-radius: 4px; text-align: center; font-size: 0.7rem; line-height: 1.25rem; font-weight: 700; flex-shrink: 0;">1</span>
+        <code style="font-size: 0.75rem;">FROM node:22-slim</code>
+      </div>
+      <div style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.375rem;">
+        <span style="display: inline-block; width: 1.25rem; height: 1.25rem; background: #eef2ff; color: #4338ca; border-radius: 4px; text-align: center; font-size: 0.7rem; line-height: 1.25rem; font-weight: 700; flex-shrink: 0;">2</span>
+        npm ci (install deps)
+      </div>
+      <div style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.375rem;">
+        <span style="display: inline-block; width: 1.25rem; height: 1.25rem; background: #eef2ff; color: #4338ca; border-radius: 4px; text-align: center; font-size: 0.7rem; line-height: 1.25rem; font-weight: 700; flex-shrink: 0;">3</span>
+        npm run build (Vite)
+      </div>
+      <div style="display: flex; align-items: center; gap: 0.5rem;">
+        <span style="display: inline-block; width: 1.25rem; height: 1.25rem; background: #dcfce7; color: #166534; border-radius: 4px; text-align: center; font-size: 0.7rem; line-height: 1.25rem; font-weight: 700; flex-shrink: 0;">&#10003;</span>
+        <strong>/ui/dist</strong> (static assets)
+      </div>
+    </div>
+  </div>
 
-    subgraph Stage3["Stage 3: Runtime"]
-        direction TB
-        R1["FROM python:3.12-slim-bookworm"]
-        R2["Create forge user (uid 999)"]
-        R3["Copy .venv from Stage 2"]
-        R4["Copy static assets from Stage 1"]
-        R5["EXPOSE 8000 9090"]
-        R6["HEALTHCHECK /health/live"]
-        R7["ENTRYPOINT uvicorn"]
-        R1 --> R2 --> R3 --> R4 --> R5 --> R6 --> R7
-    end
+  <!-- Stage 2: Python Builder -->
+  <div style="padding: 1rem; background: white; border: 2px solid #312e81; border-radius: 8px;">
+    <div style="font-weight: 700; color: #312e81; margin-bottom: 0.75rem; padding-bottom: 0.5rem; border-bottom: 2px solid #e2e8f0;">Stage 2: Python Builder</div>
+    <div style="font-size: 0.8rem; color: #64748b;">
+      <div style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.375rem;">
+        <span style="display: inline-block; width: 1.25rem; height: 1.25rem; background: #eef2ff; color: #4338ca; border-radius: 4px; text-align: center; font-size: 0.7rem; line-height: 1.25rem; font-weight: 700; flex-shrink: 0;">1</span>
+        <code style="font-size: 0.75rem;">FROM uv:python3.12-bookworm-slim</code>
+      </div>
+      <div style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.375rem;">
+        <span style="display: inline-block; width: 1.25rem; height: 1.25rem; background: #eef2ff; color: #4338ca; border-radius: 4px; text-align: center; font-size: 0.7rem; line-height: 1.25rem; font-weight: 700; flex-shrink: 0;">2</span>
+        Copy agentweave dependency
+      </div>
+      <div style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.375rem;">
+        <span style="display: inline-block; width: 1.25rem; height: 1.25rem; background: #eef2ff; color: #4338ca; border-radius: 4px; text-align: center; font-size: 0.7rem; line-height: 1.25rem; font-weight: 700; flex-shrink: 0;">3</span>
+        Copy pyproject.toml + uv.lock
+      </div>
+      <div style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.375rem;">
+        <span style="display: inline-block; width: 1.25rem; height: 1.25rem; background: #eef2ff; color: #4338ca; border-radius: 4px; text-align: center; font-size: 0.7rem; line-height: 1.25rem; font-weight: 700; flex-shrink: 0;">4</span>
+        <code style="font-size: 0.75rem;">uv sync --frozen --no-dev</code>
+      </div>
+      <div style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.375rem;">
+        <span style="display: inline-block; width: 1.25rem; height: 1.25rem; background: #eef2ff; color: #4338ca; border-radius: 4px; text-align: center; font-size: 0.7rem; line-height: 1.25rem; font-weight: 700; flex-shrink: 0;">5</span>
+        Copy source code
+      </div>
+      <div style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.375rem;">
+        <span style="display: inline-block; width: 1.25rem; height: 1.25rem; background: #eef2ff; color: #4338ca; border-radius: 4px; text-align: center; font-size: 0.7rem; line-height: 1.25rem; font-weight: 700; flex-shrink: 0;">6</span>
+        <code style="font-size: 0.75rem;">uv sync --frozen --no-editable</code>
+      </div>
+      <div style="display: flex; align-items: center; gap: 0.5rem;">
+        <span style="display: inline-block; width: 1.25rem; height: 1.25rem; background: #dcfce7; color: #166534; border-radius: 4px; text-align: center; font-size: 0.7rem; line-height: 1.25rem; font-weight: 700; flex-shrink: 0;">&#10003;</span>
+        <strong>/build/forge-ai/.venv</strong>
+      </div>
+    </div>
+  </div>
 
-    Stage1 --> Stage3
-    Stage2 --> Stage3
-```
+  <!-- Stage 3: Runtime -->
+  <div style="padding: 1rem; background: white; border: 2px solid #4338ca; border-radius: 8px;">
+    <div style="font-weight: 700; color: #4338ca; margin-bottom: 0.75rem; padding-bottom: 0.5rem; border-bottom: 2px solid #e2e8f0;">Stage 3: Runtime</div>
+    <div style="font-size: 0.8rem; color: #64748b;">
+      <div style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.375rem;">
+        <span style="display: inline-block; width: 1.25rem; height: 1.25rem; background: #eef2ff; color: #4338ca; border-radius: 4px; text-align: center; font-size: 0.7rem; line-height: 1.25rem; font-weight: 700; flex-shrink: 0;">1</span>
+        <code style="font-size: 0.75rem;">FROM python:3.12-slim-bookworm</code>
+      </div>
+      <div style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.375rem;">
+        <span style="display: inline-block; width: 1.25rem; height: 1.25rem; background: #eef2ff; color: #4338ca; border-radius: 4px; text-align: center; font-size: 0.7rem; line-height: 1.25rem; font-weight: 700; flex-shrink: 0;">2</span>
+        Create forge user (uid 999)
+      </div>
+      <div style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.375rem;">
+        <span style="display: inline-block; width: 1.25rem; height: 1.25rem; background: #fef3c7; color: #92400e; border-radius: 4px; text-align: center; font-size: 0.7rem; line-height: 1.25rem; font-weight: 700; flex-shrink: 0;">&#8592;</span>
+        Copy .venv from <strong>Stage 2</strong>
+      </div>
+      <div style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.375rem;">
+        <span style="display: inline-block; width: 1.25rem; height: 1.25rem; background: #fef3c7; color: #92400e; border-radius: 4px; text-align: center; font-size: 0.7rem; line-height: 1.25rem; font-weight: 700; flex-shrink: 0;">&#8592;</span>
+        Copy static assets from <strong>Stage 1</strong>
+      </div>
+      <div style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.375rem;">
+        <span style="display: inline-block; width: 1.25rem; height: 1.25rem; background: #eef2ff; color: #4338ca; border-radius: 4px; text-align: center; font-size: 0.7rem; line-height: 1.25rem; font-weight: 700; flex-shrink: 0;">5</span>
+        EXPOSE 8000 9090
+      </div>
+      <div style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.375rem;">
+        <span style="display: inline-block; width: 1.25rem; height: 1.25rem; background: #eef2ff; color: #4338ca; border-radius: 4px; text-align: center; font-size: 0.7rem; line-height: 1.25rem; font-weight: 700; flex-shrink: 0;">6</span>
+        HEALTHCHECK /health/live
+      </div>
+      <div style="display: flex; align-items: center; gap: 0.5rem;">
+        <span style="display: inline-block; width: 1.25rem; height: 1.25rem; background: #dcfce7; color: #166534; border-radius: 4px; text-align: center; font-size: 0.7rem; line-height: 1.25rem; font-weight: 700; flex-shrink: 0;">&#10003;</span>
+        <strong>ENTRYPOINT uvicorn</strong>
+      </div>
+    </div>
+  </div>
+
+</div>
 
 ### Build Details
 
@@ -225,14 +283,46 @@ When persistence is enabled, a `PersistentVolumeClaim` is created with configura
 
 ## Environment Promotion
 
-```mermaid
-flowchart LR
-    Dev["Development<br/>values.dev.yaml<br/>1 replica, debug logging<br/>embedded LiteLLM<br/>no persistence"]
-    Staging["Staging<br/>values.yaml<br/>1 replica, info logging<br/>embedded LiteLLM<br/>optional persistence"]
-    Prod["Production<br/>values.prod.yaml<br/>3+ replicas, autoscaling<br/>dedicated LiteLLM<br/>Redis PVC, monitoring"]
-
-    Dev -->|promote| Staging -->|promote| Prod
-```
+<div style="display: flex; align-items: stretch; gap: 0; flex-wrap: wrap; padding: 1.5rem; background: var(--color-bg-secondary, #f8fafc); border-radius: 8px; border: 1px solid var(--color-border, #e2e8f0);">
+  <div style="flex: 1; min-width: 180px; padding: 1rem; background: white; border: 2px solid #1e1b4b; border-radius: 8px 0 0 8px;">
+    <div style="font-weight: 700; color: #1e1b4b; margin-bottom: 0.5rem;">Development</div>
+    <div style="font-size: 0.75rem; color: #64748b; font-style: italic; margin-bottom: 0.5rem;">values.dev.yaml</div>
+    <ul style="margin: 0; padding-left: 1.25rem; font-size: 0.8rem; color: #64748b; line-height: 1.6;">
+      <li>1 replica</li>
+      <li>Debug logging</li>
+      <li>Embedded LiteLLM</li>
+      <li>No persistence</li>
+    </ul>
+  </div>
+  <div style="display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 0 0.5rem;">
+    <div style="color: #4338ca; font-weight: 700; font-size: 1rem;">→</div>
+    <div style="font-size: 0.65rem; color: #64748b;">promote</div>
+  </div>
+  <div style="flex: 1; min-width: 180px; padding: 1rem; background: white; border: 2px solid #3730a3;">
+    <div style="font-weight: 700; color: #3730a3; margin-bottom: 0.5rem;">Staging</div>
+    <div style="font-size: 0.75rem; color: #64748b; font-style: italic; margin-bottom: 0.5rem;">values.yaml</div>
+    <ul style="margin: 0; padding-left: 1.25rem; font-size: 0.8rem; color: #64748b; line-height: 1.6;">
+      <li>1 replica</li>
+      <li>Info logging</li>
+      <li>Embedded LiteLLM</li>
+      <li>Optional persistence</li>
+    </ul>
+  </div>
+  <div style="display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 0 0.5rem;">
+    <div style="color: #4338ca; font-weight: 700; font-size: 1rem;">→</div>
+    <div style="font-size: 0.65rem; color: #64748b;">promote</div>
+  </div>
+  <div style="flex: 1; min-width: 180px; padding: 1rem; background: white; border: 2px solid #4338ca; border-radius: 0 8px 8px 0;">
+    <div style="font-weight: 700; color: #4338ca; margin-bottom: 0.5rem;">Production</div>
+    <div style="font-size: 0.75rem; color: #64748b; font-style: italic; margin-bottom: 0.5rem;">values.prod.yaml</div>
+    <ul style="margin: 0; padding-left: 1.25rem; font-size: 0.8rem; color: #64748b; line-height: 1.6;">
+      <li>3+ replicas, autoscaling</li>
+      <li>Dedicated LiteLLM</li>
+      <li>Redis PVC</li>
+      <li>Monitoring enabled</li>
+    </ul>
+  </div>
+</div>
 
 ### Development Environment
 

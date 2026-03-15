@@ -50,6 +50,7 @@ node_modules/
 
 # Screenshots and test artifacts
 *.png
+!docs/assets/images/**/*.png
 e2e-screenshots/
 e2e-tests/e2e-screenshots/
 

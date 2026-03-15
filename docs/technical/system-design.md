@@ -12,39 +12,87 @@ nav_order: 2
 
 Forge AI sits between end users (via a React SPA control plane) and LLM providers, orchestrating tool-augmented AI agent interactions through a config-driven pipeline.
 
-```mermaid
-graph TB
-    Users["Users / Operators"]
-    UI["Control Plane UI<br/>(React SPA)"]
-    Gateway["Forge Gateway<br/>(FastAPI)"]
-    Agent["Forge Agent<br/>(PydanticAI)"]
-    LLM["LLM Provider<br/>(via LiteLLM)"]
-    Tools["External APIs<br/>(OpenAPI / Manual)"]
-    Peers["Peer Agents<br/>(A2A Protocol)"]
-    Redis["Redis<br/>(Sessions / Cache)"]
-
-    Users --> UI
-    UI --> Gateway
-    Gateway --> Agent
-    Agent --> LLM
-    Agent --> Tools
-    Agent --> Peers
-    Gateway --> Redis
-```
+<div style="display: flex; flex-direction: column; align-items: center; gap: 0.5rem; padding: 1.5rem; background: var(--color-bg-secondary, #f8fafc); border-radius: 8px; border: 1px solid var(--color-border, #e2e8f0);">
+  <div style="padding: 0.75rem 1.5rem; background: #1e1b4b; color: white; border-radius: 6px; font-weight: 600; font-size: 0.875rem;">Users / Operators</div>
+  <div style="color: var(--color-text-muted, #64748b);">↓</div>
+  <div style="padding: 0.75rem 1.5rem; background: #312e81; color: white; border-radius: 6px; font-weight: 600; font-size: 0.875rem;">Control Plane UI <span style="font-weight: 400; opacity: 0.8;">(React SPA)</span></div>
+  <div style="color: var(--color-text-muted, #64748b);">↓</div>
+  <div style="padding: 0.75rem 1.5rem; background: #3730a3; color: white; border-radius: 6px; font-weight: 600; font-size: 0.875rem;">Forge Gateway <span style="font-weight: 400; opacity: 0.8;">(FastAPI)</span></div>
+  <div style="display: flex; gap: 2rem; align-items: flex-start; margin-top: 0.25rem;">
+    <div style="display: flex; flex-direction: column; align-items: center; gap: 0.5rem;">
+      <div style="color: var(--color-text-muted, #64748b);">↓</div>
+      <div style="padding: 0.75rem 1.5rem; background: #4338ca; color: white; border-radius: 6px; font-weight: 600; font-size: 0.875rem;">Forge Agent <span style="font-weight: 400; opacity: 0.8;">(PydanticAI)</span></div>
+      <div style="display: flex; gap: 1rem; margin-top: 0.25rem;">
+        <div style="display: flex; flex-direction: column; align-items: center; gap: 0.5rem;">
+          <div style="color: var(--color-text-muted, #64748b);">↓</div>
+          <div style="padding: 0.5rem 1rem; background: #f59e0b; color: #1e1b4b; border-radius: 6px; font-weight: 600; font-size: 0.8rem;">LLM Provider <span style="font-weight: 400;">(LiteLLM)</span></div>
+        </div>
+        <div style="display: flex; flex-direction: column; align-items: center; gap: 0.5rem;">
+          <div style="color: var(--color-text-muted, #64748b);">↓</div>
+          <div style="padding: 0.5rem 1rem; background: #f59e0b; color: #1e1b4b; border-radius: 6px; font-weight: 600; font-size: 0.8rem;">External APIs <span style="font-weight: 400;">(OpenAPI / Manual)</span></div>
+        </div>
+        <div style="display: flex; flex-direction: column; align-items: center; gap: 0.5rem;">
+          <div style="color: var(--color-text-muted, #64748b);">↓</div>
+          <div style="padding: 0.5rem 1rem; background: #f59e0b; color: #1e1b4b; border-radius: 6px; font-weight: 600; font-size: 0.8rem;">Peer Agents <span style="font-weight: 400;">(A2A)</span></div>
+        </div>
+      </div>
+    </div>
+    <div style="display: flex; flex-direction: column; align-items: center; gap: 0.5rem;">
+      <div style="color: var(--color-text-muted, #64748b);">↓</div>
+      <div style="padding: 0.5rem 1rem; background: #f59e0b; color: #1e1b4b; border-radius: 6px; font-weight: 600; font-size: 0.8rem;">Redis <span style="font-weight: 400;">(Sessions / Cache)</span></div>
+    </div>
+  </div>
+</div>
 
 ## Component Architecture
 
 The system is structured as a **uv monorepo workspace** with four Python packages. Dependencies flow in a single direction, enforcing separation of concerns:
 
-```mermaid
-graph LR
-    Config["forge-config<br/>Pydantic schema<br/>YAML loader<br/>Hot-reload watcher<br/>Secret resolution"]
-    Security["forge-security<br/>Identity management<br/>Message signing<br/>Audit logging<br/>Rate limiting<br/>Trust policy<br/>SecurityGate"]
-    Agent["forge-agent<br/>PydanticAI core<br/>Tool builders<br/>Tool registry<br/>LLM routing<br/>Peer calling"]
-    Gateway["forge-gateway<br/>FastAPI app<br/>REST / MCP / A2A<br/>Admin API<br/>SPA serving<br/>Auth middleware"]
-
-    Config --> Security --> Agent --> Gateway
-```
+<div style="display: flex; align-items: stretch; gap: 0; flex-wrap: wrap; padding: 1.5rem; background: var(--color-bg-secondary, #f8fafc); border-radius: 8px; border: 1px solid var(--color-border, #e2e8f0);">
+  <div style="flex: 1; min-width: 180px; padding: 1rem; background: white; border: 2px solid #1e1b4b; border-radius: 8px 0 0 8px; display: flex; flex-direction: column;">
+    <div style="font-weight: 700; color: #1e1b4b; margin-bottom: 0.5rem; font-size: 0.95rem;">forge-config</div>
+    <ul style="margin: 0; padding-left: 1.25rem; font-size: 0.8rem; color: #64748b; line-height: 1.6;">
+      <li>Pydantic schema</li>
+      <li>YAML loader</li>
+      <li>Hot-reload watcher</li>
+      <li>Secret resolution</li>
+    </ul>
+  </div>
+  <div style="display: flex; align-items: center; padding: 0 0.25rem; color: #4338ca; font-size: 1.25rem; font-weight: 700;">→</div>
+  <div style="flex: 1; min-width: 180px; padding: 1rem; background: white; border: 2px solid #312e81; display: flex; flex-direction: column;">
+    <div style="font-weight: 700; color: #312e81; margin-bottom: 0.5rem; font-size: 0.95rem;">forge-security</div>
+    <ul style="margin: 0; padding-left: 1.25rem; font-size: 0.8rem; color: #64748b; line-height: 1.6;">
+      <li>Identity management</li>
+      <li>Message signing</li>
+      <li>Audit logging</li>
+      <li>Rate limiting</li>
+      <li>Trust policy</li>
+      <li>SecurityGate</li>
+    </ul>
+  </div>
+  <div style="display: flex; align-items: center; padding: 0 0.25rem; color: #4338ca; font-size: 1.25rem; font-weight: 700;">→</div>
+  <div style="flex: 1; min-width: 180px; padding: 1rem; background: white; border: 2px solid #3730a3; display: flex; flex-direction: column;">
+    <div style="font-weight: 700; color: #3730a3; margin-bottom: 0.5rem; font-size: 0.95rem;">forge-agent</div>
+    <ul style="margin: 0; padding-left: 1.25rem; font-size: 0.8rem; color: #64748b; line-height: 1.6;">
+      <li>PydanticAI core</li>
+      <li>Tool builders</li>
+      <li>Tool registry</li>
+      <li>LLM routing</li>
+      <li>Peer calling</li>
+    </ul>
+  </div>
+  <div style="display: flex; align-items: center; padding: 0 0.25rem; color: #4338ca; font-size: 1.25rem; font-weight: 700;">→</div>
+  <div style="flex: 1; min-width: 180px; padding: 1rem; background: white; border: 2px solid #4338ca; border-radius: 0 8px 8px 0; display: flex; flex-direction: column;">
+    <div style="font-weight: 700; color: #4338ca; margin-bottom: 0.5rem; font-size: 0.95rem;">forge-gateway</div>
+    <ul style="margin: 0; padding-left: 1.25rem; font-size: 0.8rem; color: #64748b; line-height: 1.6;">
+      <li>FastAPI app</li>
+      <li>REST / MCP / A2A</li>
+      <li>Admin API</li>
+      <li>SPA serving</li>
+      <li>Auth middleware</li>
+    </ul>
+  </div>
+</div>
 
 ### Package Responsibilities
 
@@ -59,58 +107,120 @@ graph LR
 
 ### Conversational Request (UI to Agent)
 
-```mermaid
-sequenceDiagram
-    participant UI as React SPA
-    participant GW as Gateway (FastAPI)
-    participant Auth as Auth Middleware
-    participant SG as SecurityGate
-    participant Agent as ForgeAgent
-    participant LLM as LLM Provider
-    participant Tool as External API
-
-    UI->>GW: POST /v1/chat {message, session_id}
-    GW->>Auth: require_admin_key (Bearer / X-API-Key)
-    Auth-->>GW: validated key
-    GW->>SG: security_dependency (caller identity)
-    SG->>SG: JWT verification
-    SG->>SG: Trust policy (origin + rate limit)
-    SG->>SG: Audit log
-    SG-->>GW: CallerIdentity
-    GW->>Agent: run_conversational(message, session_id)
-    Agent->>LLM: PydanticAI agent.run()
-    LLM-->>Agent: response with tool calls
-    Agent->>Tool: Execute tool (httpx)
-    Tool-->>Agent: tool result
-    Agent->>LLM: Continue with tool results
-    LLM-->>Agent: final response
-    Agent-->>GW: ForgeRunResult
-    GW-->>UI: JSON response
-```
+<div style="padding: 1.5rem; background: var(--color-bg-secondary, #f8fafc); border-radius: 8px; border: 1px solid var(--color-border, #e2e8f0); overflow-x: auto;">
+  <div style="font-weight: 700; color: #1e1b4b; margin-bottom: 1rem; font-size: 0.95rem;">Conversational Request Flow</div>
+  <table style="width: 100%; border-collapse: collapse; font-size: 0.875rem;">
+    <thead>
+      <tr>
+        <th style="text-align: left; padding: 0.5rem; border-bottom: 2px solid #e2e8f0; color: #1e1b4b;">Step</th>
+        <th style="text-align: left; padding: 0.5rem; border-bottom: 2px solid #e2e8f0; color: #1e1b4b;">From</th>
+        <th style="text-align: left; padding: 0.5rem; border-bottom: 2px solid #e2e8f0; color: #1e1b4b;">To</th>
+        <th style="text-align: left; padding: 0.5rem; border-bottom: 2px solid #e2e8f0; color: #1e1b4b;">Action</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr style="border-bottom: 1px solid #e2e8f0;">
+        <td style="padding: 0.5rem; font-weight: 600; color: #4338ca;">1</td>
+        <td style="padding: 0.5rem;">React SPA</td>
+        <td style="padding: 0.5rem;">Gateway</td>
+        <td style="padding: 0.5rem;"><code>POST /v1/chat {message, session_id}</code></td>
+      </tr>
+      <tr style="border-bottom: 1px solid #e2e8f0;">
+        <td style="padding: 0.5rem; font-weight: 600; color: #4338ca;">2</td>
+        <td style="padding: 0.5rem;">Gateway</td>
+        <td style="padding: 0.5rem;">Auth Middleware</td>
+        <td style="padding: 0.5rem;">require_admin_key (Bearer / X-API-Key) &rarr; validated key</td>
+      </tr>
+      <tr style="border-bottom: 1px solid #e2e8f0; background: #fefce8;">
+        <td style="padding: 0.5rem; font-weight: 600; color: #4338ca;">3</td>
+        <td style="padding: 0.5rem;">Gateway</td>
+        <td style="padding: 0.5rem;">SecurityGate</td>
+        <td style="padding: 0.5rem;">security_dependency: JWT verification &rarr; Trust policy (origin + rate limit) &rarr; Audit log &rarr; returns CallerIdentity</td>
+      </tr>
+      <tr style="border-bottom: 1px solid #e2e8f0;">
+        <td style="padding: 0.5rem; font-weight: 600; color: #4338ca;">4</td>
+        <td style="padding: 0.5rem;">Gateway</td>
+        <td style="padding: 0.5rem;">ForgeAgent</td>
+        <td style="padding: 0.5rem;">run_conversational(message, session_id)</td>
+      </tr>
+      <tr style="border-bottom: 1px solid #e2e8f0;">
+        <td style="padding: 0.5rem; font-weight: 600; color: #4338ca;">5</td>
+        <td style="padding: 0.5rem;">ForgeAgent</td>
+        <td style="padding: 0.5rem;">LLM Provider</td>
+        <td style="padding: 0.5rem;">PydanticAI agent.run() &rarr; response with tool calls</td>
+      </tr>
+      <tr style="border-bottom: 1px solid #e2e8f0; background: #fefce8;">
+        <td style="padding: 0.5rem; font-weight: 600; color: #4338ca;">6</td>
+        <td style="padding: 0.5rem;">ForgeAgent</td>
+        <td style="padding: 0.5rem;">External API</td>
+        <td style="padding: 0.5rem;">Execute tool via httpx &rarr; tool result</td>
+      </tr>
+      <tr style="border-bottom: 1px solid #e2e8f0;">
+        <td style="padding: 0.5rem; font-weight: 600; color: #4338ca;">7</td>
+        <td style="padding: 0.5rem;">ForgeAgent</td>
+        <td style="padding: 0.5rem;">LLM Provider</td>
+        <td style="padding: 0.5rem;">Continue with tool results &rarr; final response</td>
+      </tr>
+      <tr>
+        <td style="padding: 0.5rem; font-weight: 600; color: #16a34a;">8</td>
+        <td style="padding: 0.5rem;">Gateway</td>
+        <td style="padding: 0.5rem;">React SPA</td>
+        <td style="padding: 0.5rem;">JSON response (ForgeRunResult)</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
 
 ### Admin Config Update (Hot-Reload)
 
-```mermaid
-sequenceDiagram
-    participant UI as React SPA
-    participant Admin as Admin API
-    participant Watcher as ConfigWatcher
-    participant Registry as ToolSurfaceRegistry
-    participant MCP as MCP Server
-
-    UI->>Admin: PUT /v1/admin/config
-    Admin->>Admin: Validate with ForgeConfig.model_validate()
-    Admin->>Admin: Write forge.yaml to disk
-    Admin->>Registry: build_and_swap(new_config)
-    Registry->>Registry: Compute version hash
-    Registry->>Registry: Build OpenAPI + Manual + Workflow tools
-    Registry->>Registry: Atomic swap under asyncio.Lock
-    Admin-->>UI: {success: true, reloaded: true}
-    Note over Watcher: File change detected (watchdog)
-    Watcher->>Watcher: Debounce (1s)
-    Watcher->>Admin: Reload config state
-    Watcher->>MCP: rebuild_mcp_server(registry)
-```
+<div style="padding: 1.5rem; background: var(--color-bg-secondary, #f8fafc); border-radius: 8px; border: 1px solid var(--color-border, #e2e8f0); overflow-x: auto;">
+  <div style="font-weight: 700; color: #1e1b4b; margin-bottom: 1rem; font-size: 0.95rem;">Admin Config Update (Hot-Reload) Flow</div>
+  <table style="width: 100%; border-collapse: collapse; font-size: 0.875rem;">
+    <thead>
+      <tr>
+        <th style="text-align: left; padding: 0.5rem; border-bottom: 2px solid #e2e8f0; color: #1e1b4b;">Step</th>
+        <th style="text-align: left; padding: 0.5rem; border-bottom: 2px solid #e2e8f0; color: #1e1b4b;">From</th>
+        <th style="text-align: left; padding: 0.5rem; border-bottom: 2px solid #e2e8f0; color: #1e1b4b;">To</th>
+        <th style="text-align: left; padding: 0.5rem; border-bottom: 2px solid #e2e8f0; color: #1e1b4b;">Action</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr style="border-bottom: 1px solid #e2e8f0;">
+        <td style="padding: 0.5rem; font-weight: 600; color: #4338ca;">1</td>
+        <td style="padding: 0.5rem;">React SPA</td>
+        <td style="padding: 0.5rem;">Admin API</td>
+        <td style="padding: 0.5rem;"><code>PUT /v1/admin/config</code></td>
+      </tr>
+      <tr style="border-bottom: 1px solid #e2e8f0;">
+        <td style="padding: 0.5rem; font-weight: 600; color: #4338ca;">2</td>
+        <td style="padding: 0.5rem;">Admin API</td>
+        <td style="padding: 0.5rem;">Admin API</td>
+        <td style="padding: 0.5rem;">Validate with <code>ForgeConfig.model_validate()</code></td>
+      </tr>
+      <tr style="border-bottom: 1px solid #e2e8f0;">
+        <td style="padding: 0.5rem; font-weight: 600; color: #4338ca;">3</td>
+        <td style="padding: 0.5rem;">Admin API</td>
+        <td style="padding: 0.5rem;">Filesystem</td>
+        <td style="padding: 0.5rem;">Write forge.yaml to disk</td>
+      </tr>
+      <tr style="border-bottom: 1px solid #e2e8f0; background: #fefce8;">
+        <td style="padding: 0.5rem; font-weight: 600; color: #4338ca;">4</td>
+        <td style="padding: 0.5rem;">Admin API</td>
+        <td style="padding: 0.5rem;">ToolSurfaceRegistry</td>
+        <td style="padding: 0.5rem;">build_and_swap(new_config): compute version hash &rarr; build OpenAPI + Manual + Workflow tools &rarr; atomic swap under asyncio.Lock</td>
+      </tr>
+      <tr style="border-bottom: 1px solid #e2e8f0;">
+        <td style="padding: 0.5rem; font-weight: 600; color: #16a34a;">5</td>
+        <td style="padding: 0.5rem;">Admin API</td>
+        <td style="padding: 0.5rem;">React SPA</td>
+        <td style="padding: 0.5rem;"><code>{success: true, reloaded: true}</code></td>
+      </tr>
+    </tbody>
+  </table>
+  <div style="margin-top: 1rem; padding: 0.75rem 1rem; background: #fffbeb; border: 1px solid #f59e0b; border-radius: 6px; font-size: 0.8rem; color: #92400e;">
+    <strong>Async follow-up (watchdog):</strong> File change detected &rarr; Debounce (1s) &rarr; Reload config state &rarr; rebuild_mcp_server(registry)
+  </div>
+</div>
 
 ## Technology Stack
 

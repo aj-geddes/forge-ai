@@ -35,6 +35,11 @@
   line-height: $line-height-relaxed;
   color: var(--color-text);
 
+  // Hide the first H1 inside prose since page-header already renders it
+  > h1:first-child {
+    display: none;
+  }
+
   // Headings with anchor links
   h2, h3, h4, h5, h6 {
     position: relative;

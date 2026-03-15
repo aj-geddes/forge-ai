@@ -14,17 +14,15 @@ Forge AI is a config-driven AI agent system built as a uv monorepo workspace wit
 
 The four Python packages form a strict, linear dependency chain:
 
-```mermaid
-graph LR
-    A[forge-config] --> B[forge-security]
-    B --> C[forge-agent]
-    C --> D[forge-gateway]
-
-    style A fill:#e1f5fe
-    style B fill:#fce4ec
-    style C fill:#e8f5e9
-    style D fill:#fff3e0
-```
+<div style="display: flex; align-items: center; justify-content: center; gap: 0.5rem; flex-wrap: wrap; padding: 1.5rem; background: var(--color-bg-secondary, #f8fafc); border-radius: 8px; border: 1px solid var(--color-border, #e2e8f0);">
+  <div style="padding: 0.75rem 1.5rem; background: #1e1b4b; color: white; border-radius: 6px; font-weight: 600; font-size: 0.875rem;">forge-config</div>
+  <div style="color: var(--color-text-muted, #64748b); font-size: 1.25rem;">→</div>
+  <div style="padding: 0.75rem 1.5rem; background: #312e81; color: white; border-radius: 6px; font-weight: 600; font-size: 0.875rem;">forge-security</div>
+  <div style="color: var(--color-text-muted, #64748b); font-size: 1.25rem;">→</div>
+  <div style="padding: 0.75rem 1.5rem; background: #3730a3; color: white; border-radius: 6px; font-weight: 600; font-size: 0.875rem;">forge-agent</div>
+  <div style="color: var(--color-text-muted, #64748b); font-size: 1.25rem;">→</div>
+  <div style="padding: 0.75rem 1.5rem; background: #4338ca; color: white; border-radius: 6px; font-weight: 600; font-size: 0.875rem;">forge-gateway</div>
+</div>
 
 Each package depends only on the packages to its left. This enforces a clean separation of concerns and prevents circular dependencies.
 
@@ -130,33 +128,85 @@ React admin dashboard for managing Forge instances.
 
 The system initializes in a strict sequence during the gateway's lifespan:
 
-```mermaid
-sequenceDiagram
-    participant Gateway as forge-gateway
-    participant Config as forge-config
-    participant Security as forge-security
-    participant Agent as forge-agent
-    participant LLM as LiteLLM
-    participant MCP as FastMCP
-
-    Gateway->>Config: load_config(FORGE_CONFIG_PATH)
-    Config-->>Gateway: ForgeConfig
-
-    Gateway->>Security: SecurityGate.from_config(security_config)
-    Security-->>Gateway: SecurityGate (or None for dev mode)
-
-    Gateway->>Agent: ForgeAgent(config)
-    Gateway->>Agent: agent.initialize()
-    Agent->>Agent: ToolSurfaceRegistry.build_and_swap()
-    Agent->>LLM: LLMRouter(llm_config)
-    Agent-->>Gateway: Ready
-
-    Gateway->>MCP: build_mcp_server(registry)
-    Gateway->>Gateway: Mount MCP at /mcp
-    Gateway->>Gateway: Build A2A agent card
-    Gateway->>Gateway: Start ConfigWatcher (hot-reload)
-    Gateway-->>Gateway: health.set_ready(True)
-```
+<div style="padding: 1.5rem; background: var(--color-bg-secondary, #f8fafc); border-radius: 8px; border: 1px solid var(--color-border, #e2e8f0); overflow-x: auto;">
+  <div style="font-weight: 700; color: #1e1b4b; margin-bottom: 1rem; font-size: 0.95rem;">Initialization Sequence</div>
+  <table style="width: 100%; border-collapse: collapse; font-size: 0.875rem;">
+    <thead>
+      <tr>
+        <th style="text-align: left; padding: 0.5rem; border-bottom: 2px solid #e2e8f0; color: #1e1b4b;">Step</th>
+        <th style="text-align: left; padding: 0.5rem; border-bottom: 2px solid #e2e8f0; color: #1e1b4b;">From</th>
+        <th style="text-align: left; padding: 0.5rem; border-bottom: 2px solid #e2e8f0; color: #1e1b4b;">To</th>
+        <th style="text-align: left; padding: 0.5rem; border-bottom: 2px solid #e2e8f0; color: #1e1b4b;">Action</th>
+        <th style="text-align: left; padding: 0.5rem; border-bottom: 2px solid #e2e8f0; color: #1e1b4b;">Returns</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr style="border-bottom: 1px solid #e2e8f0;">
+        <td style="padding: 0.5rem; font-weight: 600; color: #4338ca;">1</td>
+        <td style="padding: 0.5rem;"><code>forge-gateway</code></td>
+        <td style="padding: 0.5rem;"><code>forge-config</code></td>
+        <td style="padding: 0.5rem;">load_config(FORGE_CONFIG_PATH)</td>
+        <td style="padding: 0.5rem; color: #64748b;">ForgeConfig</td>
+      </tr>
+      <tr style="border-bottom: 1px solid #e2e8f0;">
+        <td style="padding: 0.5rem; font-weight: 600; color: #4338ca;">2</td>
+        <td style="padding: 0.5rem;"><code>forge-gateway</code></td>
+        <td style="padding: 0.5rem;"><code>forge-security</code></td>
+        <td style="padding: 0.5rem;">SecurityGate.from_config(security_config)</td>
+        <td style="padding: 0.5rem; color: #64748b;">SecurityGate | None (dev mode)</td>
+      </tr>
+      <tr style="border-bottom: 1px solid #e2e8f0;">
+        <td style="padding: 0.5rem; font-weight: 600; color: #4338ca;">3</td>
+        <td style="padding: 0.5rem;"><code>forge-gateway</code></td>
+        <td style="padding: 0.5rem;"><code>forge-agent</code></td>
+        <td style="padding: 0.5rem;">ForgeAgent(config) + agent.initialize()</td>
+        <td style="padding: 0.5rem; color: #64748b;">Ready</td>
+      </tr>
+      <tr style="border-bottom: 1px solid #e2e8f0;">
+        <td style="padding: 0.5rem; font-weight: 600; color: #4338ca;">3a</td>
+        <td style="padding: 0.5rem;"><code>forge-agent</code></td>
+        <td style="padding: 0.5rem;"><code>forge-agent</code></td>
+        <td style="padding: 0.5rem;">ToolSurfaceRegistry.build_and_swap()</td>
+        <td style="padding: 0.5rem; color: #64748b;">Tool surface built</td>
+      </tr>
+      <tr style="border-bottom: 1px solid #e2e8f0;">
+        <td style="padding: 0.5rem; font-weight: 600; color: #4338ca;">3b</td>
+        <td style="padding: 0.5rem;"><code>forge-agent</code></td>
+        <td style="padding: 0.5rem;"><code>LiteLLM</code></td>
+        <td style="padding: 0.5rem;">LLMRouter(llm_config)</td>
+        <td style="padding: 0.5rem; color: #64748b;">Router configured</td>
+      </tr>
+      <tr style="border-bottom: 1px solid #e2e8f0;">
+        <td style="padding: 0.5rem; font-weight: 600; color: #4338ca;">4</td>
+        <td style="padding: 0.5rem;"><code>forge-gateway</code></td>
+        <td style="padding: 0.5rem;"><code>FastMCP</code></td>
+        <td style="padding: 0.5rem;">build_mcp_server(registry)</td>
+        <td style="padding: 0.5rem; color: #64748b;">MCP server mounted at /mcp</td>
+      </tr>
+      <tr style="border-bottom: 1px solid #e2e8f0;">
+        <td style="padding: 0.5rem; font-weight: 600; color: #4338ca;">5</td>
+        <td style="padding: 0.5rem;"><code>forge-gateway</code></td>
+        <td style="padding: 0.5rem;"><code>forge-gateway</code></td>
+        <td style="padding: 0.5rem;">Build A2A agent card</td>
+        <td style="padding: 0.5rem; color: #64748b;">Agent card ready</td>
+      </tr>
+      <tr style="border-bottom: 1px solid #e2e8f0;">
+        <td style="padding: 0.5rem; font-weight: 600; color: #4338ca;">6</td>
+        <td style="padding: 0.5rem;"><code>forge-gateway</code></td>
+        <td style="padding: 0.5rem;"><code>forge-gateway</code></td>
+        <td style="padding: 0.5rem;">Start ConfigWatcher (hot-reload)</td>
+        <td style="padding: 0.5rem; color: #64748b;">Watching for changes</td>
+      </tr>
+      <tr>
+        <td style="padding: 0.5rem; font-weight: 600; color: #16a34a;">7</td>
+        <td style="padding: 0.5rem;"><code>forge-gateway</code></td>
+        <td style="padding: 0.5rem;">--</td>
+        <td style="padding: 0.5rem;">health.set_ready(True)</td>
+        <td style="padding: 0.5rem; color: #16a34a; font-weight: 600;">Application ready</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
 
 ### Hot-Reload Flow
 
@@ -213,36 +263,44 @@ forge-ai/
 
 ## External Dependency Graph
 
-```mermaid
-graph TD
-    FC[forge-config] --> Pydantic[Pydantic v2]
-    FC --> PyYAML[PyYAML]
-    FC --> Watchdog[watchdog]
-
-    FS[forge-security] --> FC
-    FS --> AW[AgentWeave]
-    FS --> Crypto[cryptography]
-    FS --> Jose[python-jose]
-
-    FA[forge-agent] --> FC
-    FA --> FS
-    FA --> PAI[PydanticAI]
-    FA --> LL[LiteLLM]
-    FA --> FMCP[FastMCP]
-    FA --> HTTPX[httpx]
-
-    FG[forge-gateway] --> FC
-    FG --> FS
-    FG --> FA
-    FG --> FastAPI[FastAPI]
-    FG --> Uvicorn[uvicorn]
-    FG --> Prom[prometheus-client]
-
-    style FC fill:#e1f5fe
-    style FS fill:#fce4ec
-    style FA fill:#e8f5e9
-    style FG fill:#fff3e0
-```
+<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 1rem; padding: 1.5rem; background: var(--color-bg-secondary, #f8fafc); border-radius: 8px; border: 1px solid var(--color-border, #e2e8f0);">
+  <div style="padding: 1rem; background: white; border: 2px solid #1e1b4b; border-radius: 8px;">
+    <div style="font-weight: 700; color: #1e1b4b; margin-bottom: 0.5rem;">forge-config</div>
+    <div style="font-size: 0.8rem; color: #64748b; line-height: 1.5;">
+      <span style="display: inline-block; padding: 0.125rem 0.5rem; background: #eef2ff; color: #3730a3; border-radius: 4px; margin: 0.125rem; font-size: 0.75rem;">Pydantic v2</span>
+      <span style="display: inline-block; padding: 0.125rem 0.5rem; background: #eef2ff; color: #3730a3; border-radius: 4px; margin: 0.125rem; font-size: 0.75rem;">PyYAML</span>
+      <span style="display: inline-block; padding: 0.125rem 0.5rem; background: #eef2ff; color: #3730a3; border-radius: 4px; margin: 0.125rem; font-size: 0.75rem;">watchdog</span>
+    </div>
+  </div>
+  <div style="padding: 1rem; background: white; border: 2px solid #312e81; border-radius: 8px;">
+    <div style="font-weight: 700; color: #312e81; margin-bottom: 0.25rem;">forge-security</div>
+    <div style="font-size: 0.75rem; color: #64748b; margin-bottom: 0.5rem;">depends on: forge-config</div>
+    <div style="font-size: 0.8rem; color: #64748b; line-height: 1.5;">
+      <span style="display: inline-block; padding: 0.125rem 0.5rem; background: #eef2ff; color: #3730a3; border-radius: 4px; margin: 0.125rem; font-size: 0.75rem;">AgentWeave</span>
+      <span style="display: inline-block; padding: 0.125rem 0.5rem; background: #eef2ff; color: #3730a3; border-radius: 4px; margin: 0.125rem; font-size: 0.75rem;">cryptography</span>
+      <span style="display: inline-block; padding: 0.125rem 0.5rem; background: #eef2ff; color: #3730a3; border-radius: 4px; margin: 0.125rem; font-size: 0.75rem;">python-jose</span>
+    </div>
+  </div>
+  <div style="padding: 1rem; background: white; border: 2px solid #3730a3; border-radius: 8px;">
+    <div style="font-weight: 700; color: #3730a3; margin-bottom: 0.25rem;">forge-agent</div>
+    <div style="font-size: 0.75rem; color: #64748b; margin-bottom: 0.5rem;">depends on: forge-config, forge-security</div>
+    <div style="font-size: 0.8rem; color: #64748b; line-height: 1.5;">
+      <span style="display: inline-block; padding: 0.125rem 0.5rem; background: #eef2ff; color: #3730a3; border-radius: 4px; margin: 0.125rem; font-size: 0.75rem;">PydanticAI</span>
+      <span style="display: inline-block; padding: 0.125rem 0.5rem; background: #eef2ff; color: #3730a3; border-radius: 4px; margin: 0.125rem; font-size: 0.75rem;">LiteLLM</span>
+      <span style="display: inline-block; padding: 0.125rem 0.5rem; background: #eef2ff; color: #3730a3; border-radius: 4px; margin: 0.125rem; font-size: 0.75rem;">FastMCP</span>
+      <span style="display: inline-block; padding: 0.125rem 0.5rem; background: #eef2ff; color: #3730a3; border-radius: 4px; margin: 0.125rem; font-size: 0.75rem;">httpx</span>
+    </div>
+  </div>
+  <div style="padding: 1rem; background: white; border: 2px solid #4338ca; border-radius: 8px;">
+    <div style="font-weight: 700; color: #4338ca; margin-bottom: 0.25rem;">forge-gateway</div>
+    <div style="font-size: 0.75rem; color: #64748b; margin-bottom: 0.5rem;">depends on: forge-config, forge-security, forge-agent</div>
+    <div style="font-size: 0.8rem; color: #64748b; line-height: 1.5;">
+      <span style="display: inline-block; padding: 0.125rem 0.5rem; background: #eef2ff; color: #3730a3; border-radius: 4px; margin: 0.125rem; font-size: 0.75rem;">FastAPI</span>
+      <span style="display: inline-block; padding: 0.125rem 0.5rem; background: #eef2ff; color: #3730a3; border-radius: 4px; margin: 0.125rem; font-size: 0.75rem;">uvicorn</span>
+      <span style="display: inline-block; padding: 0.125rem 0.5rem; background: #eef2ff; color: #3730a3; border-radius: 4px; margin: 0.125rem; font-size: 0.75rem;">prometheus-client</span>
+    </div>
+  </div>
+</div>
 
 | Dependency | Why It Is Used |
 |-----------|---------------|

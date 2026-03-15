@@ -27,41 +27,78 @@ All fields have defaults, so an empty `forge.yaml` file is valid and produces a 
 
 ### Model Hierarchy
 
-```mermaid
-erDiagram
-    ForgeConfig ||--|| ForgeMetadata : metadata
-    ForgeConfig ||--|| LLMConfig : llm
-    ForgeConfig ||--|| ToolsConfig : tools
-    ForgeConfig ||--|| SecurityConfig : security
-    ForgeConfig ||--|| AgentsConfig : agents
+<div style="padding: 1.5rem; background: var(--color-bg-secondary, #f8fafc); border-radius: 8px; border: 1px solid var(--color-border, #e2e8f0); overflow-x: auto;">
+  <div style="font-weight: 700; color: #1e1b4b; margin-bottom: 1rem; font-size: 0.95rem;">Model Hierarchy</div>
 
-    LLMConfig ||--|| LiteLLMConfig : litellm
+  <!-- Root: ForgeConfig -->
+  <div style="padding: 0.75rem 1rem; background: #1e1b4b; color: white; border-radius: 6px; font-weight: 700; font-size: 0.9rem; margin-bottom: 0.75rem;">ForgeConfig</div>
 
-    ToolsConfig ||--o{ OpenAPISource : openapi_sources
-    ToolsConfig ||--o{ ManualTool : manual_tools
-    ToolsConfig ||--o{ Workflow : workflows
+  <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 0.75rem; margin-left: 1rem; border-left: 3px solid #c7d2fe; padding-left: 1rem;">
 
-    OpenAPISource ||--|| AuthConfig : auth
-    ManualTool ||--|| ManualToolAPI : api
-    ManualToolAPI ||--|| AuthConfig : auth
-    ManualToolAPI ||--|| ResponseMapping : response_mapping
-    ManualTool ||--o{ ParameterDef : parameters
-    Workflow ||--o{ ParameterDef : parameters
-    Workflow ||--|{ WorkflowStep : steps
+    <!-- ForgeMetadata -->
+    <div style="padding: 0.75rem; background: white; border: 1px solid #e2e8f0; border-radius: 6px;">
+      <div style="font-weight: 600; color: #312e81; font-size: 0.85rem; margin-bottom: 0.25rem;">ForgeMetadata</div>
+      <div style="font-size: 0.75rem; color: #64748b;">field: <code>metadata</code> (1:1)</div>
+    </div>
 
-    AuthConfig ||--o| SecretRef : token
-    AuthConfig ||--o| SecretRef : username
-    AuthConfig ||--o| SecretRef : password
+    <!-- LLMConfig -->
+    <div style="padding: 0.75rem; background: white; border: 1px solid #e2e8f0; border-radius: 6px;">
+      <div style="font-weight: 600; color: #312e81; font-size: 0.85rem; margin-bottom: 0.25rem;">LLMConfig</div>
+      <div style="font-size: 0.75rem; color: #64748b;">field: <code>llm</code> (1:1)</div>
+      <div style="margin-top: 0.375rem; padding-left: 0.5rem; border-left: 2px solid #c7d2fe;">
+        <div style="font-size: 0.75rem; color: #4338ca;">LiteLLMConfig <span style="color: #94a3b8;">(1:1)</span></div>
+      </div>
+    </div>
 
-    SecurityConfig ||--|| AgentWeaveConfig : agentweave
-    SecurityConfig ||--|| APIKeyConfig : api_keys
-    SecurityConfig ||--o| SecretRef : jwt_secret
+    <!-- ToolsConfig -->
+    <div style="padding: 0.75rem; background: white; border: 1px solid #e2e8f0; border-radius: 6px;">
+      <div style="font-weight: 600; color: #312e81; font-size: 0.85rem; margin-bottom: 0.25rem;">ToolsConfig</div>
+      <div style="font-size: 0.75rem; color: #64748b;">field: <code>tools</code> (1:1)</div>
+      <div style="margin-top: 0.375rem; padding-left: 0.5rem; border-left: 2px solid #c7d2fe; display: flex; flex-direction: column; gap: 0.25rem;">
+        <div style="font-size: 0.75rem; color: #4338ca;">OpenAPISource[] <span style="color: #94a3b8;">(0:N)</span>
+          <span style="color: #64748b; display: block; padding-left: 0.5rem;">&#8627; AuthConfig (1:1)</span>
+        </div>
+        <div style="font-size: 0.75rem; color: #4338ca;">ManualTool[] <span style="color: #94a3b8;">(0:N)</span>
+          <span style="color: #64748b; display: block; padding-left: 0.5rem;">&#8627; ManualToolAPI (1:1) &rarr; AuthConfig, ResponseMapping</span>
+          <span style="color: #64748b; display: block; padding-left: 0.5rem;">&#8627; ParameterDef[] (0:N)</span>
+        </div>
+        <div style="font-size: 0.75rem; color: #4338ca;">Workflow[] <span style="color: #94a3b8;">(0:N)</span>
+          <span style="color: #64748b; display: block; padding-left: 0.5rem;">&#8627; ParameterDef[] (0:N)</span>
+          <span style="color: #64748b; display: block; padding-left: 0.5rem;">&#8627; WorkflowStep[] (1:N)</span>
+        </div>
+      </div>
+    </div>
 
-    APIKeyConfig ||--o{ SecretRef : keys
+    <!-- SecurityConfig -->
+    <div style="padding: 0.75rem; background: white; border: 1px solid #e2e8f0; border-radius: 6px;">
+      <div style="font-weight: 600; color: #312e81; font-size: 0.85rem; margin-bottom: 0.25rem;">SecurityConfig</div>
+      <div style="font-size: 0.75rem; color: #64748b;">field: <code>security</code> (1:1)</div>
+      <div style="margin-top: 0.375rem; padding-left: 0.5rem; border-left: 2px solid #c7d2fe; display: flex; flex-direction: column; gap: 0.25rem;">
+        <div style="font-size: 0.75rem; color: #4338ca;">AgentWeaveConfig <span style="color: #94a3b8;">(1:1)</span></div>
+        <div style="font-size: 0.75rem; color: #4338ca;">APIKeyConfig <span style="color: #94a3b8;">(1:1)</span>
+          <span style="color: #64748b; display: block; padding-left: 0.5rem;">&#8627; SecretRef[] (0:N)</span>
+        </div>
+        <div style="font-size: 0.75rem; color: #4338ca;">SecretRef? <span style="color: #94a3b8;">(0:1, jwt_secret)</span></div>
+      </div>
+    </div>
 
-    AgentsConfig ||--o{ AgentDef : agents
-    AgentsConfig ||--o{ PeerAgent : peers
-```
+    <!-- AgentsConfig -->
+    <div style="padding: 0.75rem; background: white; border: 1px solid #e2e8f0; border-radius: 6px;">
+      <div style="font-weight: 600; color: #312e81; font-size: 0.85rem; margin-bottom: 0.25rem;">AgentsConfig</div>
+      <div style="font-size: 0.75rem; color: #64748b;">field: <code>agents</code> (1:1)</div>
+      <div style="margin-top: 0.375rem; padding-left: 0.5rem; border-left: 2px solid #c7d2fe; display: flex; flex-direction: column; gap: 0.25rem;">
+        <div style="font-size: 0.75rem; color: #4338ca;">AgentDef[] <span style="color: #94a3b8;">(0:N)</span></div>
+        <div style="font-size: 0.75rem; color: #4338ca;">PeerAgent[] <span style="color: #94a3b8;">(0:N)</span></div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- AuthConfig shared reference -->
+  <div style="margin-top: 1rem; padding: 0.75rem 1rem; background: #fffbeb; border: 1px solid #f59e0b; border-radius: 6px; font-size: 0.8rem; color: #92400e;">
+    <strong>AuthConfig</strong> (shared by OpenAPISource and ManualToolAPI) references optional <strong>SecretRef</strong> fields: <code>token</code> (0:1), <code>username</code> (0:1), <code>password</code> (0:1)
+  </div>
+</div>
 
 ## Model Definitions
 
@@ -318,20 +355,25 @@ The canonical reference with all options is in `forge.yaml.example` at the repos
 
 Secrets are never stored as plaintext in the configuration file. Instead, they are referenced using `SecretRef` objects that are resolved at runtime:
 
-```mermaid
-flowchart TD
-    Config["forge.yaml<br/>SecretRef: {source: env, name: API_KEY}"]
-    Resolver["CompositeSecretResolver"]
-    EnvResolver["EnvSecretResolver<br/>os.environ.get()"]
-    K8sResolver["K8sSecretResolver<br/>(when registered)"]
-    Value["Resolved plaintext value"]
-
-    Config --> Resolver
-    Resolver -->|source = env| EnvResolver
-    Resolver -->|source = k8s_secret| K8sResolver
-    EnvResolver --> Value
-    K8sResolver --> Value
-```
+<div style="display: flex; flex-direction: column; align-items: center; gap: 0.5rem; padding: 1.5rem; background: var(--color-bg-secondary, #f8fafc); border-radius: 8px; border: 1px solid var(--color-border, #e2e8f0);">
+  <div style="padding: 0.75rem 1.5rem; background: #1e1b4b; color: white; border-radius: 6px; font-weight: 600; font-size: 0.875rem; text-align: center;">forge.yaml<br/><span style="font-weight: 400; opacity: 0.8; font-size: 0.8rem;">SecretRef: {source: env, name: API_KEY}</span></div>
+  <div style="color: var(--color-text-muted, #64748b);">↓</div>
+  <div style="padding: 0.75rem 1.5rem; background: #312e81; color: white; border-radius: 6px; font-weight: 600; font-size: 0.875rem;">CompositeSecretResolver</div>
+  <div style="display: flex; gap: 2rem; margin-top: 0.25rem;">
+    <div style="display: flex; flex-direction: column; align-items: center; gap: 0.5rem;">
+      <div style="font-size: 0.75rem; color: #64748b; font-style: italic;">source = env</div>
+      <div style="color: var(--color-text-muted, #64748b);">↓</div>
+      <div style="padding: 0.625rem 1rem; background: #4338ca; color: white; border-radius: 6px; font-weight: 600; font-size: 0.8rem; text-align: center;">EnvSecretResolver<br/><span style="font-weight: 400; opacity: 0.8; font-size: 0.75rem;">os.environ.get()</span></div>
+    </div>
+    <div style="display: flex; flex-direction: column; align-items: center; gap: 0.5rem;">
+      <div style="font-size: 0.75rem; color: #64748b; font-style: italic;">source = k8s_secret</div>
+      <div style="color: var(--color-text-muted, #64748b);">↓</div>
+      <div style="padding: 0.625rem 1rem; background: #4338ca; color: white; border-radius: 6px; font-weight: 600; font-size: 0.8rem; text-align: center;">K8sSecretResolver<br/><span style="font-weight: 400; opacity: 0.8; font-size: 0.75rem;">(when registered)</span></div>
+    </div>
+  </div>
+  <div style="color: var(--color-text-muted, #64748b);">↓</div>
+  <div style="padding: 0.625rem 1.5rem; background: #dcfce7; color: #166534; border-radius: 6px; font-weight: 600; font-size: 0.875rem;">Resolved plaintext value</div>
+</div>
 
 The `CompositeSecretResolver` delegates to source-specific resolvers:
 

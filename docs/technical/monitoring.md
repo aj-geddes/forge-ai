@@ -20,16 +20,23 @@ Forge AI exposes three Kubernetes-style health endpoints, each reflecting a dist
 
 ### State Transitions
 
-```mermaid
-stateDiagram-v2
-    [*] --> Starting: Application starts
-    Starting --> Started: health.set_started(True)
-    Started --> Ready: health.set_ready(True)
-    Ready --> ShuttingDown: Shutdown signal
-    ShuttingDown --> NotReady: health.set_ready(False)
-    NotReady --> Stopped: health.set_started(False)
-    Stopped --> [*]
-```
+<div style="display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; padding: 1.5rem; background: var(--color-bg-secondary, #f8fafc); border-radius: 8px; border: 1px solid var(--color-border, #e2e8f0);">
+  <span style="padding: 0.375rem 0.75rem; background: #f1f5f9; color: #475569; border-radius: 9999px; font-size: 0.8rem; font-weight: 600; border: 2px solid #94a3b8;">[ * ]</span>
+  <span style="color: #64748b; font-size: 0.8rem;">→ <span style="font-style: italic; font-size: 0.7rem;">app starts</span></span>
+  <span style="padding: 0.375rem 0.75rem; background: #fef3c7; color: #92400e; border-radius: 9999px; font-size: 0.8rem; font-weight: 600;">Starting</span>
+  <span style="color: #64748b; font-size: 0.8rem;">→ <span style="font-style: italic; font-size: 0.7rem;">set_started(True)</span></span>
+  <span style="padding: 0.375rem 0.75rem; background: #dbeafe; color: #1e40af; border-radius: 9999px; font-size: 0.8rem; font-weight: 600;">Started</span>
+  <span style="color: #64748b; font-size: 0.8rem;">→ <span style="font-style: italic; font-size: 0.7rem;">set_ready(True)</span></span>
+  <span style="padding: 0.375rem 0.75rem; background: #dcfce7; color: #166534; border-radius: 9999px; font-size: 0.8rem; font-weight: 600;">Ready</span>
+  <span style="color: #64748b; font-size: 0.8rem;">→ <span style="font-style: italic; font-size: 0.7rem;">shutdown signal</span></span>
+  <span style="padding: 0.375rem 0.75rem; background: #fee2e2; color: #991b1b; border-radius: 9999px; font-size: 0.8rem; font-weight: 600;">ShuttingDown</span>
+  <span style="color: #64748b; font-size: 0.8rem;">→ <span style="font-style: italic; font-size: 0.7rem;">set_ready(False)</span></span>
+  <span style="padding: 0.375rem 0.75rem; background: #fecaca; color: #991b1b; border-radius: 9999px; font-size: 0.8rem; font-weight: 600;">NotReady</span>
+  <span style="color: #64748b; font-size: 0.8rem;">→ <span style="font-style: italic; font-size: 0.7rem;">set_started(False)</span></span>
+  <span style="padding: 0.375rem 0.75rem; background: #e2e8f0; color: #475569; border-radius: 9999px; font-size: 0.8rem; font-weight: 600;">Stopped</span>
+  <span style="color: #64748b; font-size: 0.8rem;">→</span>
+  <span style="padding: 0.375rem 0.75rem; background: #f1f5f9; color: #475569; border-radius: 9999px; font-size: 0.8rem; font-weight: 600; border: 2px solid #94a3b8;">[ * ]</span>
+</div>
 
 The state flags are set during the FastAPI lifespan context manager:
 
@@ -210,37 +217,82 @@ The metrics endpoint runs on port 9090, which is exposed alongside the main HTTP
 
 ## Observability Architecture
 
-```mermaid
-flowchart TB
-    subgraph Application
-        Gateway["Gateway<br/>:8000"]
-        Metrics["Metrics<br/>:9090"]
-        Logging["Request Logger"]
-        Audit["Audit Logger"]
-    end
+<div style="padding: 1.5rem; background: var(--color-bg-secondary, #f8fafc); border-radius: 8px; border: 1px solid var(--color-border, #e2e8f0);">
+  <div style="font-weight: 700; color: #1e1b4b; margin-bottom: 1rem; font-size: 0.95rem;">Observability Architecture</div>
 
-    subgraph Probes
-        Live["/health/live"]
-        Ready["/health/ready"]
-        Startup["/health/startup"]
-    end
+  <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 1rem;">
 
-    subgraph Kubernetes
-        Kubelet["kubelet<br/>(probe checks)"]
-        Service["Service<br/>(endpoint management)"]
-    end
+    <!-- Application -->
+    <div style="padding: 1rem; background: white; border: 2px solid #1e1b4b; border-radius: 8px;">
+      <div style="font-weight: 700; color: #1e1b4b; margin-bottom: 0.5rem; font-size: 0.85rem;">Application</div>
+      <div style="display: flex; flex-direction: column; gap: 0.375rem; font-size: 0.8rem;">
+        <div style="display: flex; justify-content: space-between; padding: 0.25rem 0.5rem; background: #eef2ff; border-radius: 4px;">
+          <span style="font-weight: 600; color: #3730a3;">Gateway</span>
+          <span style="color: #64748b;">:8000</span>
+        </div>
+        <div style="display: flex; justify-content: space-between; padding: 0.25rem 0.5rem; background: #eef2ff; border-radius: 4px;">
+          <span style="font-weight: 600; color: #3730a3;">Metrics</span>
+          <span style="color: #64748b;">:9090</span>
+        </div>
+        <div style="display: flex; justify-content: space-between; padding: 0.25rem 0.5rem; background: #eef2ff; border-radius: 4px;">
+          <span style="font-weight: 600; color: #3730a3;">Request Logger</span>
+          <span style="color: #64748b;">&rarr; stdout</span>
+        </div>
+        <div style="display: flex; justify-content: space-between; padding: 0.25rem 0.5rem; background: #eef2ff; border-radius: 4px;">
+          <span style="font-weight: 600; color: #3730a3;">Audit Logger</span>
+          <span style="color: #64748b;">&rarr; structured events</span>
+        </div>
+      </div>
+    </div>
 
-    subgraph Monitoring
-        Prometheus["Prometheus<br/>(ServiceMonitor)"]
-        LogAggregator["Log Aggregator<br/>(stdout/stderr)"]
-    end
+    <!-- Probes -->
+    <div style="padding: 1rem; background: white; border: 2px solid #3730a3; border-radius: 8px;">
+      <div style="font-weight: 700; color: #3730a3; margin-bottom: 0.5rem; font-size: 0.85rem;">Health Probes</div>
+      <div style="display: flex; flex-direction: column; gap: 0.375rem; font-size: 0.8rem;">
+        <div style="padding: 0.25rem 0.5rem; background: #dcfce7; border-radius: 4px;">
+          <span style="font-weight: 600; color: #166534;">/health/live</span>
+          <span style="color: #64748b; font-size: 0.75rem;"> &larr; kubelet</span>
+        </div>
+        <div style="padding: 0.25rem 0.5rem; background: #dcfce7; border-radius: 4px;">
+          <span style="font-weight: 600; color: #166534;">/health/ready</span>
+          <span style="color: #64748b; font-size: 0.75rem;"> &larr; kubelet &rarr; controls Service endpoints</span>
+        </div>
+        <div style="padding: 0.25rem 0.5rem; background: #dcfce7; border-radius: 4px;">
+          <span style="font-weight: 600; color: #166534;">/health/startup</span>
+          <span style="color: #64748b; font-size: 0.75rem;"> &larr; kubelet</span>
+        </div>
+      </div>
+    </div>
 
-    Kubelet --> Live
-    Kubelet --> Ready
-    Kubelet --> Startup
-    Ready -.->|pass/fail| Service
+    <!-- Kubernetes -->
+    <div style="padding: 1rem; background: white; border: 2px solid #4338ca; border-radius: 8px;">
+      <div style="font-weight: 700; color: #4338ca; margin-bottom: 0.5rem; font-size: 0.85rem;">Kubernetes</div>
+      <div style="display: flex; flex-direction: column; gap: 0.375rem; font-size: 0.8rem;">
+        <div style="padding: 0.25rem 0.5rem; background: #eef2ff; border-radius: 4px;">
+          <span style="font-weight: 600; color: #3730a3;">kubelet</span>
+          <span style="color: #64748b;"> &mdash; probe checks</span>
+        </div>
+        <div style="padding: 0.25rem 0.5rem; background: #eef2ff; border-radius: 4px;">
+          <span style="font-weight: 600; color: #3730a3;">Service</span>
+          <span style="color: #64748b;"> &mdash; endpoint management</span>
+        </div>
+      </div>
+    </div>
 
-    Prometheus -->|scrape /metrics| Metrics
-    Gateway --> Logging -->|stdout| LogAggregator
-    Gateway --> Audit -->|structured events| LogAggregator
-```
+    <!-- Monitoring -->
+    <div style="padding: 1rem; background: white; border: 2px solid #059669; border-radius: 8px;">
+      <div style="font-weight: 700; color: #059669; margin-bottom: 0.5rem; font-size: 0.85rem;">Monitoring</div>
+      <div style="display: flex; flex-direction: column; gap: 0.375rem; font-size: 0.8rem;">
+        <div style="padding: 0.25rem 0.5rem; background: #ecfdf5; border-radius: 4px;">
+          <span style="font-weight: 600; color: #065f46;">Prometheus</span>
+          <span style="color: #64748b;"> &mdash; scrapes /metrics (:9090) via ServiceMonitor</span>
+        </div>
+        <div style="padding: 0.25rem 0.5rem; background: #ecfdf5; border-radius: 4px;">
+          <span style="font-weight: 600; color: #065f46;">Log Aggregator</span>
+          <span style="color: #64748b;"> &mdash; collects stdout/stderr + structured audit events</span>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
