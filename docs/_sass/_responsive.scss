@@ -1,0 +1,253 @@
+// ==========================================================================
+// Responsive — Mobile-first breakpoints
+// ==========================================================================
+
+// --------------------------------------------------------------------------
+// Below 1200px: hide TOC sidebar
+// --------------------------------------------------------------------------
+
+@media (max-width: $breakpoint-xl) {
+  .page-wrapper {
+    grid-template-columns: $sidebar-width 1fr;
+  }
+
+  .toc-sidebar {
+    display: none;
+  }
+}
+
+// --------------------------------------------------------------------------
+// Below 992px: sidebar becomes a drawer
+// --------------------------------------------------------------------------
+
+@media (max-width: $breakpoint-lg) {
+  .mobile-menu-btn {
+    display: flex;
+  }
+
+  .page-wrapper {
+    grid-template-columns: 1fr;
+  }
+
+  .sidebar {
+    position: fixed;
+    top: $header-height;
+    left: 0;
+    bottom: 0;
+    width: $sidebar-width;
+    z-index: $z-sidebar;
+    transform: translateX(-100%);
+    transition: transform $transition-slow;
+    box-shadow: none;
+
+    &.open {
+      transform: translateX(0);
+      box-shadow: var(--shadow-xl);
+    }
+  }
+
+  .sidebar-overlay {
+    &.active {
+      display: block;
+    }
+  }
+
+  .main-content {
+    grid-column: 1;
+    padding: $space-6 $space-6;
+  }
+
+  // Wider content when sidebar is hidden
+  .content-wrapper {
+    max-width: 100%;
+  }
+}
+
+// --------------------------------------------------------------------------
+// Below 768px: compact layout
+// --------------------------------------------------------------------------
+
+@media (max-width: $breakpoint-md) {
+  .main-content {
+    padding: $space-4 $space-4;
+  }
+
+  .page-title {
+    font-size: $font-size-2xl;
+  }
+
+  .page-description {
+    font-size: $font-size-base;
+  }
+
+  // Header adjustments
+  .header-center {
+    margin: 0 $space-3;
+  }
+
+  .search-shortcut {
+    display: none;
+  }
+
+  .site-title {
+    font-size: $font-size-base;
+  }
+
+  // Page nav stacks
+  .page-nav {
+    grid-template-columns: 1fr;
+  }
+
+  .page-nav-next {
+    grid-column: 1;
+    text-align: left;
+
+    .page-nav-direction {
+      justify-content: flex-start;
+    }
+  }
+
+  // Table scrolling
+  .prose table {
+    font-size: $font-size-xs;
+  }
+
+  // Card grid single column
+  .card-grid {
+    grid-template-columns: 1fr;
+  }
+
+  // Hero adjustments
+  .hero {
+    padding: $space-10 $space-6;
+  }
+
+  .hero-title {
+    font-size: $font-size-2xl;
+  }
+
+  .hero-description {
+    font-size: $font-size-base;
+  }
+
+  .hero-actions {
+    flex-direction: column;
+    align-items: center;
+  }
+
+  .features,
+  .quick-links {
+    padding: $space-8 $space-4;
+  }
+
+  .quick-links-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+// --------------------------------------------------------------------------
+// Below 576px: minimal layout
+// --------------------------------------------------------------------------
+
+@media (max-width: $breakpoint-sm) {
+  .main-content {
+    padding: $space-3;
+  }
+
+  .page-header {
+    margin-bottom: $space-4;
+    padding-bottom: $space-3;
+  }
+
+  // Simplify breadcrumbs
+  .breadcrumbs {
+    margin-bottom: $space-3;
+
+    li {
+      font-size: $font-size-xs;
+    }
+  }
+
+  // Code blocks: full-width bleed
+  .highlighter-rouge,
+  div.highlight {
+    margin-left: -#{$space-3};
+    margin-right: -#{$space-3};
+
+    pre {
+      border-radius: 0;
+      padding: $space-4;
+    }
+  }
+
+  // Callouts
+  .callout {
+    flex-direction: column;
+    gap: $space-2;
+  }
+
+  // API endpoint nav
+  .api-endpoint-nav {
+    padding: $space-3;
+  }
+
+  // Header hide search on very small screens
+  .header-center {
+    display: none;
+  }
+
+  .hero {
+    padding: $space-8 $space-4;
+  }
+
+  .hero-title {
+    font-size: $font-size-xl;
+  }
+}
+
+// --------------------------------------------------------------------------
+// Print styles
+// --------------------------------------------------------------------------
+
+@media print {
+  .site-header,
+  .sidebar,
+  .toc-sidebar,
+  .sidebar-overlay,
+  .mobile-menu-btn,
+  .search-container,
+  .theme-toggle,
+  .github-link,
+  .page-nav,
+  .page-edit,
+  .site-footer,
+  .code-copy-btn {
+    display: none !important;
+  }
+
+  .page-wrapper {
+    display: block;
+  }
+
+  .main-content {
+    padding: 0;
+  }
+
+  body {
+    font-size: 12pt;
+    color: #000;
+    background: #fff;
+  }
+
+  a {
+    color: #000;
+    text-decoration: underline;
+  }
+
+  pre {
+    border: 1px solid #ccc;
+    padding: 1em;
+    overflow-wrap: break-word;
+    white-space: pre-wrap;
+  }
+}

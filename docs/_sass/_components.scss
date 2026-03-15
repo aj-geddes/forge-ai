@@ -1,0 +1,544 @@
+// ==========================================================================
+// Components — Callouts, cards, badges, tabs, expandables
+// ==========================================================================
+
+// --------------------------------------------------------------------------
+// Callout Boxes
+// --------------------------------------------------------------------------
+
+.callout {
+  display: flex;
+  gap: $space-3;
+  padding: $space-4;
+  margin: $space-4 0 $space-6;
+  border-radius: $radius-lg;
+  border: 1px solid;
+  border-left-width: 4px;
+}
+
+.callout-icon {
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.callout-content {
+  flex: 1;
+  min-width: 0;
+
+  p {
+    margin-bottom: $space-2;
+
+    &:last-child {
+      margin-bottom: 0;
+    }
+  }
+}
+
+.callout-title {
+  font-weight: $font-weight-semibold;
+  margin-bottom: $space-1;
+}
+
+// Info callout
+.callout-info {
+  background-color: $color-info-light;
+  border-color: $color-info;
+
+  .callout-icon { color: $color-info; }
+  .callout-title { color: $color-info-dark; }
+}
+
+[data-theme="dark"] .callout-info {
+  background-color: rgba($color-info, 0.1);
+  border-color: rgba($color-info, 0.3);
+
+  .callout-title { color: lighten($color-info, 15%); }
+}
+
+// Warning callout
+.callout-warning {
+  background-color: $color-warning-light;
+  border-color: $color-warning;
+
+  .callout-icon { color: $color-warning-dark; }
+  .callout-title { color: $color-warning-dark; }
+}
+
+[data-theme="dark"] .callout-warning {
+  background-color: rgba($color-warning, 0.1);
+  border-color: rgba($color-warning, 0.3);
+
+  .callout-icon { color: $color-warning; }
+  .callout-title { color: $color-warning; }
+}
+
+// Danger callout
+.callout-danger {
+  background-color: $color-danger-light;
+  border-color: $color-danger;
+
+  .callout-icon { color: $color-danger; }
+  .callout-title { color: $color-danger-dark; }
+}
+
+[data-theme="dark"] .callout-danger {
+  background-color: rgba($color-danger, 0.1);
+  border-color: rgba($color-danger, 0.3);
+
+  .callout-title { color: lighten($color-danger, 15%); }
+}
+
+// Tip callout
+.callout-tip {
+  background-color: $color-success-light;
+  border-color: $color-success;
+
+  .callout-icon { color: $color-success; }
+  .callout-title { color: $color-success-dark; }
+}
+
+[data-theme="dark"] .callout-tip {
+  background-color: rgba($color-success, 0.1);
+  border-color: rgba($color-success, 0.3);
+
+  .callout-title { color: lighten($color-success, 15%); }
+}
+
+// --------------------------------------------------------------------------
+// Cards
+// --------------------------------------------------------------------------
+
+.card {
+  display: block;
+  padding: $space-6;
+  background-color: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: $radius-xl;
+  text-decoration: none;
+  color: var(--color-text);
+  transition: border-color $transition-base, box-shadow $transition-base, transform $transition-base;
+
+  &:hover {
+    border-color: var(--color-primary);
+    box-shadow: var(--shadow-lg);
+    transform: translateY(-2px);
+    text-decoration: none;
+    color: var(--color-text);
+  }
+}
+
+.card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: $space-6;
+  margin: $space-6 0;
+}
+
+.card-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 48px;
+  height: 48px;
+  border-radius: $radius-lg;
+  margin-bottom: $space-4;
+  background-color: var(--color-bg-secondary);
+  color: var(--color-primary);
+}
+
+.card-title {
+  font-family: $font-heading;
+  font-size: $font-size-lg;
+  font-weight: $font-weight-semibold;
+  margin-bottom: $space-2;
+}
+
+.card-description {
+  font-size: $font-size-sm;
+  color: var(--color-text-secondary);
+  line-height: $line-height-relaxed;
+  margin: 0;
+}
+
+.card-link {
+  display: inline-flex;
+  align-items: center;
+  gap: $space-1;
+  margin-top: $space-3;
+  font-size: $font-size-sm;
+  font-weight: $font-weight-medium;
+  color: var(--color-primary);
+}
+
+// --------------------------------------------------------------------------
+// Method Badges (API)
+// --------------------------------------------------------------------------
+
+.method-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 56px;
+  padding: $space-1 $space-2;
+  border-radius: $radius-sm;
+  font-family: $font-mono;
+  font-size: $font-size-xs;
+  font-weight: $font-weight-bold;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  color: #ffffff;
+  line-height: 1;
+}
+
+.method-get    { background-color: $color-method-get; }
+.method-post   { background-color: $color-method-post; }
+.method-put    { background-color: $color-method-put; }
+.method-patch  { background-color: $color-method-patch; }
+.method-delete { background-color: $color-method-delete; }
+
+// --------------------------------------------------------------------------
+// Generic Badges
+// --------------------------------------------------------------------------
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  padding: $space-1 $space-2;
+  border-radius: $radius-full;
+  font-size: $font-size-xs;
+  font-weight: $font-weight-semibold;
+  line-height: 1;
+}
+
+.badge-primary {
+  background-color: var(--color-sidebar-active-bg);
+  color: var(--color-primary);
+}
+
+.badge-success {
+  background-color: $color-success-light;
+  color: $color-success-dark;
+}
+
+[data-theme="dark"] .badge-success {
+  background-color: rgba($color-success, 0.15);
+  color: $color-success;
+}
+
+.badge-warning {
+  background-color: $color-warning-light;
+  color: $color-warning-dark;
+}
+
+[data-theme="dark"] .badge-warning {
+  background-color: rgba($color-warning, 0.15);
+  color: $color-warning;
+}
+
+.badge-danger {
+  background-color: $color-danger-light;
+  color: $color-danger-dark;
+}
+
+[data-theme="dark"] .badge-danger {
+  background-color: rgba($color-danger, 0.15);
+  color: $color-danger;
+}
+
+// --------------------------------------------------------------------------
+// Tab Groups
+// --------------------------------------------------------------------------
+
+.tab-group {
+  margin: $space-6 0;
+  border: 1px solid var(--color-border);
+  border-radius: $radius-lg;
+  overflow: hidden;
+}
+
+.tab-nav {
+  display: flex;
+  border-bottom: 1px solid var(--color-border);
+  background-color: var(--color-bg-secondary);
+  overflow-x: auto;
+}
+
+.tab-button {
+  padding: $space-3 $space-4;
+  border: none;
+  background: none;
+  color: var(--color-text-secondary);
+  font-family: $font-body;
+  font-size: $font-size-sm;
+  font-weight: $font-weight-medium;
+  cursor: pointer;
+  white-space: nowrap;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  transition: color $transition-fast, border-color $transition-fast;
+
+  &:hover {
+    color: var(--color-text);
+  }
+
+  &.active {
+    color: var(--color-primary);
+    border-bottom-color: var(--color-primary);
+    background-color: var(--color-bg);
+  }
+}
+
+.tab-panel {
+  display: none;
+  padding: $space-4;
+
+  &.active {
+    display: block;
+  }
+
+  > :first-child {
+    margin-top: 0;
+  }
+
+  > :last-child {
+    margin-bottom: 0;
+  }
+}
+
+// --------------------------------------------------------------------------
+// Expandable / Collapsible Sections
+// --------------------------------------------------------------------------
+
+.expandable {
+  margin: $space-4 0;
+  border: 1px solid var(--color-border);
+  border-radius: $radius-lg;
+  overflow: hidden;
+}
+
+.expandable-header {
+  display: flex;
+  align-items: center;
+  gap: $space-2;
+  width: 100%;
+  padding: $space-3 $space-4;
+  border: none;
+  background-color: var(--color-bg-secondary);
+  color: var(--color-text);
+  font-family: $font-body;
+  font-size: $font-size-sm;
+  font-weight: $font-weight-medium;
+  cursor: pointer;
+  text-align: left;
+  transition: background-color $transition-fast;
+
+  &:hover {
+    background-color: var(--color-surface-hover);
+  }
+
+  svg {
+    flex-shrink: 0;
+    color: var(--color-text-tertiary);
+    transition: transform $transition-base;
+  }
+
+  &[aria-expanded="true"] svg {
+    transform: rotate(90deg);
+  }
+}
+
+.expandable-content {
+  display: none;
+  padding: $space-4;
+  border-top: 1px solid var(--color-border-light);
+
+  &.open {
+    display: block;
+  }
+
+  > :first-child {
+    margin-top: 0;
+  }
+
+  > :last-child {
+    margin-bottom: 0;
+  }
+}
+
+// --------------------------------------------------------------------------
+// Screenshot Frame
+// --------------------------------------------------------------------------
+
+.screenshot {
+  margin: $space-6 0;
+  border-radius: $radius-xl;
+  overflow: hidden;
+  border: 1px solid var(--color-border);
+  box-shadow: var(--shadow-lg);
+}
+
+.screenshot-bar {
+  display: flex;
+  align-items: center;
+  gap: $space-2;
+  padding: $space-2 $space-3;
+  background-color: var(--color-bg-tertiary);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.screenshot-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: $radius-full;
+  background-color: var(--color-border);
+}
+
+.screenshot img {
+  display: block;
+  width: 100%;
+  margin: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+// --------------------------------------------------------------------------
+// Hero Section (Homepage)
+// --------------------------------------------------------------------------
+
+.hero {
+  padding: $space-16 $space-10;
+  text-align: center;
+  background: linear-gradient(135deg, #{$color-primary-950} 0%, #{$color-primary-800} 100%);
+  color: #ffffff;
+}
+
+.hero-title {
+  font-family: $font-heading;
+  font-size: $font-size-4xl;
+  font-weight: $font-weight-bold;
+  letter-spacing: -0.03em;
+  margin-bottom: $space-4;
+  color: #ffffff;
+}
+
+.hero-description {
+  font-size: $font-size-lg;
+  max-width: 640px;
+  margin: 0 auto $space-8;
+  color: rgba(255, 255, 255, 0.8);
+  line-height: $line-height-relaxed;
+}
+
+.hero-actions {
+  display: flex;
+  gap: $space-4;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+
+.hero-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: $space-2;
+  padding: $space-3 $space-6;
+  border-radius: $radius-lg;
+  font-family: $font-body;
+  font-size: $font-size-base;
+  font-weight: $font-weight-semibold;
+  text-decoration: none;
+  transition: background-color $transition-fast, transform $transition-fast;
+
+  &:hover {
+    transform: translateY(-1px);
+    text-decoration: none;
+  }
+}
+
+.hero-btn-primary {
+  background-color: $color-accent-500;
+  color: $color-neutral-900;
+
+  &:hover {
+    background-color: $color-accent-400;
+    color: $color-neutral-900;
+  }
+}
+
+.hero-btn-secondary {
+  background-color: rgba(255, 255, 255, 0.1);
+  color: #ffffff;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+
+  &:hover {
+    background-color: rgba(255, 255, 255, 0.18);
+    color: #ffffff;
+  }
+}
+
+// --------------------------------------------------------------------------
+// Feature Grid (Homepage)
+// --------------------------------------------------------------------------
+
+.features {
+  padding: $space-16 $space-10;
+  max-width: calc(#{$content-max-width} + #{$space-20});
+  margin: 0 auto;
+}
+
+.features-title {
+  text-align: center;
+  font-size: $font-size-2xl;
+  margin-bottom: $space-10;
+}
+
+// --------------------------------------------------------------------------
+// Quick Links (Homepage)
+// --------------------------------------------------------------------------
+
+.quick-links {
+  padding: $space-12 $space-10;
+  background-color: var(--color-bg-secondary);
+}
+
+.quick-links-inner {
+  max-width: calc(#{$content-max-width} + #{$space-20});
+  margin: 0 auto;
+}
+
+.quick-links-title {
+  font-size: $font-size-xl;
+  margin-bottom: $space-6;
+}
+
+.quick-links-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: $space-3;
+}
+
+.quick-link {
+  display: flex;
+  align-items: center;
+  gap: $space-2;
+  padding: $space-3 $space-4;
+  background-color: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: $radius-lg;
+  color: var(--color-text);
+  font-size: $font-size-sm;
+  font-weight: $font-weight-medium;
+  text-decoration: none;
+  transition: border-color $transition-fast, box-shadow $transition-fast;
+
+  &:hover {
+    border-color: var(--color-primary);
+    box-shadow: var(--shadow-sm);
+    text-decoration: none;
+    color: var(--color-primary);
+  }
+
+  svg {
+    color: var(--color-text-secondary);
+    flex-shrink: 0;
+  }
+}

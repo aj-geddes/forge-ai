@@ -1,0 +1,182 @@
+// ==========================================================================
+// Layout — Page grid, main areas, sticky sidebar
+// ==========================================================================
+
+// --------------------------------------------------------------------------
+// Page Wrapper (three-column grid)
+// --------------------------------------------------------------------------
+
+.page-wrapper {
+  display: grid;
+  grid-template-columns: $sidebar-width 1fr $toc-width;
+  min-height: calc(100vh - #{$header-height});
+  margin-top: $header-height;
+  max-width: $breakpoint-2xl;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+// --------------------------------------------------------------------------
+// Main Content
+// --------------------------------------------------------------------------
+
+.main-content {
+  grid-column: 2;
+  min-width: 0; // Prevent grid blowout
+  padding: $space-8 $space-10;
+}
+
+.content-wrapper {
+  max-width: $content-max-width;
+  margin: 0 auto;
+}
+
+// --------------------------------------------------------------------------
+// Sidebar
+// --------------------------------------------------------------------------
+
+.sidebar {
+  grid-column: 1;
+  position: sticky;
+  top: $header-height;
+  height: calc(100vh - #{$header-height});
+  overflow-y: auto;
+  background-color: var(--color-sidebar-bg);
+  border-right: 1px solid var(--color-border-light);
+  padding: $space-6 0;
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-border) transparent;
+
+  &::-webkit-scrollbar {
+    width: 4px;
+  }
+
+  &::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  &::-webkit-scrollbar-thumb {
+    background: var(--color-border);
+    border-radius: $radius-full;
+  }
+}
+
+.sidebar-inner {
+  padding: 0 $space-4;
+}
+
+// --------------------------------------------------------------------------
+// TOC Sidebar
+// --------------------------------------------------------------------------
+
+.toc-sidebar {
+  grid-column: 3;
+  position: sticky;
+  top: $header-height;
+  height: calc(100vh - #{$header-height});
+  overflow-y: auto;
+  padding: $space-8 $space-4 $space-8 $space-2;
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-border) transparent;
+
+  &::-webkit-scrollbar {
+    width: 4px;
+  }
+
+  &::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  &::-webkit-scrollbar-thumb {
+    background: var(--color-border);
+    border-radius: $radius-full;
+  }
+}
+
+.toc-inner {
+  border-left: 1px solid var(--color-border-light);
+  padding-left: $space-4;
+}
+
+.toc-heading {
+  font-family: $font-body;
+  font-size: $font-size-xs;
+  font-weight: $font-weight-semibold;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--color-text-tertiary);
+  margin-bottom: $space-3;
+}
+
+.toc-nav {
+  a {
+    display: block;
+    padding: $space-1 0;
+    font-size: $font-size-sm;
+    color: var(--color-text-secondary);
+    text-decoration: none;
+    line-height: $line-height-normal;
+    border-left: 2px solid transparent;
+    margin-left: -#{$space-4} - 1px;
+    padding-left: $space-4;
+    transition: color $transition-fast, border-color $transition-fast;
+
+    &:hover {
+      color: var(--color-text);
+      text-decoration: none;
+    }
+
+    &.toc-active {
+      color: var(--color-primary);
+      border-left-color: var(--color-primary);
+      font-weight: $font-weight-medium;
+    }
+
+    &.toc-h3 {
+      padding-left: calc(#{$space-4} + #{$space-4});
+    }
+
+    &.toc-h4 {
+      padding-left: calc(#{$space-4} + #{$space-8});
+      font-size: $font-size-xs;
+    }
+  }
+}
+
+// --------------------------------------------------------------------------
+// Sidebar Overlay (mobile)
+// --------------------------------------------------------------------------
+
+.sidebar-overlay {
+  display: none;
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.5);
+  z-index: $z-overlay;
+  opacity: 0;
+  transition: opacity $transition-base;
+
+  &.active {
+    display: block;
+    opacity: 1;
+  }
+}
+
+// --------------------------------------------------------------------------
+// Home Layout (no TOC, wider content)
+// --------------------------------------------------------------------------
+
+.layout-home .page-wrapper {
+  grid-template-columns: $sidebar-width 1fr;
+}
+
+.layout-home .main-content {
+  padding: 0;
+}
+
+.layout-home .content-wrapper {
+  max-width: none;
+}

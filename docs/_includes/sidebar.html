@@ -1,0 +1,32 @@
+<nav class="sidebar" id="sidebar" role="navigation" aria-label="Documentation navigation">
+  <div class="sidebar-inner">
+    {% for tier in site.navigation %}
+    {% assign tier_key = tier[0] %}
+    {% assign tier_data = tier[1] %}
+    <div class="sidebar-section" data-section="{{ tier_key }}">
+      <button class="sidebar-section-header" aria-expanded="true" aria-controls="nav-{{ tier_key }}">
+        <span class="sidebar-section-icon">
+          {% if tier_data.icon == "code" %}
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>
+          {% elsif tier_data.icon == "server" %}
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="8" rx="2" ry="2"></rect><rect x="2" y="14" width="20" height="8" rx="2" ry="2"></rect><line x1="6" y1="6" x2="6.01" y2="6"></line><line x1="6" y1="18" x2="6.01" y2="18"></line></svg>
+          {% elsif tier_data.icon == "book-open" %}
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"></path><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"></path></svg>
+          {% endif %}
+        </span>
+        <span class="sidebar-section-title">{{ tier_data.title }}</span>
+        <svg class="sidebar-chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>
+      </button>
+      <ul class="sidebar-links" id="nav-{{ tier_key }}">
+        {% for item in tier_data.items %}
+        <li>
+          <a href="{{ item.url | relative_url }}" class="sidebar-link{% if page.url == item.url %} active{% endif %}">
+            {{ item.title }}
+          </a>
+        </li>
+        {% endfor %}
+      </ul>
+    </div>
+    {% endfor %}
+  </div>
+</nav>

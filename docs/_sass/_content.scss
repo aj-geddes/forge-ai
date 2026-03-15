@@ -1,0 +1,351 @@
+// ==========================================================================
+// Content — Prose styling for documentation text
+// ==========================================================================
+
+// --------------------------------------------------------------------------
+// Page Header
+// --------------------------------------------------------------------------
+
+.page-header {
+  margin-bottom: $space-8;
+  padding-bottom: $space-6;
+  border-bottom: 1px solid var(--color-border-light);
+}
+
+.page-title {
+  font-size: $font-size-3xl;
+  font-weight: $font-weight-bold;
+  color: var(--color-text);
+  margin-bottom: $space-2;
+  letter-spacing: -0.03em;
+}
+
+.page-description {
+  font-size: $font-size-lg;
+  color: var(--color-text-secondary);
+  line-height: $line-height-relaxed;
+  margin-bottom: 0;
+}
+
+// --------------------------------------------------------------------------
+// Prose (long-form content)
+// --------------------------------------------------------------------------
+
+.prose {
+  line-height: $line-height-relaxed;
+  color: var(--color-text);
+
+  // Headings with anchor links
+  h2, h3, h4, h5, h6 {
+    position: relative;
+    margin-top: $space-10;
+    margin-bottom: $space-4;
+
+    &:first-child {
+      margin-top: 0;
+    }
+
+    .heading-anchor {
+      position: absolute;
+      left: -1.5em;
+      color: var(--color-text-tertiary);
+      text-decoration: none;
+      opacity: 0;
+      transition: opacity $transition-fast;
+      font-weight: $font-weight-normal;
+
+      &:hover {
+        color: var(--color-primary);
+        text-decoration: none;
+      }
+    }
+
+    &:hover .heading-anchor {
+      opacity: 1;
+    }
+  }
+
+  h2 {
+    font-size: $font-size-2xl;
+    padding-bottom: $space-3;
+    border-bottom: 1px solid var(--color-border-light);
+  }
+
+  h3 {
+    font-size: $font-size-xl;
+  }
+
+  h4 {
+    font-size: $font-size-lg;
+  }
+
+  // Paragraphs
+  p {
+    margin-bottom: $space-4;
+  }
+
+  // Links within prose
+  a {
+    color: var(--color-link);
+    text-decoration: underline;
+    text-decoration-color: rgba(var(--color-primary-rgb), 0.3);
+    text-underline-offset: 3px;
+    transition: color $transition-fast, text-decoration-color $transition-fast;
+
+    &:hover {
+      color: var(--color-link-hover);
+      text-decoration-color: var(--color-link-hover);
+    }
+  }
+
+  // Lists
+  ul, ol {
+    margin-bottom: $space-4;
+    padding-left: $space-6;
+  }
+
+  li {
+    margin-bottom: $space-2;
+    line-height: $line-height-relaxed;
+  }
+
+  // Tables
+  table {
+    display: block;
+    width: 100%;
+    overflow-x: auto;
+    margin-bottom: $space-6;
+    border-radius: $radius-lg;
+    border: 1px solid var(--color-border);
+
+    &::-webkit-scrollbar {
+      height: 6px;
+    }
+
+    &::-webkit-scrollbar-thumb {
+      background: var(--color-border);
+      border-radius: $radius-full;
+    }
+  }
+
+  // Blockquotes
+  blockquote {
+    margin: $space-4 0;
+    font-style: italic;
+
+    p:last-child {
+      margin-bottom: 0;
+    }
+  }
+
+  // Images with captions
+  img {
+    border-radius: $radius-lg;
+    box-shadow: var(--shadow-md);
+    margin: $space-6 0;
+  }
+
+  figure {
+    margin: $space-6 0;
+
+    img {
+      margin: 0 0 $space-3;
+    }
+
+    figcaption {
+      text-align: center;
+      font-size: $font-size-sm;
+      color: var(--color-text-secondary);
+      font-style: italic;
+    }
+  }
+
+  // Horizontal rule
+  hr {
+    margin: $space-10 0;
+    border-top-color: var(--color-border-light);
+  }
+
+  // Definition lists
+  dl {
+    margin-bottom: $space-4;
+  }
+
+  dt {
+    font-weight: $font-weight-semibold;
+    margin-top: $space-4;
+    margin-bottom: $space-1;
+  }
+
+  dd {
+    padding-left: $space-4;
+    margin-bottom: $space-2;
+    color: var(--color-text-secondary);
+  }
+}
+
+// --------------------------------------------------------------------------
+// Page Footer
+// --------------------------------------------------------------------------
+
+.page-footer {
+  margin-top: $space-12;
+  padding-top: $space-8;
+  border-top: 1px solid var(--color-border-light);
+}
+
+// --------------------------------------------------------------------------
+// Page Navigation (Previous / Next)
+// --------------------------------------------------------------------------
+
+.page-nav {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: $space-4;
+  margin-bottom: $space-6;
+}
+
+.page-nav-link {
+  display: flex;
+  flex-direction: column;
+  gap: $space-1;
+  padding: $space-4;
+  border: 1px solid var(--color-border);
+  border-radius: $radius-lg;
+  text-decoration: none;
+  transition: border-color $transition-fast, box-shadow $transition-fast;
+
+  &:hover {
+    border-color: var(--color-primary);
+    box-shadow: var(--shadow-sm);
+    text-decoration: none;
+  }
+}
+
+.page-nav-prev {
+  grid-column: 1;
+}
+
+.page-nav-next {
+  grid-column: 2;
+  text-align: right;
+}
+
+.page-nav-direction {
+  display: flex;
+  align-items: center;
+  gap: $space-1;
+  font-size: $font-size-sm;
+  color: var(--color-text-secondary);
+  font-weight: $font-weight-medium;
+
+  .page-nav-next & {
+    justify-content: flex-end;
+  }
+}
+
+.page-nav-title {
+  font-size: $font-size-base;
+  color: var(--color-primary);
+  font-weight: $font-weight-semibold;
+}
+
+// --------------------------------------------------------------------------
+// Edit Link
+// --------------------------------------------------------------------------
+
+.page-edit {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.edit-link {
+  display: inline-flex;
+  align-items: center;
+  gap: $space-2;
+  padding: $space-2 $space-3;
+  font-size: $font-size-sm;
+  color: var(--color-text-secondary);
+  text-decoration: none;
+  border-radius: $radius-md;
+  transition: color $transition-fast, background-color $transition-fast;
+
+  &:hover {
+    color: var(--color-text);
+    background-color: var(--color-surface-hover);
+    text-decoration: none;
+  }
+}
+
+// --------------------------------------------------------------------------
+// API Page Specific
+// --------------------------------------------------------------------------
+
+.api-base-url {
+  display: inline-flex;
+  align-items: center;
+  gap: $space-2;
+  margin-top: $space-3;
+  padding: $space-2 $space-3;
+  background-color: var(--color-bg-secondary);
+  border: 1px solid var(--color-border);
+  border-radius: $radius-md;
+}
+
+.api-base-label {
+  font-size: $font-size-xs;
+  font-weight: $font-weight-semibold;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--color-text-secondary);
+}
+
+.api-base-value {
+  font-family: $font-mono;
+  font-size: $font-size-sm;
+}
+
+.api-endpoint-nav {
+  margin-bottom: $space-8;
+  padding: $space-4;
+  background-color: var(--color-bg-secondary);
+  border: 1px solid var(--color-border);
+  border-radius: $radius-lg;
+}
+
+.api-nav-title {
+  font-size: $font-size-sm;
+  font-weight: $font-weight-semibold;
+  color: var(--color-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: $space-3;
+}
+
+.api-nav-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.api-nav-link {
+  display: flex;
+  align-items: center;
+  gap: $space-3;
+  padding: $space-2 $space-3;
+  border-radius: $radius-md;
+  text-decoration: none;
+  color: var(--color-text);
+  font-size: $font-size-sm;
+  font-family: $font-mono;
+  transition: background-color $transition-fast;
+
+  &:hover {
+    background-color: var(--color-surface-hover);
+    text-decoration: none;
+  }
+}
+
+.api-nav-path {
+  color: var(--color-text-secondary);
+}

@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+  {% include head.html %}
+</head>
+<body>
+  <a class="skip-link" href="#main-content">Skip to content</a>
+
+  {% include header.html %}
+
+  <div class="page-wrapper">
+    {% include sidebar.html %}
+
+    <main class="main-content" id="main-content" role="main">
+      <div class="content-wrapper">
+        {% if page.breadcrumbs != false %}
+        <nav class="breadcrumbs" aria-label="Breadcrumb">
+          <ol>
+            <li><a href="{{ '/' | relative_url }}">Home</a></li>
+            {% if page.tier %}
+            <li><a href="{{ '/' | relative_url }}#{{ page.tier }}">{{ page.tier | capitalize }}</a></li>
+            {% endif %}
+            {% if page.title %}
+            <li aria-current="page">{{ page.title }}</li>
+            {% endif %}
+          </ol>
+        </nav>
+        {% endif %}
+
+        {{ content }}
+      </div>
+    </main>
+
+    {% if page.toc != false and page.layout != 'home' %}
+    {% include toc.html %}
+    {% endif %}
+  </div>
+
+  {% include footer.html %}
+
+  <div class="sidebar-overlay" id="sidebar-overlay"></div>
+
+  <script src="{{ '/assets/js/navigation.js' | relative_url }}"></script>
+  <script src="{{ '/assets/js/search.js' | relative_url }}"></script>
+  <script src="{{ '/assets/js/clipboard.js' | relative_url }}"></script>
+  <script src="{{ '/assets/js/toc.js' | relative_url }}"></script>
+</body>
+</html>

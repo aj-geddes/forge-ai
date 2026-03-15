@@ -1,0 +1,239 @@
+// ==========================================================================
+// Base Styles — Reset, typography, and foundational elements
+// ==========================================================================
+
+// --------------------------------------------------------------------------
+// Reset
+// --------------------------------------------------------------------------
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  font-size: 16px;
+  scroll-behavior: smooth;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+  scroll-padding-top: calc(#{$header-height} + #{$space-6});
+}
+
+body {
+  font-family: $font-body;
+  font-size: $font-size-base;
+  font-weight: $font-weight-normal;
+  line-height: $line-height-normal;
+  color: var(--color-text);
+  background-color: var(--color-bg);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overflow-x: hidden;
+}
+
+// --------------------------------------------------------------------------
+// Selection
+// --------------------------------------------------------------------------
+
+::selection {
+  background-color: var(--color-selection-bg);
+  color: var(--color-selection-text);
+}
+
+// --------------------------------------------------------------------------
+// Skip Link
+// --------------------------------------------------------------------------
+
+.skip-link {
+  position: absolute;
+  top: -100%;
+  left: $space-4;
+  z-index: $z-modal + 1;
+  padding: $space-2 $space-4;
+  background: var(--color-primary);
+  color: var(--color-text-inverse);
+  font-size: $font-size-sm;
+  font-weight: $font-weight-medium;
+  text-decoration: none;
+  border-radius: $radius-md;
+  transition: top $transition-fast;
+
+  &:focus {
+    top: $space-4;
+  }
+}
+
+// --------------------------------------------------------------------------
+// Typography
+// --------------------------------------------------------------------------
+
+h1, h2, h3, h4, h5, h6 {
+  font-family: $font-heading;
+  font-weight: $font-weight-bold;
+  line-height: $line-height-tight;
+  color: var(--color-text);
+  letter-spacing: -0.02em;
+}
+
+h1 { font-size: $font-size-3xl; }
+h2 { font-size: $font-size-2xl; }
+h3 { font-size: $font-size-xl; }
+h4 { font-size: $font-size-lg; }
+h5 { font-size: $font-size-md; }
+h6 { font-size: $font-size-base; }
+
+p {
+  margin-bottom: $space-4;
+}
+
+strong, b {
+  font-weight: $font-weight-semibold;
+}
+
+em, i {
+  font-style: italic;
+}
+
+small {
+  font-size: $font-size-sm;
+}
+
+// --------------------------------------------------------------------------
+// Links
+// --------------------------------------------------------------------------
+
+a {
+  color: var(--color-link);
+  text-decoration: none;
+  transition: color $transition-fast;
+
+  &:hover {
+    color: var(--color-link-hover);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
+    border-radius: $radius-sm;
+  }
+}
+
+// --------------------------------------------------------------------------
+// Lists
+// --------------------------------------------------------------------------
+
+ul, ol {
+  padding-left: $space-6;
+  margin-bottom: $space-4;
+}
+
+li {
+  margin-bottom: $space-1;
+
+  > ul,
+  > ol {
+    margin-top: $space-1;
+    margin-bottom: $space-1;
+  }
+}
+
+// --------------------------------------------------------------------------
+// Tables
+// --------------------------------------------------------------------------
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: $space-6;
+  font-size: $font-size-sm;
+}
+
+thead {
+  th {
+    background-color: var(--color-bg-secondary);
+    border-bottom: 2px solid var(--color-border);
+    padding: $space-3 $space-4;
+    text-align: left;
+    font-weight: $font-weight-semibold;
+    font-size: $font-size-xs;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--color-text-secondary);
+  }
+}
+
+tbody {
+  tr {
+    border-bottom: 1px solid var(--color-border-light);
+
+    &:nth-child(even) {
+      background-color: var(--color-bg-secondary);
+    }
+
+    &:hover {
+      background-color: var(--color-surface-hover);
+    }
+  }
+
+  td {
+    padding: $space-3 $space-4;
+    vertical-align: top;
+  }
+}
+
+// --------------------------------------------------------------------------
+// Images
+// --------------------------------------------------------------------------
+
+img {
+  max-width: 100%;
+  height: auto;
+  display: block;
+}
+
+// --------------------------------------------------------------------------
+// Horizontal Rule
+// --------------------------------------------------------------------------
+
+hr {
+  border: none;
+  border-top: 1px solid var(--color-border);
+  margin: $space-8 0;
+}
+
+// --------------------------------------------------------------------------
+// Blockquote
+// --------------------------------------------------------------------------
+
+blockquote {
+  border-left: 4px solid var(--color-primary);
+  padding: $space-3 $space-4;
+  margin: 0 0 $space-4;
+  color: var(--color-text-secondary);
+  background-color: var(--color-bg-secondary);
+  border-radius: 0 $radius-md $radius-md 0;
+
+  p:last-child {
+    margin-bottom: 0;
+  }
+}
+
+// --------------------------------------------------------------------------
+// Focus Styles
+// --------------------------------------------------------------------------
+
+:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
+
+button:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+  border-radius: $radius-sm;
+}

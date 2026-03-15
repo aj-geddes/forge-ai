@@ -1,0 +1,123 @@
+title: "Forge AI Documentation"
+description: "Documentation for Forge AI — a config-driven AI agent system with dynamic tool surfaces, multi-protocol interfaces, and enterprise security."
+baseurl: "/forge-ai"
+url: "https://aj-geddes.github.io"
+
+markdown: kramdown
+kramdown:
+  input: GFM
+  syntax_highlighter: rouge
+  hard_wrap: false
+  toc_levels: "2..4"
+
+sass:
+  style: compressed
+  sass_dir: _sass
+
+plugins:
+  - jekyll-seo-tag
+  - jekyll-sitemap
+
+exclude:
+  - Gemfile
+  - Gemfile.lock
+  - node_modules
+  - vendor
+  - README.md
+
+permalink: pretty
+
+defaults:
+  - scope:
+      path: "developer"
+    values:
+      layout: "page"
+      tier: "developer"
+  - scope:
+      path: "technical"
+    values:
+      layout: "page"
+      tier: "technical"
+  - scope:
+      path: "user"
+    values:
+      layout: "page"
+      tier: "user"
+  - scope:
+      path: ""
+    values:
+      layout: "page"
+
+navigation:
+  developer:
+    title: "Developer Guide"
+    icon: "code"
+    items:
+      - title: "Overview"
+        url: /developer/
+      - title: "Architecture"
+        url: /developer/architecture/
+      - title: "Setup Guide"
+        url: /developer/setup/
+      - title: "API Reference"
+        url: /developer/api-reference/
+      - title: "Testing"
+        url: /developer/testing/
+      - title: "Contributing"
+        url: /developer/contributing/
+      - title: "Code Style"
+        url: /developer/code-style/
+
+  technical:
+    title: "Technical Reference"
+    icon: "server"
+    items:
+      - title: "Overview"
+        url: /technical/
+      - title: "System Design"
+        url: /technical/system-design/
+      - title: "Data Model"
+        url: /technical/data-model/
+      - title: "Infrastructure"
+        url: /technical/infrastructure/
+      - title: "Security"
+        url: /technical/security/
+      - title: "Performance"
+        url: /technical/performance/
+      - title: "Monitoring"
+        url: /technical/monitoring/
+
+  user:
+    title: "User Guide"
+    icon: "book-open"
+    items:
+      - title: "Overview"
+        url: /user/
+      - title: "Getting Started"
+        url: /user/getting-started/
+      - title: "Dashboard"
+        url: /user/features/dashboard/
+      - title: "Config Builder"
+        url: /user/features/config-builder/
+      - title: "Tool Workshop"
+        url: /user/features/tools/
+      - title: "Chat"
+        url: /user/features/chat/
+      - title: "Peers"
+        url: /user/features/peers/
+      - title: "Security"
+        url: /user/features/security/
+      - title: "Configuration Reference"
+        url: /user/configuration/
+      - title: "FAQ"
+        url: /user/faq/
+      - title: "Troubleshooting"
+        url: /user/troubleshooting/
+
+github:
+  repo: "https://github.com/aj-geddes/forge-ai"
+  branch: "main"
+
+generated:
+  date: "2026-03-15"
+  commit: "6427601"

@@ -1,0 +1,66 @@
+---
+layout: default
+---
+
+<article class="page-content">
+  <header class="page-header">
+    <h1 class="page-title">{{ page.title }}</h1>
+    {% if page.description %}
+    <p class="page-description">{{ page.description }}</p>
+    {% endif %}
+  </header>
+
+  <div class="prose">
+    {{ content }}
+  </div>
+
+  <footer class="page-footer">
+    <div class="page-nav">
+      {% assign collection_name = page.collection %}
+      {% if collection_name %}
+      {% assign pages_in_collection = site[collection_name] | sort: "order" %}
+      {% assign current_index = nil %}
+      {% for p in pages_in_collection %}
+        {% if p.url == page.url %}
+          {% assign current_index = forloop.index0 %}
+        {% endif %}
+      {% endfor %}
+
+      {% if current_index %}
+        {% assign prev_index = current_index | minus: 1 %}
+        {% if prev_index >= 0 %}
+          {% assign prev_page = pages_in_collection[prev_index] %}
+          <a href="{{ prev_page.url | relative_url }}" class="page-nav-link page-nav-prev">
+            <span class="page-nav-direction">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"></line><polyline points="12 19 5 12 12 5"></polyline></svg>
+              Previous
+            </span>
+            <span class="page-nav-title">{{ prev_page.title }}</span>
+          </a>
+        {% endif %}
+
+        {% assign next_index = current_index | plus: 1 %}
+        {% if next_index < pages_in_collection.size %}
+          {% assign next_page = pages_in_collection[next_index] %}
+          <a href="{{ next_page.url | relative_url }}" class="page-nav-link page-nav-next">
+            <span class="page-nav-direction">
+              Next
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"></line><polyline points="12 5 19 12 12 19"></polyline></svg>
+            </span>
+            <span class="page-nav-title">{{ next_page.title }}</span>
+          </a>
+        {% endif %}
+      {% endif %}
+      {% endif %}
+    </div>
+
+    {% if site.github.repo %}
+    <div class="page-edit">
+      <a href="{{ site.github.repo }}/edit/{{ site.github.branch }}/docs/{{ page.path }}" target="_blank" rel="noopener noreferrer" class="edit-link">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg>
+        Edit this page on GitHub
+      </a>
+    </div>
+    {% endif %}
+  </footer>
+</article>
