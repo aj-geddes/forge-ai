@@ -16,6 +16,7 @@ export interface ForgeMetadata {
   name: string;
   version: string;
   description?: string;
+  environment?: string;
   labels?: Record<string, string>;
 }
 
@@ -27,11 +28,12 @@ export interface LiteLLMConfig {
 }
 
 export interface LLMConfig {
-  model: string;
+  default_model: string;
   api_key?: string | SecretRef;
   api_base?: string;
   temperature?: number;
   max_tokens?: number;
+  system_prompt?: string | null;
   litellm?: LiteLLMConfig;
 }
 
@@ -128,10 +130,11 @@ export interface SecurityConfig {
 
 export interface PeerAgent {
   name: string;
-  url: string;
+  endpoint: string;
   trust_level: TrustLevel;
   description?: string;
   capabilities?: string[];
+  status?: string;
   auth?: AuthConfig;
 }
 
@@ -172,9 +175,7 @@ export interface ToolInfo {
 }
 
 export interface Session {
-  id: string;
-  agent?: string;
-  created_at: string;
-  last_active?: string;
+  session_id: string;
+  agent?: string | null;
   message_count?: number;
 }

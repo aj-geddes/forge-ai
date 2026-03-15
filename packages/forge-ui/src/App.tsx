@@ -1,6 +1,8 @@
 import { Suspense, lazy } from "react";
 import { Routes, Route } from "react-router-dom";
 import { Layout } from "@/components/layout/Layout";
+import { LoginPage } from "@/features/login/LoginPage";
+import { useAuthStore } from "@/stores/authStore";
 
 const DashboardPage = lazy(() =>
   import("@/features/dashboard/DashboardPage").then((m) => ({ default: m.DashboardPage }))
@@ -33,6 +35,12 @@ function PageLoader() {
 }
 
 export function App() {
+  const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
+
+  if (!isAuthenticated) {
+    return <LoginPage />;
+  }
+
   return (
     <Suspense fallback={<PageLoader />}>
       <Routes>

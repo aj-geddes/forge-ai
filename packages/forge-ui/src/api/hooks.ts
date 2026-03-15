@@ -33,7 +33,10 @@ export function useHealth() {
 export function useConfig() {
   return useQuery({
     queryKey: queryKeys.config,
-    queryFn: () => api.get<ForgeConfig>("/v1/admin/config"),
+    queryFn: async () => {
+      const res = await api.get<{ config: ForgeConfig; path: string }>("/v1/admin/config");
+      return res.config;
+    },
   });
 }
 
@@ -72,7 +75,10 @@ export function useUpdateConfig() {
 
   return useMutation({
     mutationFn: (config: ForgeConfig) =>
-      api.put<ForgeConfig>("/v1/admin/config", config),
+      api.put<{ success: boolean; reloaded: boolean; message: string }>(
+        "/v1/admin/config",
+        { config },
+      ),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.config });
     },

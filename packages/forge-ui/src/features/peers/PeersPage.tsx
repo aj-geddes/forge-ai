@@ -73,7 +73,7 @@ function PeerCard({
   pingState,
   onPing,
 }: {
-  peer: { name: string; url: string; trust_level: TrustLevel; capabilities?: string[] };
+  peer: { name: string; endpoint: string; trust_level: TrustLevel; capabilities?: string[] };
   pingState: PeerPingState;
   onPing: () => void;
 }) {
@@ -94,7 +94,7 @@ function PeerCard({
         </div>
         <CardDescription className="flex items-center gap-1.5 pt-1">
           <Globe className="h-3.5 w-3.5" />
-          {peer.url}
+          {peer.endpoint}
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">

@@ -176,7 +176,7 @@ function HealthCheckRow({
     retry: 1,
   });
 
-  const isOk = data?.status === "ok" || data?.status === "healthy";
+  const isOk = ["ok", "healthy", "ready", "started"].includes(data?.status ?? "");
 
   return (
     <div className="flex items-center justify-between rounded-lg border px-4 py-3 transition-colors hover:bg-muted/50">
@@ -298,7 +298,7 @@ function SystemInfoCard() {
   const infoRows: { icon: React.ComponentType<{ className?: string }>; label: string; value: string }[] = [
     { icon: Server, label: "Name", value: config.metadata.name },
     { icon: Tag, label: "Version", value: config.metadata.version },
-    { icon: Cpu, label: "Default Model", value: config.llm.model },
+    { icon: Cpu, label: "Default Model", value: config.llm.default_model },
     {
       icon: Layers,
       label: "LiteLLM Mode",
@@ -449,7 +449,7 @@ export function DashboardPage() {
   const { data: sessions, isLoading: sessionsLoading, isError: sessionsError } = useSessions();
   const { data: peers, isLoading: peersLoading, isError: peersError } = usePeers();
 
-  const isHealthy = health?.status === "ok" || health?.status === "healthy";
+  const isHealthy = health?.status === "ok" || health?.status === "healthy" || health?.status === "ready";
   const healthStatus: HealthIndicator = health
     ? isHealthy
       ? "healthy"

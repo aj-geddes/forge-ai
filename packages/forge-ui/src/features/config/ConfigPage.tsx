@@ -27,8 +27,8 @@ export function ConfigPage() {
   const handleSave = useCallback(() => {
     if (!draft) return;
     updateConfig.mutate(draft, {
-      onSuccess: (saved) => {
-        setOriginal(saved);
+      onSuccess: () => {
+        void refetch();
         toast({ title: "Configuration saved", description: "Changes applied successfully." });
       },
       onError: (err) => {

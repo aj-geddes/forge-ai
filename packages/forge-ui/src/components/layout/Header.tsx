@@ -1,7 +1,8 @@
 import { useLocation } from "react-router-dom";
-import { HelpCircle, Moon, Sun } from "lucide-react";
+import { HelpCircle, LogOut, Moon, Sun } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useUIStore } from "@/stores/uiStore";
+import { useAuthStore } from "@/stores/authStore";
 import { useGuideStore } from "@/stores/guideStore";
 import { useHealth } from "@/api/hooks";
 import { cn } from "@/lib/utils";
@@ -19,11 +20,12 @@ const pageTitles: Record<string, string> = {
 export function Header() {
   const location = useLocation();
   const { darkMode, toggleDarkMode } = useUIStore();
+  const logout = useAuthStore((s) => s.logout);
   const { togglePanel } = useGuideStore();
   const { data: health } = useHealth();
 
   const title = pageTitles[location.pathname] ?? "Forge AI";
-  const isHealthy = health?.status === "ok" || health?.status === "healthy";
+  const isHealthy = health?.status === "ok" || health?.status === "healthy" || health?.status === "ready";
 
   return (
     <header className="flex h-14 items-center justify-between border-b bg-background px-6">
@@ -65,6 +67,16 @@ export function Header() {
           title="Open guide"
         >
           <HelpCircle className="h-4 w-4" />
+        </Button>
+
+        {/* Logout */}
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={logout}
+          title="Sign out"
+        >
+          <LogOut className="h-4 w-4" />
         </Button>
       </div>
     </header>

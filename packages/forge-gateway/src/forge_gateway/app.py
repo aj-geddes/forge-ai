@@ -381,9 +381,12 @@ def create_app() -> FastAPI:
             static_file = static_dir / path
             if static_file.is_file():
                 return FileResponse(str(static_file))
-            # Serve index.html for known SPA routes
+            # Serve index.html for known SPA routes (no-cache so deploys take effect)
             if path in spa_routes:
-                return FileResponse(str(spa_index))
+                return FileResponse(
+                    str(spa_index),
+                    headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+                )
             # Everything else is a 404
             return JSONResponse({"detail": "Not Found"}, status_code=404)
 

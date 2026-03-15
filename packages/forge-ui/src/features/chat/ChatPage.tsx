@@ -151,20 +151,20 @@ function SessionSidebar() {
             </button>
           ))}
           {serverSessions?.map((ss) => {
-            const isLocal = sessions.some((s) => s.id === ss.id);
+            const isLocal = sessions.some((s) => s.id === ss.session_id);
             if (isLocal) return null;
             return (
               <div
-                key={ss.id}
+                key={ss.session_id}
                 className="group flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-sm text-muted-foreground"
               >
                 <MessageSquare className="h-3.5 w-3.5 shrink-0" />
-                <span className="min-w-0 flex-1 truncate">{ss.id.slice(0, 20)}...</span>
+                <span className="min-w-0 flex-1 truncate">{ss.session_id.slice(0, 20)}...</span>
                 <button
                   type="button"
                   onClick={(e) => {
                     e.stopPropagation();
-                    deleteSession.mutate(ss.id);
+                    deleteSession.mutate(ss.session_id);
                   }}
                   className="shrink-0 opacity-0 transition-opacity group-hover:opacity-100"
                 >

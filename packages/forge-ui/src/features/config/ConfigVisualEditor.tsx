@@ -79,7 +79,7 @@ function configToForm(config: ForgeConfig): FormValues {
         | undefined) ?? undefined,
     },
     llm: {
-      model: config.llm.model,
+      model: config.llm.default_model,
       temperature: config.llm.temperature,
       max_tokens: config.llm.max_tokens,
       system_prompt: config.llm.litellm ? undefined : undefined,
@@ -128,7 +128,7 @@ function formToConfig(
     },
     llm: {
       ...existing.llm,
-      model: form.llm.model,
+      default_model: form.llm.model,
       temperature: form.llm.temperature,
       max_tokens: form.llm.max_tokens,
       litellm: form.llm.litellm
