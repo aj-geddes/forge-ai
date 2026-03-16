@@ -94,9 +94,15 @@ async def update_config(request: AdminConfigUpdateRequest) -> AdminConfigUpdateR
     """Validate, apply in-memory, rebuild tools, and best-effort persist to disk."""
     global _config
 
+    # Preserve original secret refs — the client receives redacted values,
+    # so we must restore the real SecretRef entries before applying.
+    incoming = request.config
+    if _config is not None:
+        _restore_secrets(incoming, _config.model_dump(mode="json"))
+
     # Validate the proposed config
     try:
-        new_config = ForgeConfig.model_validate(request.config)
+        new_config = ForgeConfig.model_validate(incoming)
     except ValidationError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
@@ -348,3 +354,32 @@ def _redact_secrets(data: Any) -> None:
     elif isinstance(data, list):
         for item in data:
             _redact_secrets(item)
+
+
+def _restore_secrets(incoming: Any, original: Any) -> None:
+    """Restore redacted SecretRef values from the original config.
+
+    When the UI reads config, secrets are redacted to ``***REDACTED***``.
+    When it PUTs config back (e.g. after adding a tool), those redacted
+    values would overwrite the real secret refs.  This function walks
+    both trees and copies the original values back wherever a redacted
+    placeholder is found.
+    """
+    if isinstance(incoming, dict) and isinstance(original, dict):
+        # SecretRef node: restore if redacted
+        if (
+            incoming.get("source") in ("env", "k8s_secret")
+            and incoming.get("name") == "***REDACTED***"
+        ):
+            if "name" in original:
+                incoming["name"] = original["name"]
+            if "key" in original and incoming.get("key") == "***REDACTED***":
+                incoming["key"] = original["key"]
+            return
+        for k in incoming:
+            if k in original:
+                _restore_secrets(incoming[k], original[k])
+    elif isinstance(incoming, list) and isinstance(original, list):
+        for i, item in enumerate(incoming):
+            if i < len(original):
+                _restore_secrets(item, original[i])
