@@ -61,7 +61,9 @@ export interface ResponseMapping {
 }
 
 export interface ManualToolAPI {
-  url: string;
+  url?: string;
+  base_url?: string;
+  endpoint?: string;
   method: HTTPMethod;
   headers?: Record<string, string>;
   body_template?: string;
@@ -99,9 +101,12 @@ export interface Workflow {
 }
 
 export interface ToolsConfig {
+  openapi_sources?: OpenAPISource[];
+  manual_tools?: ManualTool[];
+  workflows?: Workflow[];
+  // Aliases for backward compat (backend accepts both)
   openapi?: OpenAPISource[];
   manual?: ManualTool[];
-  workflows?: Workflow[];
 }
 
 export interface AgentWeaveConfig {

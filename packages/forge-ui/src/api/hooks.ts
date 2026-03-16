@@ -92,6 +92,31 @@ export function useToolPreview() {
   });
 }
 
+export function useAddToolToConfig() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async (
+      updater: (tools: ForgeConfig["tools"]) => ForgeConfig["tools"],
+    ) => {
+      const res = await api.get<{ config: ForgeConfig; path: string }>(
+        "/v1/admin/config",
+      );
+      const config = res.config;
+      const updatedTools = updater(config.tools);
+      const updatedConfig = { ...config, tools: updatedTools };
+      return api.put<{ success: boolean; reloaded: boolean; message: string }>(
+        "/v1/admin/config",
+        { config: updatedConfig },
+      );
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.config });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.tools });
+    },
+  });
+}
+
 export function useDeleteSession() {
   const queryClient = useQueryClient();
 

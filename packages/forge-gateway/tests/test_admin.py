@@ -904,7 +904,7 @@ class TestUpdateConfigEdgeCases:
         async_client: httpx.AsyncClient,
         auth_headers: dict[str, str],
     ) -> None:
-        """Line 112-113: OSError when writing config to disk returns 500."""
+        """Config update succeeds even when disk write fails (best-effort persist)."""
         import unittest.mock
 
         admin.set_state(
@@ -922,8 +922,10 @@ class TestUpdateConfigEdgeCases:
                 json={"config": new_config.model_dump(mode="json")},
                 headers=auth_headers,
             )
-        assert resp.status_code == 500
-        assert "Failed to write config" in resp.json()["detail"]
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["success"] is True
+        assert "in-memory only" in data["message"]
 
     async def test_update_config_with_agent_reload_success(
         self,

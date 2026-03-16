@@ -15,6 +15,7 @@ import { Select } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useToast } from "@/components/ui/toast";
+import { useAddToolToConfig } from "@/api/hooks";
 import { useToolStore } from "@/stores/toolStore";
 import { cn } from "@/lib/utils";
 import {
@@ -481,12 +482,54 @@ export function OpenAPIWizard() {
     }
   };
 
+  const addToolMutation = useAddToolToConfig();
+
   const handleAdd = () => {
-    toast({
-      title: "OpenAPI tools added",
-      description: `${openApiData.selected.length} tool(s) from ${openApiData.specTitle} added successfully.`,
-    });
-    closeWizard();
+    const authConfig =
+      openApiData.auth.type !== "none"
+        ? {
+            type: openApiData.auth.type,
+            ...(openApiData.auth.type === "bearer" && openApiData.auth.token
+              ? { token: openApiData.auth.token }
+              : {}),
+            ...(openApiData.auth.type === "api_key" && openApiData.auth.token
+              ? { token: openApiData.auth.token, header_name: openApiData.auth.headerName }
+              : {}),
+          }
+        : undefined;
+
+    const source = {
+      name: openApiData.specTitle || "openapi-source",
+      url: openApiData.specUrl,
+      ...(openApiData.namespace ? { namespace: openApiData.namespace } : {}),
+      ...(openApiData.selected.length < openApiData.operations.length
+        ? { include_operations: openApiData.selected }
+        : {}),
+      ...(authConfig ? { auth: authConfig } : {}),
+    };
+
+    addToolMutation.mutate(
+      (tools) => ({
+        ...tools,
+        openapi_sources: [...(tools.openapi_sources ?? []), source],
+      }),
+      {
+        onSuccess: () => {
+          toast({
+            title: "OpenAPI tools added",
+            description: `${openApiData.selected.length} tool(s) from ${openApiData.specTitle || "spec"} saved to config.`,
+          });
+          closeWizard();
+        },
+        onError: (err) => {
+          toast({
+            title: "Failed to add tools",
+            description: err instanceof Error ? err.message : "Unknown error",
+            variant: "destructive",
+          });
+        },
+      },
+    );
   };
 
   return (

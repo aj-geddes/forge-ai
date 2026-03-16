@@ -14,6 +14,7 @@ import { Select } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useToast } from "@/components/ui/toast";
+import { useAddToolToConfig } from "@/api/hooks";
 import { useToolStore } from "@/stores/toolStore";
 import { useTools } from "@/api/hooks";
 import {
@@ -45,12 +46,42 @@ export function WorkflowComposer() {
     workflowData.steps.length > 0 &&
     workflowData.steps.every((s) => s.tool.trim().length > 0);
 
+  const addToolMutation = useAddToolToConfig();
+
   const handleSave = () => {
-    toast({
-      title: "Workflow saved",
-      description: `Workflow "${workflowData.name}" with ${workflowData.steps.length} step(s) saved.`,
-    });
-    closeWizard();
+    const workflow = {
+      name: workflowData.name,
+      description: workflowData.description,
+      steps: workflowData.steps.map((s) => ({
+        tool: s.tool,
+        ...(s.params && s.params !== "{}" ? { params: JSON.parse(s.params) } : {}),
+        ...(s.outputAs ? { output_as: s.outputAs } : {}),
+        ...(s.condition ? { condition: s.condition } : {}),
+      })),
+    };
+
+    addToolMutation.mutate(
+      (tools) => ({
+        ...tools,
+        workflows: [...(tools.workflows ?? []), workflow],
+      }),
+      {
+        onSuccess: () => {
+          toast({
+            title: "Workflow saved",
+            description: `Workflow "${workflowData.name}" with ${workflowData.steps.length} step(s) saved to config.`,
+          });
+          closeWizard();
+        },
+        onError: (err) => {
+          toast({
+            title: "Failed to save workflow",
+            description: err instanceof Error ? err.message : "Unknown error",
+            variant: "destructive",
+          });
+        },
+      },
+    );
   };
 
   return (

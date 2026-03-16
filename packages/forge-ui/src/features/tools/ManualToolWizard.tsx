@@ -16,6 +16,7 @@ import { Switch } from "@/components/ui/switch";
 import { Separator } from "@/components/ui/separator";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useToast } from "@/components/ui/toast";
+import { useAddToolToConfig } from "@/api/hooks";
 import { useToolStore } from "@/stores/toolStore";
 import { cn } from "@/lib/utils";
 import {
@@ -567,12 +568,60 @@ export function ManualToolWizard() {
     }
   };
 
+  const addToolMutation = useAddToolToConfig();
+
   const handleAdd = () => {
-    toast({
-      title: "Manual tool added",
-      description: `Tool "${manualData.name}" has been added successfully.`,
-    });
-    closeWizard();
+    const authConfig =
+      manualData.auth.type !== "none"
+        ? {
+            type: manualData.auth.type,
+            ...(manualData.auth.token ? { token: manualData.auth.token } : {}),
+            ...(manualData.auth.headerName ? { header_name: manualData.auth.headerName } : {}),
+          }
+        : undefined;
+
+    const tool = {
+      name: manualData.name,
+      description: manualData.description,
+      parameters: manualData.parameters.map((p) => ({
+        name: p.name,
+        type: p.type,
+        description: p.description,
+        required: p.required,
+      })),
+      api: {
+        base_url: manualData.baseUrl || undefined,
+        endpoint: manualData.endpoint || undefined,
+        method: manualData.method,
+        ...(authConfig ? { auth: authConfig } : {}),
+        ...(manualData.responseMapping.resultPath
+          ? { response_mapping: { result_path: manualData.responseMapping.resultPath } }
+          : {}),
+      },
+    };
+
+    addToolMutation.mutate(
+      (tools) => ({
+        ...tools,
+        manual_tools: [...(tools.manual_tools ?? []), tool],
+      }),
+      {
+        onSuccess: () => {
+          toast({
+            title: "Manual tool added",
+            description: `Tool "${manualData.name}" saved to config.`,
+          });
+          closeWizard();
+        },
+        onError: (err) => {
+          toast({
+            title: "Failed to add tool",
+            description: err instanceof Error ? err.message : "Unknown error",
+            variant: "destructive",
+          });
+        },
+      },
+    );
   };
 
   return (

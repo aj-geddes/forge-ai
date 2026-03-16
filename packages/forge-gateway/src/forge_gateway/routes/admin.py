@@ -91,7 +91,7 @@ async def get_config() -> AdminConfigResponse:
     responses={400: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
 )
 async def update_config(request: AdminConfigUpdateRequest) -> AdminConfigUpdateResponse:
-    """Validate and write new config, trigger hot-reload."""
+    """Validate, apply in-memory, rebuild tools, and best-effort persist to disk."""
     global _config
 
     # Validate the proposed config
@@ -100,17 +100,13 @@ async def update_config(request: AdminConfigUpdateRequest) -> AdminConfigUpdateR
     except ValidationError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
-    # Write to disk
-    config_path = Path(_config_path or os.environ.get("FORGE_CONFIG_PATH", "forge.yaml"))
-    try:
-        yaml_str = yaml.dump(
-            new_config.model_dump(mode="json", exclude_none=True),
-            default_flow_style=False,
-            sort_keys=False,
-        )
-        config_path.write_text(yaml_str, encoding="utf-8")
-    except OSError as e:
-        raise HTTPException(status_code=500, detail=f"Failed to write config: {e}") from e
+    # Apply config in-memory immediately
+    _config = new_config
+
+    # Update API key config so auth picks up changes
+    from forge_gateway.auth import set_api_key_config
+
+    set_api_key_config(new_config.security.api_keys)
 
     # Hot-reload: rebuild tool surface if agent is available
     reloaded = False
@@ -122,12 +118,32 @@ async def update_config(request: AdminConfigUpdateRequest) -> AdminConfigUpdateR
         except Exception:
             logger.exception("Failed to reload tool surface after config update")
 
-    _config = new_config
+    # Best-effort persist to disk (may fail on read-only filesystems)
+    persisted = False
+    config_path = Path(_config_path or os.environ.get("FORGE_CONFIG_PATH", "forge.yaml"))
+    try:
+        yaml_str = yaml.dump(
+            new_config.model_dump(mode="json", exclude_none=True),
+            default_flow_style=False,
+            sort_keys=False,
+        )
+        config_path.write_text(yaml_str, encoding="utf-8")
+        persisted = True
+    except OSError:
+        logger.warning("Could not persist config to %s (read-only filesystem)", config_path)
+
+    parts = ["Config applied"]
+    if reloaded:
+        parts.append("tools reloaded")
+    if persisted:
+        parts.append("saved to disk")
+    else:
+        parts.append("in-memory only (filesystem read-only)")
 
     return AdminConfigUpdateResponse(
         success=True,
         reloaded=reloaded,
-        message="Config updated" + (" and tools reloaded" if reloaded else ""),
+        message=" · ".join(parts),
     )
 
 

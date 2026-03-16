@@ -288,8 +288,8 @@ export function ConfigVisualEditor() {
     );
   }
 
-  const openapiCount = draft.tools.openapi?.length ?? 0;
-  const manualCount = draft.tools.manual?.length ?? 0;
+  const openapiCount = draft.tools.openapi_sources?.length ?? 0;
+  const manualCount = draft.tools.manual_tools?.length ?? 0;
   const workflowCount = draft.tools.workflows?.length ?? 0;
   const peersCount = draft.peers?.length ?? 0;
 

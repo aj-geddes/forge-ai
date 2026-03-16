@@ -337,8 +337,8 @@ function SystemInfoCard() {
   }
 
   const toolCount =
-    (config.tools.openapi?.length ?? 0) +
-    (config.tools.manual?.length ?? 0) +
+    (config.tools.openapi_sources?.length ?? 0) +
+    (config.tools.manual_tools?.length ?? 0) +
     (config.tools.workflows?.length ?? 0);
 
   const agentCount = config.agents?.agents?.length ?? 0;
