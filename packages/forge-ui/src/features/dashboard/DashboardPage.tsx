@@ -288,6 +288,30 @@ function SystemInfoSkeleton() {
   );
 }
 
+function InfoRow({
+  icon: Icon,
+  label,
+  value,
+  mono,
+}: {
+  icon: React.ComponentType<{ className?: string }>;
+  label: string;
+  value: string;
+  mono?: boolean;
+}) {
+  return (
+    <div className="flex items-center justify-between py-2">
+      <div className="flex items-center gap-2.5 text-sm text-muted-foreground">
+        <Icon className="h-4 w-4" />
+        <span>{label}</span>
+      </div>
+      <span className={cn("text-sm font-medium", mono && "font-mono text-xs bg-muted px-2 py-0.5 rounded")}>
+        {value}
+      </span>
+    </div>
+  );
+}
+
 function SystemInfoCard() {
   const { data: config, isLoading, isError } = useConfig();
 
@@ -312,24 +336,16 @@ function SystemInfoCard() {
     );
   }
 
-  const infoRows: { icon: React.ComponentType<{ className?: string }>; label: string; value: string }[] = [
-    { icon: Server, label: "Name", value: config.metadata.name },
-    { icon: Tag, label: "Version", value: config.metadata.version },
-    { icon: Cpu, label: "Default Model", value: config.llm.default_model },
-    {
-      icon: Layers,
-      label: "LiteLLM Mode",
-      value: config.llm.litellm?.mode ?? "N/A",
-    },
-  ];
+  const toolCount =
+    (config.tools.openapi?.length ?? 0) +
+    (config.tools.manual?.length ?? 0) +
+    (config.tools.workflows?.length ?? 0);
 
-  if (config.metadata.description) {
-    infoRows.push({
-      icon: MessageSquare,
-      label: "Description",
-      value: config.metadata.description,
-    });
-  }
+  const agentCount = config.agents?.agents?.length ?? 0;
+  const peerCount = config.peers?.length ?? 0;
+  const env = config.metadata.environment ?? config.metadata.labels?.["environment"] ?? "development";
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const litellm = config.llm.litellm as Record<string, any> | undefined;
 
   return (
     <Card>
@@ -339,28 +355,109 @@ function SystemInfoCard() {
           System Information
         </CardTitle>
         <CardDescription>
-          Configuration metadata for your Forge instance
+          Live configuration snapshot from your Forge instance
         </CardDescription>
       </CardHeader>
-      <CardContent>
-        <div className="space-y-1">
-          {infoRows.map((row, i) => (
-            <div key={row.label}>
-              <div className="flex items-center justify-between py-2.5">
-                <div className="flex items-center gap-2.5 text-sm text-muted-foreground">
-                  <row.icon className="h-4 w-4" />
-                  <span>{row.label}</span>
-                </div>
-                <span className="text-sm font-medium">{row.value}</span>
+      <CardContent className="space-y-4">
+        {/* Instance */}
+        <div>
+          <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+            Instance
+          </p>
+          <div className="rounded-lg border px-4">
+            <InfoRow icon={Server} label="Name" value={config.metadata.name} />
+            <Separator />
+            <InfoRow icon={Tag} label="Version" value={config.metadata.version} mono />
+            <Separator />
+            <div className="flex items-center justify-between py-2">
+              <div className="flex items-center gap-2.5 text-sm text-muted-foreground">
+                <Layers className="h-4 w-4" />
+                <span>Environment</span>
               </div>
-              {row.label === "LiteLLM Mode" && (
-                <HelpText>
-                  LiteLLM routes requests to LLM providers. Modes: "embedded" runs in-process, "sidecar" runs alongside, "external" connects to a shared proxy.
-                </HelpText>
-              )}
-              {i < infoRows.length - 1 && <Separator />}
+              <span className={cn(
+                "text-xs font-medium px-2 py-0.5 rounded-full capitalize",
+                env === "production"
+                  ? "bg-[oklch(0.65_0.2_145/0.15)] text-[oklch(0.45_0.2_145)]"
+                  : env === "staging"
+                    ? "bg-[oklch(0.75_0.15_70/0.15)] text-[oklch(0.5_0.15_70)]"
+                    : "bg-primary/10 text-primary",
+              )}>
+                {env}
+              </span>
             </div>
-          ))}
+            {config.metadata.description && (
+              <>
+                <Separator />
+                <InfoRow icon={MessageSquare} label="Description" value={config.metadata.description} />
+              </>
+            )}
+          </div>
+        </div>
+
+        {/* LLM */}
+        <div>
+          <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+            Language Model
+          </p>
+          <div className="rounded-lg border px-4">
+            <InfoRow icon={Cpu} label="Model" value={config.llm.default_model} mono />
+            <Separator />
+            <div className="flex items-center justify-between py-2">
+              <div className="flex items-center gap-2.5 text-sm text-muted-foreground">
+                <Layers className="h-4 w-4" />
+                <span>LiteLLM</span>
+              </div>
+              <span className="text-xs font-medium px-2 py-0.5 rounded-full bg-muted capitalize">
+                {config.llm.litellm?.mode ?? "embedded"}
+              </span>
+            </div>
+            <Separator />
+            <div className="flex items-center justify-between py-2">
+              <div className="flex items-center gap-2.5 text-sm text-muted-foreground">
+                <Wrench className="h-4 w-4" />
+                <span>Temperature</span>
+              </div>
+              <span className="text-sm font-medium">{config.llm.temperature ?? 0.7}</span>
+            </div>
+            <Separator />
+            <div className="flex items-center justify-between py-2">
+              <div className="flex items-center gap-2.5 text-sm text-muted-foreground">
+                <MessageSquare className="h-4 w-4" />
+                <span>Max Tokens</span>
+              </div>
+              <span className="text-sm font-medium">{(config.llm.max_tokens ?? 4096).toLocaleString()}</span>
+            </div>
+            {litellm?.fallback_models && litellm.fallback_models.length > 0 && (
+              <>
+                <Separator />
+                <InfoRow icon={Layers} label="Fallbacks" value={(litellm.fallback_models as string[]).join(", ")} mono />
+              </>
+            )}
+          </div>
+          <HelpText>
+            The model processes all agent requests via LiteLLM. Temperature controls creativity (lower = more focused). Max tokens limits response length.
+          </HelpText>
+        </div>
+
+        {/* Capacity */}
+        <div>
+          <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+            Capacity
+          </p>
+          <div className="grid grid-cols-3 gap-2">
+            <div className="rounded-lg border px-3 py-2 text-center">
+              <p className="text-lg font-bold">{agentCount}</p>
+              <p className="text-xs text-muted-foreground">Agent{agentCount !== 1 ? "s" : ""}</p>
+            </div>
+            <div className="rounded-lg border px-3 py-2 text-center">
+              <p className="text-lg font-bold">{toolCount}</p>
+              <p className="text-xs text-muted-foreground">Tool{toolCount !== 1 ? "s" : ""}</p>
+            </div>
+            <div className="rounded-lg border px-3 py-2 text-center">
+              <p className="text-lg font-bold">{peerCount}</p>
+              <p className="text-xs text-muted-foreground">Peer{peerCount !== 1 ? "s" : ""}</p>
+            </div>
+          </div>
         </div>
       </CardContent>
     </Card>
