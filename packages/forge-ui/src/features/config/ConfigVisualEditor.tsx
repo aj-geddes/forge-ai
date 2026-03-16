@@ -3,7 +3,15 @@ import { useForm, Controller } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { Link } from "react-router-dom";
-import { ExternalLink } from "lucide-react";
+import {
+  ExternalLink,
+  Info,
+  Cpu,
+  Shield,
+  Users,
+  Wrench,
+  Sparkles,
+} from "lucide-react";
 import {
   Accordion,
   AccordionItem,
@@ -18,6 +26,64 @@ import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { useConfigStore } from "@/stores/configStore";
 import type { ForgeConfig, LiteLLMMode, TrustPolicy } from "@/types/config";
+
+// --- Help text component ---
+
+function HelpText({ children }: { children: React.ReactNode }) {
+  return (
+    <p className="flex items-start gap-1.5 text-xs text-muted-foreground mt-1.5 leading-relaxed">
+      <Info className="h-3 w-3 mt-0.5 shrink-0 opacity-60" />
+      <span>{children}</span>
+    </p>
+  );
+}
+
+function SectionDescription({ children }: { children: React.ReactNode }) {
+  return (
+    <p className="text-sm text-muted-foreground mb-4 pb-3 border-b border-border/50">
+      {children}
+    </p>
+  );
+}
+
+// --- Model options ---
+
+const MODEL_OPTIONS = [
+  {
+    group: "OpenAI",
+    models: [
+      { value: "gpt-4o", label: "GPT-4o", desc: "Best overall — fast, multimodal, strong reasoning" },
+      { value: "gpt-4o-mini", label: "GPT-4o Mini", desc: "Cost-effective for simpler tasks" },
+      { value: "gpt-4-turbo", label: "GPT-4 Turbo", desc: "High capability, 128K context" },
+      { value: "o1", label: "o1", desc: "Advanced reasoning, slower but more accurate" },
+      { value: "o1-mini", label: "o1-mini", desc: "Fast reasoning for code and math" },
+      { value: "o3-mini", label: "o3-mini", desc: "Latest reasoning model, cost-efficient" },
+    ],
+  },
+  {
+    group: "Anthropic",
+    models: [
+      { value: "claude-opus-4-6", label: "Claude Opus 4.6", desc: "Most capable, best for complex tasks" },
+      { value: "claude-sonnet-4-6", label: "Claude Sonnet 4.6", desc: "Balanced speed and intelligence" },
+      { value: "claude-haiku-4-5-20251001", label: "Claude Haiku 4.5", desc: "Fastest, ideal for high-volume" },
+    ],
+  },
+  {
+    group: "Google",
+    models: [
+      { value: "gemini/gemini-2.0-flash", label: "Gemini 2.0 Flash", desc: "Fast multimodal with tool use" },
+      { value: "gemini/gemini-2.5-pro-preview", label: "Gemini 2.5 Pro", desc: "Best quality, 1M context" },
+    ],
+  },
+  {
+    group: "Local / Open Source",
+    models: [
+      { value: "ollama/llama3.3", label: "Llama 3.3 (Ollama)", desc: "Local, 70B parameter open model" },
+      { value: "ollama/mistral", label: "Mistral (Ollama)", desc: "Local, fast 7B model" },
+      { value: "ollama/deepseek-r1", label: "DeepSeek R1 (Ollama)", desc: "Local reasoning model" },
+    ],
+  },
+] as const;
 
 // --- Zod Schema ---
 
@@ -212,6 +278,7 @@ export function ConfigVisualEditor() {
   }, [watch, draft, updateDraft]);
 
   const litellmMode = watch("llm.litellm.mode");
+  const currentModel = watch("llm.model");
 
   if (!draft) {
     return (
@@ -226,21 +293,39 @@ export function ConfigVisualEditor() {
   const workflowCount = draft.tools.workflows?.length ?? 0;
   const peersCount = draft.peers?.length ?? 0;
 
+  // Check if current model is in our preset list
+  const isCustomModel = !MODEL_OPTIONS.some((g) =>
+    g.models.some((m) => m.value === currentModel),
+  );
+
   return (
     <div className="space-y-2">
       <Accordion>
         {/* Metadata Section */}
         <AccordionItem open>
-          <AccordionTrigger>Metadata</AccordionTrigger>
+          <AccordionTrigger>
+            <span className="flex items-center gap-2">
+              <Sparkles className="h-4 w-4 text-primary" />
+              Identity
+            </span>
+          </AccordionTrigger>
           <AccordionContent>
+            <SectionDescription>
+              Identifies your Forge agent instance. The name and version appear in health checks,
+              the A2A agent card, and the control plane header.
+            </SectionDescription>
             <div className="grid gap-4 sm:grid-cols-2">
               <div className="space-y-2">
-                <Label htmlFor="metadata.name">Name</Label>
+                <Label htmlFor="metadata.name">Agent Name</Label>
                 <Input
                   id="metadata.name"
                   placeholder="my-forge-agent"
                   {...register("metadata.name")}
                 />
+                <HelpText>
+                  A unique identifier for this agent instance. Used in logging, peer
+                  discovery, and the A2A agent card.
+                </HelpText>
                 {errors.metadata?.name && (
                   <p className="text-xs text-destructive">
                     {errors.metadata.name.message}
@@ -255,6 +340,10 @@ export function ConfigVisualEditor() {
                   placeholder="1.0.0"
                   {...register("metadata.version")}
                 />
+                <HelpText>
+                  Semantic version of your agent configuration. Useful for tracking changes
+                  and displayed in health endpoints.
+                </HelpText>
                 {errors.metadata?.version && (
                   <p className="text-xs text-destructive">
                     {errors.metadata.version.message}
@@ -266,10 +355,14 @@ export function ConfigVisualEditor() {
                 <Label htmlFor="metadata.description">Description</Label>
                 <Textarea
                   id="metadata.description"
-                  placeholder="Describe your agent..."
+                  placeholder="Describe what this agent does..."
                   rows={2}
                   {...register("metadata.description")}
                 />
+                <HelpText>
+                  A human-readable summary shown in the dashboard and shared with peer agents during
+                  discovery.
+                </HelpText>
               </div>
 
               <div className="space-y-2">
@@ -283,6 +376,10 @@ export function ConfigVisualEditor() {
                   <option value="staging">Staging</option>
                   <option value="production">Production</option>
                 </Select>
+                <HelpText>
+                  Controls logging verbosity and default security posture. Production enables
+                  stricter validation.
+                </HelpText>
               </div>
             </div>
           </AccordionContent>
@@ -290,29 +387,50 @@ export function ConfigVisualEditor() {
 
         {/* LLM Section */}
         <AccordionItem>
-          <AccordionTrigger>LLM Configuration</AccordionTrigger>
+          <AccordionTrigger>
+            <span className="flex items-center gap-2">
+              <Cpu className="h-4 w-4 text-primary" />
+              LLM Configuration
+            </span>
+          </AccordionTrigger>
           <AccordionContent>
+            <SectionDescription>
+              Controls which language model powers your agent. The model choice directly affects
+              response quality, speed, cost, and which capabilities (tool calling, vision, reasoning)
+              are available.
+            </SectionDescription>
             <div className="grid gap-4 sm:grid-cols-2">
-              <div className="space-y-2">
+              <div className="space-y-2 sm:col-span-2">
                 <Label htmlFor="llm.model">Default Model</Label>
-                <Input
+                <Select
                   id="llm.model"
-                  placeholder="gpt-4o"
                   {...register("llm.model")}
-                />
-                {errors.llm?.model && (
-                  <p className="text-xs text-destructive">
-                    {errors.llm.model.message}
-                  </p>
-                )}
+                >
+                  {MODEL_OPTIONS.map((group) => (
+                    <optgroup key={group.group} label={group.group}>
+                      {group.models.map((m) => (
+                        <option key={m.value} value={m.value}>
+                          {m.label} — {m.desc}
+                        </option>
+                      ))}
+                    </optgroup>
+                  ))}
+                  {isCustomModel && currentModel && (
+                    <optgroup label="Current">
+                      <option value={currentModel}>{currentModel} (custom)</option>
+                    </optgroup>
+                  )}
+                </Select>
+                <HelpText>
+                  The LLM that processes all agent requests. Routed through LiteLLM, so you can use
+                  any provider (OpenAI, Anthropic, Google, or local models via Ollama). More capable
+                  models produce better results but cost more and respond slower.
+                </HelpText>
               </div>
 
               <div className="space-y-2">
                 <Label htmlFor="llm.temperature">
-                  Temperature{" "}
-                  <span className="text-muted-foreground font-normal">
-                    (0-2)
-                  </span>
+                  Temperature
                 </Label>
                 <Input
                   id="llm.temperature"
@@ -323,6 +441,11 @@ export function ConfigVisualEditor() {
                   placeholder="0.7"
                   {...register("llm.temperature")}
                 />
+                <HelpText>
+                  Controls randomness in responses. Lower values (0&ndash;0.3) give focused,
+                  deterministic answers &mdash; good for code and factual tasks. Higher values
+                  (0.7&ndash;1.5) produce more creative, varied responses. Default is 0.7.
+                </HelpText>
                 {errors.llm?.temperature && (
                   <p className="text-xs text-destructive">
                     {errors.llm.temperature.message}
@@ -339,23 +462,39 @@ export function ConfigVisualEditor() {
                   placeholder="4096"
                   {...register("llm.max_tokens")}
                 />
+                <HelpText>
+                  Maximum length of the model&apos;s response in tokens (~4 chars per token).
+                  4096 is a good default. Increase for tasks that need long outputs (code generation,
+                  detailed analysis). Higher values use more API credits.
+                </HelpText>
               </div>
 
               <div className="space-y-2 sm:col-span-2">
                 <Label htmlFor="llm.system_prompt">System Prompt</Label>
                 <Textarea
                   id="llm.system_prompt"
-                  placeholder="You are a helpful assistant..."
+                  placeholder="You are a helpful assistant that..."
                   rows={4}
                   {...register("llm.system_prompt")}
                 />
+                <HelpText>
+                  Instructions that shape your agent&apos;s personality, expertise, and behavior.
+                  This is prepended to every conversation. Be specific about the role, tone,
+                  constraints, and what tools to prefer. Leave blank to use the per-agent
+                  system prompts defined in the Agents section.
+                </HelpText>
               </div>
 
               {/* LiteLLM subsection */}
-              <div className="sm:col-span-2">
-                <h4 className="mb-3 text-sm font-medium text-muted-foreground">
+              <div className="sm:col-span-2 rounded-lg border border-border/50 bg-muted/30 p-4">
+                <h4 className="mb-1 text-sm font-semibold flex items-center gap-2">
                   LiteLLM Router
                 </h4>
+                <p className="mb-4 text-xs text-muted-foreground">
+                  LiteLLM handles model routing, load balancing, and failover. It translates
+                  all model calls into a unified interface so you can swap providers without
+                  code changes.
+                </p>
                 <div className="grid gap-4 sm:grid-cols-2">
                   <div className="space-y-2">
                     <Label htmlFor="llm.litellm.mode">Mode</Label>
@@ -363,21 +502,32 @@ export function ConfigVisualEditor() {
                       id="llm.litellm.mode"
                       {...register("llm.litellm.mode")}
                     >
-                      <option value="embedded">Embedded</option>
-                      <option value="sidecar">Sidecar</option>
-                      <option value="external">External</option>
+                      <option value="embedded">Embedded &mdash; runs inside the agent process</option>
+                      <option value="sidecar">Sidecar &mdash; separate container in the same pod</option>
+                      <option value="external">External &mdash; dedicated LiteLLM proxy service</option>
                     </Select>
+                    <HelpText>
+                      <strong>Embedded</strong> is simplest for development (zero extra setup).{" "}
+                      <strong>Sidecar</strong> isolates LLM routing for better resource control.{" "}
+                      <strong>External</strong> is best for production &mdash; a shared proxy that
+                      multiple agents connect to, with its own scaling and caching.
+                    </HelpText>
                   </div>
 
                   {(litellmMode === "sidecar" ||
                     litellmMode === "external") && (
                     <div className="space-y-2">
-                      <Label htmlFor="llm.litellm.endpoint">Endpoint</Label>
+                      <Label htmlFor="llm.litellm.endpoint">Endpoint URL</Label>
                       <Input
                         id="llm.litellm.endpoint"
                         placeholder="http://litellm:4000"
                         {...register("llm.litellm.endpoint")}
                       />
+                      <HelpText>
+                        The URL where the LiteLLM proxy is reachable. For sidecar mode, this is
+                        typically <code className="text-xs">http://localhost:4000</code>. For
+                        external mode, use the service DNS name.
+                      </HelpText>
                     </div>
                   )}
                 </div>
@@ -388,8 +538,17 @@ export function ConfigVisualEditor() {
 
         {/* Tools Section */}
         <AccordionItem>
-          <AccordionTrigger>Tools</AccordionTrigger>
+          <AccordionTrigger>
+            <span className="flex items-center gap-2">
+              <Wrench className="h-4 w-4 text-primary" />
+              Tools
+            </span>
+          </AccordionTrigger>
           <AccordionContent>
+            <SectionDescription>
+              Tools give your agent the ability to take actions &mdash; call APIs, query databases,
+              execute workflows. Without tools, the agent can only answer from its training data.
+            </SectionDescription>
             <div className="space-y-3">
               <div className="flex flex-wrap gap-2">
                 <Badge variant="secondary">
@@ -403,49 +562,78 @@ export function ConfigVisualEditor() {
                 </Badge>
               </div>
               <p className="text-sm text-muted-foreground">
-                Use the{" "}
+                Tools are managed in the{" "}
                 <Link
                   to="/tools"
                   className="inline-flex items-center gap-1 text-primary underline-offset-4 hover:underline"
                 >
                   Tool Workshop
                   <ExternalLink className="h-3 w-3" />
-                </Link>{" "}
-                for detailed tool editing.
+                </Link>
+                {" "}where you can import from OpenAPI specs, define custom tools, or compose
+                multi-step workflows.
               </p>
+              <HelpText>
+                <strong>OpenAPI</strong> tools are auto-generated from API specs &mdash; point at a
+                URL and Forge imports all operations. <strong>Manual</strong> tools let you define
+                a single API call with custom parameters. <strong>Workflows</strong> chain multiple
+                tools together with variable passing between steps.
+              </HelpText>
             </div>
           </AccordionContent>
         </AccordionItem>
 
         {/* Security Section */}
         <AccordionItem>
-          <AccordionTrigger>Security</AccordionTrigger>
+          <AccordionTrigger>
+            <span className="flex items-center gap-2">
+              <Shield className="h-4 w-4 text-primary" />
+              Security
+            </span>
+          </AccordionTrigger>
           <AccordionContent>
+            <SectionDescription>
+              Controls authentication, authorization, and rate limiting for your agent.
+              Security settings determine who can call your agent and how requests are validated.
+            </SectionDescription>
             <div className="grid gap-4 sm:grid-cols-2">
-              <div className="flex items-center gap-3 sm:col-span-2">
-                <Controller
-                  name="security.agentweave_enabled"
-                  control={control}
-                  render={({ field }) => (
-                    <Switch
-                      id="security.agentweave_enabled"
-                      checked={field.value}
-                      onCheckedChange={field.onChange}
-                    />
-                  )}
-                />
-                <Label htmlFor="security.agentweave_enabled">
-                  Enable AgentWeave
-                </Label>
+              <div className="sm:col-span-2 flex items-center justify-between rounded-lg border border-border/50 bg-muted/30 p-4">
+                <div className="flex items-center gap-3">
+                  <Controller
+                    name="security.agentweave_enabled"
+                    control={control}
+                    render={({ field }) => (
+                      <Switch
+                        id="security.agentweave_enabled"
+                        checked={field.value}
+                        onCheckedChange={field.onChange}
+                      />
+                    )}
+                  />
+                  <div>
+                    <Label htmlFor="security.agentweave_enabled" className="text-sm font-semibold">
+                      AgentWeave Security Framework
+                    </Label>
+                    <p className="text-xs text-muted-foreground mt-0.5">
+                      Enterprise security: identity verification (SPIFFE), message signing (JWT),
+                      authorization (OPA), and audit logging for every request.
+                    </p>
+                  </div>
+                </div>
               </div>
 
               <div className="space-y-2">
                 <Label htmlFor="security.trust_domain">Trust Domain</Label>
                 <Input
                   id="security.trust_domain"
-                  placeholder="/path/to/trust-store"
+                  placeholder="forge.local"
                   {...register("security.trust_domain")}
                 />
+                <HelpText>
+                  The SPIFFE trust domain for identity verification. Agents within the same trust
+                  domain can authenticate each other. Use your organization&apos;s domain in
+                  production.
+                </HelpText>
               </div>
 
               <div className="space-y-2">
@@ -455,14 +643,20 @@ export function ConfigVisualEditor() {
                   {...register("security.trust_policy")}
                 >
                   <option value="">Select policy...</option>
-                  <option value="strict">Strict</option>
-                  <option value="permissive">Permissive</option>
+                  <option value="strict">Strict &mdash; reject unverified callers</option>
+                  <option value="permissive">Permissive &mdash; warn but allow</option>
                 </Select>
+                <HelpText>
+                  <strong>Strict</strong> rejects any request that fails identity or trust checks
+                  &mdash; use for production. <strong>Permissive</strong> logs warnings but allows
+                  requests through &mdash; useful during development and testing.
+                </HelpText>
               </div>
 
               <div className="space-y-2">
                 <Label htmlFor="security.rate_limit_rpm">
-                  Rate Limit (RPM)
+                  Rate Limit
+                  <span className="text-muted-foreground font-normal ml-1">(requests/min)</span>
                 </Label>
                 <Input
                   id="security.rate_limit_rpm"
@@ -471,20 +665,28 @@ export function ConfigVisualEditor() {
                   placeholder="60"
                   {...register("security.rate_limit_rpm")}
                 />
+                <HelpText>
+                  Maximum requests per minute per caller. Protects against abuse and runaway
+                  automation. The default of 60 allows ~1 request/second. Set higher for
+                  batch-processing agents.
+                </HelpText>
               </div>
 
               <div className="space-y-2">
                 <Label htmlFor="security.cors_origins">
-                  Allowed Origins{" "}
-                  <span className="text-muted-foreground font-normal">
-                    (comma-separated)
-                  </span>
+                  Allowed Origins
+                  <span className="text-muted-foreground font-normal ml-1">(CORS)</span>
                 </Label>
                 <Input
                   id="security.cors_origins"
-                  placeholder="http://localhost:3000, https://app.example.com"
+                  placeholder="https://app.example.com, https://admin.example.com"
                   {...register("security.cors_origins")}
                 />
+                <HelpText>
+                  Comma-separated list of domains that can make browser requests to this agent.
+                  Use <code className="text-xs">*</code> for development. In production, list only
+                  your actual frontend domains.
+                </HelpText>
               </div>
             </div>
           </AccordionContent>
@@ -492,22 +694,36 @@ export function ConfigVisualEditor() {
 
         {/* Agents Section */}
         <AccordionItem>
-          <AccordionTrigger>Agents</AccordionTrigger>
+          <AccordionTrigger>
+            <span className="flex items-center gap-2">
+              <Users className="h-4 w-4 text-primary" />
+              Agents
+            </span>
+          </AccordionTrigger>
           <AccordionContent>
+            <SectionDescription>
+              Define named agent personas with different system prompts, model overrides, and
+              tool access. Each persona behaves like a specialized expert. Callers select a
+              persona by name when making requests.
+            </SectionDescription>
             <div className="grid gap-4 sm:grid-cols-2">
               <div className="space-y-2">
                 <Label htmlFor="agents.default_agent_name">
-                  Default Agent Name
+                  Default Agent
                 </Label>
                 <Input
                   id="agents.default_agent_name"
-                  placeholder="default"
+                  placeholder="assistant"
                   {...register("agents.default_agent_name")}
                 />
+                <HelpText>
+                  The agent persona used when no specific agent is requested. This should match one
+                  of the names defined in your agents list in the YAML config.
+                </HelpText>
               </div>
 
               <div className="flex items-end">
-                <div className="space-y-1">
+                <div className="space-y-2">
                   <Badge variant="secondary">
                     {peersCount} peer{peersCount !== 1 ? "s" : ""} configured
                   </Badge>
@@ -516,9 +732,10 @@ export function ConfigVisualEditor() {
                       to="/peers"
                       className="inline-flex items-center gap-1 text-primary underline-offset-4 hover:underline"
                     >
-                      Manage peers
+                      Manage peer agents
                       <ExternalLink className="h-3 w-3" />
                     </Link>
+                    {" "}&mdash; connect to other Forge agents for cross-agent collaboration.
                   </p>
                 </div>
               </div>
