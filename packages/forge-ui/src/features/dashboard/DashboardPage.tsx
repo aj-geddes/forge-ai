@@ -17,6 +17,10 @@ import {
   Layers,
   Cpu,
   Clock,
+  Info,
+  Activity,
+  Zap,
+  Monitor,
 } from "lucide-react";
 import {
   Card,
@@ -65,6 +69,19 @@ function StatCardSkeleton() {
         </div>
       </CardContent>
     </Card>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Contextual help helper
+// ---------------------------------------------------------------------------
+
+function HelpText({ children }: { children: React.ReactNode }) {
+  return (
+    <p className="flex items-start gap-1.5 text-xs text-muted-foreground mt-1 leading-relaxed">
+      <Info className="h-3 w-3 mt-0.5 shrink-0 opacity-60" />
+      <span>{children}</span>
+    </p>
   );
 }
 
@@ -317,7 +334,10 @@ function SystemInfoCard() {
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-base">System Information</CardTitle>
+        <CardTitle className="flex items-center gap-2 text-base">
+          <Server className="h-4 w-4" />
+          System Information
+        </CardTitle>
         <CardDescription>
           Configuration metadata for your Forge instance
         </CardDescription>
@@ -333,6 +353,11 @@ function SystemInfoCard() {
                 </div>
                 <span className="text-sm font-medium">{row.value}</span>
               </div>
+              {row.label === "LiteLLM Mode" && (
+                <HelpText>
+                  LiteLLM routes requests to LLM providers. Modes: "embedded" runs in-process, "sidecar" runs alongside, "external" connects to a shared proxy.
+                </HelpText>
+              )}
               {i < infoRows.length - 1 && <Separator />}
             </div>
           ))}
@@ -465,9 +490,15 @@ export function DashboardPage() {
       {/* Page Header */}
       <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight">Dashboard</h1>
+          <h1 className="flex items-center gap-2 text-2xl font-bold tracking-tight">
+            <Monitor className="h-6 w-6" />
+            Dashboard
+          </h1>
           <p className="text-sm text-muted-foreground">
             Overview of your Forge AI agent instance
+          </p>
+          <p className="text-xs text-muted-foreground mt-1">
+            Your command center for monitoring agent health, active sessions, and system activity at a glance.
           </p>
         </div>
         <div className="flex items-center gap-3">
@@ -489,54 +520,87 @@ export function DashboardPage() {
       </div>
 
       {/* Stats Grid */}
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <StatCard
-          title="Health Status"
-          value={isHealthy ? "Healthy" : health ? "Degraded" : "--"}
-          description={
-            health?.uptime
-              ? `Uptime: ${formatUptime(health.uptime)}`
-              : health?.version
-                ? `Version ${health.version}`
-                : "Forge gateway status"
-          }
-          icon={Heart}
-          loading={healthLoading}
-          error={healthError}
-          status={healthStatus}
-        />
-        <StatCard
-          title="Tools"
-          value={tools?.length ?? "--"}
-          description="Registered tool definitions"
-          icon={Wrench}
-          loading={toolsLoading}
-          error={toolsError}
-        />
-        <StatCard
-          title="Active Sessions"
-          value={sessions?.length ?? "--"}
-          description="Current agent sessions"
-          icon={MessageSquare}
-          loading={sessionsLoading}
-          error={sessionsError}
-        />
-        <StatCard
-          title="Connected Peers"
-          value={peers?.length ?? "--"}
-          description="A2A peer agents"
-          icon={Network}
-          loading={peersLoading}
-          error={peersError}
-        />
+      <div>
+        <h2 className="mb-1 flex items-center gap-2 text-sm font-semibold text-muted-foreground uppercase tracking-wider">
+          <Activity className="h-4 w-4" />
+          System Status
+        </h2>
+        <HelpText>
+          Live metrics from your Forge instance. Cards update automatically every 30 seconds.
+        </HelpText>
+        <div className="mt-3 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          <div>
+            <StatCard
+              title="Health Status"
+              value={isHealthy ? "Healthy" : health ? "Degraded" : "--"}
+              description={
+                health?.uptime
+                  ? `Uptime: ${formatUptime(health.uptime)}`
+                  : health?.version
+                    ? `Version ${health.version}`
+                    : "Forge gateway status"
+              }
+              icon={Heart}
+              loading={healthLoading}
+              error={healthError}
+              status={healthStatus}
+            />
+            <HelpText>
+              "Healthy" means all subsystems are responding normally. "Degraded" indicates one or more components need attention.
+            </HelpText>
+          </div>
+          <div>
+            <StatCard
+              title="Tools"
+              value={tools?.length ?? "--"}
+              description="Registered tool definitions"
+              icon={Wrench}
+              loading={toolsLoading}
+              error={toolsError}
+            />
+            <HelpText>
+              The number of tool definitions available to your agent, including OpenAPI-imported and manually configured tools.
+            </HelpText>
+          </div>
+          <div>
+            <StatCard
+              title="Active Sessions"
+              value={sessions?.length ?? "--"}
+              description="Current agent sessions"
+              icon={MessageSquare}
+              loading={sessionsLoading}
+              error={sessionsError}
+            />
+            <HelpText>
+              Ongoing conversations between users or other agents and your Forge instance.
+            </HelpText>
+          </div>
+          <div>
+            <StatCard
+              title="Connected Peers"
+              value={peers?.length ?? "--"}
+              description="A2A peer agents"
+              icon={Network}
+              loading={peersLoading}
+              error={peersError}
+            />
+            <HelpText>
+              Other AI agents discovered or registered via the Agent-to-Agent (A2A) protocol.
+            </HelpText>
+          </div>
+        </div>
       </div>
 
       {/* Quick Actions */}
       <div>
-        <h2 className="mb-3 text-sm font-semibold text-muted-foreground uppercase tracking-wider">
+        <h2 className="mb-1 flex items-center gap-2 text-sm font-semibold text-muted-foreground uppercase tracking-wider">
+          <Zap className="h-4 w-4" />
           Quick Actions
         </h2>
-        <div className="grid gap-3 sm:grid-cols-3">
+        <HelpText>
+          Common tasks to get started. Jump straight to configuration, tool management, or start a conversation with your agent.
+        </HelpText>
+        <div className="mt-3 grid gap-3 sm:grid-cols-3">
           <QuickAction
             to="/config"
             icon={Settings}
@@ -566,10 +630,16 @@ export function DashboardPage() {
         {/* Health Checks Detail */}
         <Card>
           <CardHeader>
-            <CardTitle className="text-base">Health Checks</CardTitle>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <Heart className="h-4 w-4" />
+              Health Checks
+            </CardTitle>
             <CardDescription>
               Probe endpoints and subsystem status
             </CardDescription>
+            <HelpText>
+              Kubernetes-style health probes used by orchestrators to decide whether to route traffic, restart containers, or wait during startup.
+            </HelpText>
           </CardHeader>
           <CardContent className="space-y-4">
             {/* Kubernetes-style probes */}
@@ -577,7 +647,10 @@ export function DashboardPage() {
               <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
                 Probes
               </p>
-              <div className="space-y-2">
+              <HelpText>
+                Liveness checks if the process is alive, Readiness checks if it can serve requests, and Startup confirms initial boot is complete. A green status means the probe passed.
+              </HelpText>
+              <div className="mt-2 space-y-2">
                 <HealthCheckRow label="Liveness" endpoint="/health/live" />
                 <HealthCheckRow label="Readiness" endpoint="/health/ready" />
                 <HealthCheckRow label="Startup" endpoint="/health/startup" />
@@ -591,7 +664,12 @@ export function DashboardPage() {
               <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
                 Subsystems
               </p>
-              <SubsystemChecks />
+              <HelpText>
+                Individual component checks reported by the readiness probe. Each subsystem (e.g., database, LLM provider) is tested independently.
+              </HelpText>
+              <div className="mt-2">
+                <SubsystemChecks />
+              </div>
             </div>
           </CardContent>
         </Card>

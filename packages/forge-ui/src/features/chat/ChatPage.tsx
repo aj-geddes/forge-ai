@@ -9,6 +9,10 @@ import {
   ChevronDown,
   Wrench,
   Trash2,
+  Info,
+  Sparkles,
+  Brain,
+  Zap,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -58,6 +62,15 @@ function ToolCallDetails({ tools }: { tools: string[] }) {
         </div>
       )}
     </div>
+  );
+}
+
+function HelpText({ children }: { children: React.ReactNode }) {
+  return (
+    <p className="flex items-start gap-1.5 text-xs text-muted-foreground mt-1 leading-relaxed">
+      <Info className="h-3 w-3 mt-0.5 shrink-0 opacity-60" />
+      <span>{children}</span>
+    </p>
   );
 }
 
@@ -174,9 +187,16 @@ function SessionSidebar() {
             );
           })}
           {sessions.length === 0 && !serverSessions?.length && (
-            <p className="px-3 py-6 text-center text-xs text-muted-foreground">
-              No sessions yet. Click &quot;New Session&quot; to start.
-            </p>
+            <div className="px-3 py-6 text-center">
+              <Sparkles className="mx-auto h-8 w-8 text-muted-foreground/40" />
+              <p className="mt-2 text-xs font-medium text-muted-foreground">
+                No sessions yet
+              </p>
+              <p className="mt-1 text-xs text-muted-foreground/80">
+                Each session is an independent conversation with the agent.
+                Click &quot;New Session&quot; above to get started.
+              </p>
+            </div>
           )}
         </div>
       </ScrollArea>
@@ -263,14 +283,36 @@ function ChatArea() {
   if (!activeSession) {
     return (
       <div className="flex flex-1 items-center justify-center">
-        <div className="text-center">
+        <div className="max-w-md text-center">
           <MessageSquare className="mx-auto h-12 w-12 text-muted-foreground/50" />
           <h3 className="mt-4 text-lg font-medium text-muted-foreground">
             No session selected
           </h3>
-          <p className="mt-1 text-sm text-muted-foreground">
+          <p className="mt-2 text-sm text-muted-foreground">
             Create a new session or select an existing one to start chatting.
           </p>
+          <div className="mt-6 space-y-3 rounded-lg border bg-muted/30 p-4 text-left">
+            <div className="flex items-start gap-2.5">
+              <Brain className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
+              <div>
+                <p className="text-sm font-medium">Sessions have memory</p>
+                <p className="text-xs text-muted-foreground">
+                  Each session is a conversation where the agent remembers context across all
+                  your messages, so you can build on previous questions.
+                </p>
+              </div>
+            </div>
+            <div className="flex items-start gap-2.5">
+              <Zap className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
+              <div>
+                <p className="text-sm font-medium">Get started</p>
+                <p className="text-xs text-muted-foreground">
+                  Click &quot;New Session&quot; in the sidebar to create a conversation, then
+                  type your first message. The agent will respond using its configured tools.
+                </p>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
     );
@@ -297,9 +339,17 @@ function ChatArea() {
         <div className="mx-auto max-w-3xl space-y-4">
           {activeSession.messages.length === 0 && (
             <div className="flex min-h-[200px] items-center justify-center">
-              <p className="text-sm text-muted-foreground">
-                Send a message to start the conversation.
-              </p>
+              <div className="max-w-sm text-center">
+                <Sparkles className="mx-auto h-8 w-8 text-muted-foreground/40" />
+                <p className="mt-3 text-sm font-medium text-muted-foreground">
+                  Ready to chat
+                </p>
+                <p className="mt-1 text-xs text-muted-foreground/80">
+                  Send a message to start the conversation. The agent can use its configured
+                  tools to search, analyze, generate content, and more. Responses will show
+                  which tools were used.
+                </p>
+              </div>
             </div>
           )}
           {activeSession.messages.map((msg) => (
@@ -322,28 +372,34 @@ function ChatArea() {
 
       {/* Input */}
       <div className="border-t p-4">
-        <div className="mx-auto flex max-w-3xl gap-2">
-          <Textarea
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={handleKeyDown}
-            placeholder="Type a message... (Enter to send, Shift+Enter for new line)"
-            className="min-h-[44px] max-h-[120px] resize-none"
-            disabled={isLoading}
-            rows={1}
-          />
-          <Button
-            onClick={() => void handleSend()}
-            disabled={!input.trim() || isLoading}
-            size="icon"
-            className="h-[44px] w-[44px] shrink-0"
-          >
-            {isLoading ? (
-              <Loader2 className="h-4 w-4 animate-spin" />
-            ) : (
-              <Send className="h-4 w-4" />
-            )}
-          </Button>
+        <div className="mx-auto max-w-3xl">
+          <div className="flex gap-2">
+            <Textarea
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={handleKeyDown}
+              placeholder="Ask the agent anything — it has access to your configured tools and remembers this session's context..."
+              className="min-h-[44px] max-h-[120px] resize-none"
+              disabled={isLoading}
+              rows={1}
+            />
+            <Button
+              onClick={() => void handleSend()}
+              disabled={!input.trim() || isLoading}
+              size="icon"
+              className="h-[44px] w-[44px] shrink-0"
+            >
+              {isLoading ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <Send className="h-4 w-4" />
+              )}
+            </Button>
+          </div>
+          <HelpText>
+            Press Enter to send, Shift+Enter for a new line. Tool calls made by the agent
+            will be shown as expandable details in responses.
+          </HelpText>
         </div>
       </div>
     </div>

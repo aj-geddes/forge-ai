@@ -8,6 +8,7 @@ import {
   GitBranch,
   Loader2,
   Package,
+  Info,
 } from "lucide-react";
 import {
   Card,
@@ -86,6 +87,15 @@ function SourceBadge({ source }: { source: string | undefined }) {
   );
 }
 
+function HelpText({ children }: { children: React.ReactNode }) {
+  return (
+    <p className="flex items-start gap-1.5 text-xs text-muted-foreground mt-1 leading-relaxed">
+      <Info className="h-3 w-3 mt-0.5 shrink-0 opacity-60" />
+      <span>{children}</span>
+    </p>
+  );
+}
+
 interface AddToolDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -98,19 +108,22 @@ function AddToolDialog({ open, onOpenChange, onSelect }: AddToolDialogProps) {
       type: "openapi" as const,
       icon: Globe,
       title: "OpenAPI Source",
-      description: "Import tools from an OpenAPI specification URL.",
+      description:
+        "Import tools from an OpenAPI specification URL. Best for REST APIs that already publish a spec -- the wizard auto-discovers every endpoint and lets you pick which ones to expose.",
     },
     {
       type: "manual" as const,
       icon: FileText,
       title: "Manual Tool",
-      description: "Define a custom tool with endpoint, parameters, and response mapping.",
+      description:
+        "Define a custom tool by hand with its endpoint, parameters, and response mapping. Use this when you need to integrate an API that does not have an OpenAPI spec.",
     },
     {
       type: "workflow" as const,
       icon: GitBranch,
       title: "Workflow",
-      description: "Compose a multi-step workflow by chaining tools together.",
+      description:
+        "Compose a multi-step workflow by chaining existing tools together. Ideal for pipelines where one tool's output feeds into the next (e.g., search then summarize).",
     },
   ];
 
@@ -120,7 +133,7 @@ function AddToolDialog({ open, onOpenChange, onSelect }: AddToolDialogProps) {
         <DialogHeader>
           <DialogTitle>Add Tool</DialogTitle>
           <DialogDescription>
-            Choose how you want to add a new tool.
+            Choose how you want to add a new tool. Each approach suits different integration scenarios.
           </DialogDescription>
         </DialogHeader>
         <div className="grid gap-3 mt-2">
@@ -194,7 +207,12 @@ export function ToolsPage() {
               <div>
                 <CardTitle>Tool Workshop</CardTitle>
                 <CardDescription>
-                  Create, test, and manage agent tools
+                  Create, test, and manage agent tools. Tools give your agent the ability to
+                  interact with external systems -- import from an{" "}
+                  <span className="font-medium text-foreground/80">OpenAPI</span> spec, define a{" "}
+                  <span className="font-medium text-foreground/80">Manual</span> endpoint, or
+                  chain tools into a{" "}
+                  <span className="font-medium text-foreground/80">Workflow</span>.
                 </CardDescription>
               </div>
             </div>
@@ -209,7 +227,7 @@ export function ToolsPage() {
           <div className="relative mb-4">
             <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
             <Input
-              placeholder="Search tools by name, description, or source..."
+              placeholder="Filter tools by name, description, or type (openapi, manual, workflow)..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               className="pl-9"
@@ -247,22 +265,29 @@ export function ToolsPage() {
                   <>
                     <Search className="mx-auto h-8 w-8 text-muted-foreground mb-2" />
                     <p className="text-sm font-medium text-muted-foreground">
-                      No tools match "{searchQuery}"
+                      No tools match &ldquo;{searchQuery}&rdquo;
                     </p>
                     <p className="mt-1 text-xs text-muted-foreground">
-                      Try adjusting your search query.
+                      Try a different name, description keyword, or tool type
+                      (openapi, manual, workflow).
                     </p>
                   </>
                 ) : (
                   <>
                     <Wrench className="mx-auto h-8 w-8 text-muted-foreground mb-2" />
                     <p className="text-sm font-medium text-muted-foreground">
-                      No tools registered
+                      No tools registered yet
                     </p>
-                    <p className="mt-1 text-xs text-muted-foreground">
-                      Get started by adding an OpenAPI source, creating a manual tool,
-                      or building a workflow.
+                    <p className="mt-1 text-xs text-muted-foreground max-w-md mx-auto">
+                      Tools let your agent call external APIs, query databases, search
+                      the web, and more. Without tools, the agent can only respond from
+                      its built-in training knowledge.
                     </p>
+                    <HelpText>
+                      Start with an <strong>OpenAPI Source</strong> if you have a spec URL,
+                      a <strong>Manual Tool</strong> for any HTTP endpoint, or
+                      a <strong>Workflow</strong> to chain multiple tools into a pipeline.
+                    </HelpText>
                     <Button
                       variant="outline"
                       size="sm"
