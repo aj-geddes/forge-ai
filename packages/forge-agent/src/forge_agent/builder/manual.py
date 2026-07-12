@@ -11,7 +11,7 @@ import re
 from typing import Any
 
 import httpx
-from forge_config.schema import ManualTool, ManualToolAPI, ParamType
+from forge_config.schema import HTTPMethod, ManualTool, ManualToolAPI, ParamType
 from forge_config.secret_resolver import SecretResolver
 from pydantic_ai.tools import Tool
 
@@ -120,6 +120,28 @@ def _resolve_template_string(template: str, params: dict[str, Any]) -> str:
     return re.sub(r"\{\{(\s*\w+\s*)\}\}", replacer, template)
 
 
+def _collect_template_param_names(template: Any) -> set[str]:
+    """Recursively collect all {{param}} placeholder names referenced in a template.
+
+    Args:
+        template: A dict, list, string, or primitive that may contain
+            {{param}} placeholders.
+
+    Returns:
+        The set of parameter names referenced anywhere in the template.
+    """
+    names: set[str] = set()
+    if isinstance(template, str):
+        names.update(m.group(1).strip() for m in re.finditer(r"\{\{(\s*\w+\s*)\}\}", template))
+    elif isinstance(template, dict):
+        for value in template.values():
+            names.update(_collect_template_param_names(value))
+    elif isinstance(template, list):
+        for item in template:
+            names.update(_collect_template_param_names(item))
+    return names
+
+
 def _resolve_template(template: Any, params: dict[str, Any]) -> Any:
     """Recursively resolve {{param}} placeholders in a template structure.
 
@@ -139,6 +161,11 @@ def _resolve_template(template: Any, params: dict[str, Any]) -> Any:
     return template
 
 
+# HTTP methods for which unconsumed declared parameters are forwarded as
+# a query string rather than merged into the request body.
+_QUERY_METHODS = frozenset({HTTPMethod.GET.value, HTTPMethod.DELETE.value})
+
+
 async def _execute_api_call(
     api_config: ManualToolAPI,
     params: dict[str, Any],
@@ -146,6 +173,12 @@ async def _execute_api_call(
     http_client: httpx.AsyncClient | None = None,
 ) -> Any:
     """Execute an HTTP API call based on ManualToolAPI configuration.
+
+    Any declared parameter that is not consumed by a {{placeholder}} in the
+    URL, headers, or body_template is forwarded on the outgoing request:
+    as a query string parameter for GET/DELETE, or merged into the JSON
+    body for methods that carry a body (POST/PUT/PATCH) when no explicit
+    body_template already claims it.
 
     Args:
         api_config: The API call configuration.
@@ -157,17 +190,33 @@ async def _execute_api_call(
         The parsed JSON response or raw text.
     """
     url = _resolve_template_string(api_config.resolved_url, params)
+    consumed = _collect_template_param_names(api_config.resolved_url)
 
     # Start with pre-resolved auth headers, then layer on config headers.
     headers = dict(auth_headers)
     for k, v in api_config.headers.items():
         headers[k] = _resolve_template_string(v, params)
+        consumed |= _collect_template_param_names(v)
 
     body = None
     if api_config.body_template is not None:
         body = _resolve_template(api_config.body_template, params)
+        consumed |= _collect_template_param_names(api_config.body_template)
 
     method = api_config.method.value
+
+    # Forward any declared parameters not already consumed by a template.
+    remaining = {k: v for k, v in params.items() if k not in consumed}
+    query: dict[str, Any] | None = None
+    if remaining:
+        if method in _QUERY_METHODS:
+            query = remaining
+        elif body is None:
+            # No explicit body_template: build the body from the
+            # remaining declared parameters.
+            body = remaining
+        # else: body_template already explicitly defines the body shape;
+        # leave any additional declared params unforwarded.
 
     client = http_client or httpx.AsyncClient()
     should_close = http_client is None
@@ -177,6 +226,7 @@ async def _execute_api_call(
             method=method,
             url=url,
             headers=headers,
+            params=query,
             json=body,
             timeout=api_config.timeout,
         )
@@ -194,8 +244,32 @@ async def _execute_api_call(
             await client.aclose()
 
 
+def _resolve_dot_path(obj: Any, path: str) -> Any:
+    """Resolve a dot-notation path within a (possibly nested) structure.
+
+    Args:
+        obj: The object to traverse.
+        path: A dot-separated path, e.g. "condition.text".
+
+    Returns:
+        The resolved value, or None if any segment of the path is missing.
+    """
+    current = obj
+    for part in path.split("."):
+        if isinstance(current, dict) and part in current:
+            current = current[part]
+        else:
+            return None
+    return current
+
+
 def _apply_response_mapping(result: Any, api_config: ManualToolAPI) -> Any:
-    """Apply response mapping to extract relevant data.
+    """Apply response mapping to extract and reshape relevant data.
+
+    First applies ``result_path`` (a "$"-rooted dot-notation JSONPath) to
+    extract a sub-object from the raw response. Then, if ``field_map`` is
+    set, builds a new dict whose keys are the field_map's output names and
+    whose values are resolved via dot-notation from the extracted result.
 
     Args:
         result: The raw API response.
@@ -205,15 +279,29 @@ def _apply_response_mapping(result: Any, api_config: ManualToolAPI) -> Any:
         The mapped result.
     """
     mapping = api_config.response_mapping
-    if mapping.result_path == "$" or not isinstance(result, dict):
-        return result
-
-    # Simple dot-notation path resolution.
-    parts = mapping.result_path.lstrip("$.").split(".")
     current = result
-    for part in parts:
-        if isinstance(current, dict) and part in current:
-            current = current[part]
-        else:
-            return result
+
+    if mapping.result_path != "$" and isinstance(result, dict):
+        path = mapping.result_path
+        if path.startswith("$."):
+            path = path[2:]
+        elif path.startswith("$"):
+            path = path[1:]
+
+        resolved = result
+        for part in path.split("."):
+            if isinstance(resolved, dict) and part in resolved:
+                resolved = resolved[part]
+            else:
+                # Path segment not found: fall back to the raw response.
+                resolved = result
+                break
+        current = resolved
+
+    if mapping.field_map and isinstance(current, dict):
+        return {
+            output_key: _resolve_dot_path(current, source_path)
+            for output_key, source_path in mapping.field_map.items()
+        }
+
     return current

@@ -273,9 +273,15 @@ class OpenAPIToolBuilder:
         http_client = self._http_client
 
         for op in operations:
-            # Determine the tool name.
+            # Determine the tool name. route_map is documented and canonically
+            # keyed by operationId (e.g. "findPetsByStatus: find_pets"); the
+            # legacy "METHOD /path" key form is also honored for backward
+            # compatibility, with operationId taking precedence when both
+            # could match.
             route_key = f"{op['method']} {op['path']}"
-            if route_map and route_key in route_map:
+            if route_map and op["operation_id"] in route_map:
+                tool_name = route_map[op["operation_id"]]
+            elif route_map and route_key in route_map:
                 tool_name = route_map[route_key]
             else:
                 tool_name = op["operation_id"]

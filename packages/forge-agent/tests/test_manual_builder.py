@@ -170,6 +170,140 @@ class TestManualToolBuilder:
         result = await tool.function()
         assert result == [{"id": 1}, {"id": 2}]
 
+    @pytest.mark.anyio
+    async def test_tool_function_forwards_params_as_query_string_for_get(self) -> None:
+        """Params not consumed by the URL template must be sent as GET query params.
+
+        Mirrors the canonical get_weather manual tool in forge.yaml.example:
+        a static endpoint (no {{placeholders}}) with two declared parameters
+        that must be forwarded as HTTP query parameters.
+        """
+        config = _make_manual_tool(
+            url="https://api.weatherapi.com/v1/current.json",
+            method=HTTPMethod.GET,
+            parameters=[
+                ParameterDef(name="location", type=ParamType.STRING, required=True),
+                ParameterDef(
+                    name="units",
+                    type=ParamType.STRING,
+                    required=False,
+                    default="metric",
+                ),
+            ],
+        )
+
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"current": {"temp_c": 18.5}}
+        mock_response.raise_for_status.return_value = None
+
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.request = AsyncMock(return_value=mock_response)
+
+        builder = ManualToolBuilder(config, http_client=mock_client)
+        tool = builder.build()
+
+        await tool.function(location="Paris", units="metric")
+
+        mock_client.request.assert_called_once()
+        call_kwargs = mock_client.request.call_args
+        assert call_kwargs.kwargs["url"] == "https://api.weatherapi.com/v1/current.json"
+        assert call_kwargs.kwargs["params"] == {"location": "Paris", "units": "metric"}
+
+    @pytest.mark.anyio
+    async def test_tool_function_does_not_duplicate_path_params_as_query(self) -> None:
+        """A param consumed by the URL template should not also be sent as a query param."""
+        config = _make_manual_tool(
+            url="https://api.example.com/data/{{item_id}}",
+            method=HTTPMethod.GET,
+            parameters=[ParameterDef(name="item_id", type=ParamType.STRING)],
+        )
+
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"id": "123"}
+        mock_response.raise_for_status.return_value = None
+
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.request = AsyncMock(return_value=mock_response)
+
+        builder = ManualToolBuilder(config, http_client=mock_client)
+        tool = builder.build()
+
+        await tool.function(item_id="123")
+
+        call_kwargs = mock_client.request.call_args
+        assert call_kwargs.kwargs["url"] == "https://api.example.com/data/123"
+        assert not call_kwargs.kwargs["params"]
+
+    @pytest.mark.anyio
+    async def test_tool_function_forwards_extra_params_as_body_for_post(self) -> None:
+        """Params not covered by an explicit body_template on a body method go in the body."""
+        config = _make_manual_tool(
+            url="https://api.example.com/items",
+            method=HTTPMethod.POST,
+            parameters=[
+                ParameterDef(name="name", type=ParamType.STRING),
+                ParameterDef(name="value", type=ParamType.NUMBER),
+            ],
+        )
+
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"created": True}
+        mock_response.raise_for_status.return_value = None
+
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.request = AsyncMock(return_value=mock_response)
+
+        builder = ManualToolBuilder(config, http_client=mock_client)
+        tool = builder.build()
+
+        await tool.function(name="Widget", value=42.5)
+
+        call_kwargs = mock_client.request.call_args
+        assert call_kwargs.kwargs["json"] == {"name": "Widget", "value": 42.5}
+        assert not call_kwargs.kwargs["params"]
+
+    @pytest.mark.anyio
+    async def test_tool_function_applies_field_map(self) -> None:
+        """field_map should rename/extract fields from the (result_path-extracted) response.
+
+        Mirrors the canonical get_weather manual tool response_mapping in
+        forge.yaml.example: result_path extracts a sub-object, then field_map
+        renames dot-path fields within it into the final output keys.
+        """
+        config = _make_manual_tool(
+            response_mapping=ResponseMapping(
+                result_path="$.current",
+                field_map={
+                    "temperature": "temp_c",
+                    "condition": "condition.text",
+                    "humidity": "humidity",
+                },
+            ),
+        )
+
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "current": {
+                "temp_c": 18.5,
+                "condition": {"text": "Partly cloudy"},
+                "humidity": 71,
+            }
+        }
+        mock_response.raise_for_status.return_value = None
+
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.request = AsyncMock(return_value=mock_response)
+
+        builder = ManualToolBuilder(config, http_client=mock_client)
+        tool = builder.build()
+
+        result = await tool.function()
+        assert result == {
+            "temperature": 18.5,
+            "condition": "Partly cloudy",
+            "humidity": 71,
+        }
+
     def test_all_param_types_mapped(self) -> None:
         config = _make_manual_tool(
             parameters=[

@@ -447,6 +447,66 @@ class TestOpenAPIToolBuilderRouteMap:
         assert "api_all_pets" in names
         assert "api_getPet" in names
 
+    @pytest.mark.anyio
+    async def test_route_map_keyed_by_operation_id_renames_tools(self) -> None:
+        """route_map keyed by operationId (the documented contract) should rename tools.
+
+        Mirrors forge.yaml.example's petstore source:
+            route_map:
+              findPetsByStatus: find_pets
+              getPetById: get_pet
+        """
+        spec = _make_petstore_spec()
+        source = _make_source(
+            route_map={
+                "listPets": "find_pets",
+                "getPet": "get_pet",
+            },
+        )
+        builder = OpenAPIToolBuilder(source)
+
+        with patch.object(
+            builder,
+            "_fetch_remote_spec",
+            new_callable=AsyncMock,
+            return_value=spec,
+        ):
+            tools = await builder.build()
+
+        names = {t.name for t in tools}
+        assert "find_pets" in names
+        assert "get_pet" in names
+        # Original operationIds should not appear for renamed operations.
+        assert "listPets" not in names
+        assert "getPet" not in names
+        # Operations not in route_map keep their operationId.
+        assert "createPet" in names
+        assert "deletePet" in names
+
+    @pytest.mark.anyio
+    async def test_route_map_operation_id_takes_precedence_over_method_path(self) -> None:
+        """If both an operationId key and a 'METHOD /path' key could match, operationId wins."""
+        spec = _make_petstore_spec()
+        source = _make_source(
+            route_map={
+                "listPets": "by_operation_id",
+                "GET /pets": "by_method_path",
+            },
+        )
+        builder = OpenAPIToolBuilder(source)
+
+        with patch.object(
+            builder,
+            "_fetch_remote_spec",
+            new_callable=AsyncMock,
+            return_value=spec,
+        ):
+            tools = await builder.build()
+
+        names = {t.name for t in tools}
+        assert "by_operation_id" in names
+        assert "by_method_path" not in names
+
 
 # ---------------------------------------------------------------------------
 # Test: generated tool signatures
