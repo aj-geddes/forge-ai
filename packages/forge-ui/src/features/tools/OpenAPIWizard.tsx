@@ -27,6 +27,15 @@ import type { AuthType } from "@/types/config";
 
 const STEP_LABELS = ["Source", "Select", "Configure", "Preview & Add"] as const;
 
+/**
+ * Wrap a user-entered environment variable name as the SecretRef shape the
+ * backend's AuthConfig expects (forge_config/schema.py). The UI never sends
+ * a literal secret value -- only the name of the env var to resolve it from.
+ */
+function toEnvSecretRef(envVarName: string): { source: "env"; name: string } {
+  return { source: "env", name: envVarName };
+}
+
 function StepIndicator({ currentStep }: { currentStep: number }) {
   return (
     <div className="flex items-center gap-2 mb-6">
@@ -318,14 +327,18 @@ function AuthFields({
 
       {auth.type === "bearer" && (
         <div className="space-y-2">
-          <Label htmlFor="auth-token">Bearer Token</Label>
+          <Label htmlFor="auth-token">Token Environment Variable</Label>
           <Input
             id="auth-token"
-            type="password"
-            placeholder="Enter token..."
+            placeholder="e.g. MY_API_TOKEN"
             value={auth.token}
             onChange={(e) => onAuthChange({ token: e.target.value })}
           />
+          <p className="text-xs text-muted-foreground">
+            The name of an environment variable that holds the bearer token. Forge
+            resolves the actual secret value from this variable at runtime -- it is
+            never stored in the config itself.
+          </p>
         </div>
       )}
 
@@ -341,14 +354,16 @@ function AuthFields({
             />
           </div>
           <div className="space-y-2">
-            <Label htmlFor="auth-key">API Key</Label>
+            <Label htmlFor="auth-key">API Key Environment Variable</Label>
             <Input
               id="auth-key"
-              type="password"
-              placeholder="Enter API key..."
+              placeholder="e.g. MY_API_KEY"
               value={auth.token}
               onChange={(e) => onAuthChange({ token: e.target.value })}
             />
+            <p className="text-xs text-muted-foreground">
+              The name of an environment variable that holds the API key value.
+            </p>
           </div>
         </>
       )}
@@ -356,24 +371,27 @@ function AuthFields({
       {auth.type === "basic" && (
         <>
           <div className="space-y-2">
-            <Label htmlFor="auth-username">Username</Label>
+            <Label htmlFor="auth-username">Username Environment Variable</Label>
             <Input
               id="auth-username"
-              placeholder="Username"
+              placeholder="e.g. API_USERNAME"
               value={auth.username}
               onChange={(e) => onAuthChange({ username: e.target.value })}
             />
           </div>
           <div className="space-y-2">
-            <Label htmlFor="auth-password">Password</Label>
+            <Label htmlFor="auth-password">Password Environment Variable</Label>
             <Input
               id="auth-password"
-              type="password"
-              placeholder="Password"
+              placeholder="e.g. API_PASSWORD"
               value={auth.password}
               onChange={(e) => onAuthChange({ password: e.target.value })}
             />
           </div>
+          <p className="text-xs text-muted-foreground">
+            Both username and password are resolved from environment variables at
+            runtime -- Forge never stores literal credential values in the config.
+          </p>
         </>
       )}
     </div>
@@ -490,10 +508,19 @@ export function OpenAPIWizard() {
         ? {
             type: openApiData.auth.type,
             ...(openApiData.auth.type === "bearer" && openApiData.auth.token
-              ? { token: openApiData.auth.token }
+              ? { token: toEnvSecretRef(openApiData.auth.token) }
               : {}),
             ...(openApiData.auth.type === "api_key" && openApiData.auth.token
-              ? { token: openApiData.auth.token, header_name: openApiData.auth.headerName }
+              ? {
+                  token: toEnvSecretRef(openApiData.auth.token),
+                  header_name: openApiData.auth.headerName,
+                }
+              : {}),
+            ...(openApiData.auth.type === "basic"
+              ? {
+                  username: toEnvSecretRef(openApiData.auth.username),
+                  password: toEnvSecretRef(openApiData.auth.password),
+                }
               : {}),
           }
         : undefined;

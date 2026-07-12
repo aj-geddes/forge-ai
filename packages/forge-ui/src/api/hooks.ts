@@ -6,6 +6,8 @@ import type {
   ToolInfo,
   Session,
   PeerAgent,
+  OpenAPISource,
+  PingPeerResponse,
 } from "@/types/config";
 
 // --- Query Keys ---
@@ -87,8 +89,10 @@ export function useUpdateConfig() {
 
 export function useToolPreview() {
   return useMutation({
-    mutationFn: (tool: { name: string; description: string; parameters?: unknown }) =>
-      api.post<{ preview: string }>("/v1/admin/tools/preview", tool),
+    mutationFn: (source: OpenAPISource) =>
+      api.post<{ tools: ToolInfo[]; count: number }>("/v1/admin/tools/preview", {
+        source,
+      }),
   });
 }
 
@@ -131,8 +135,6 @@ export function useDeleteSession() {
 export function usePingPeer() {
   return useMutation({
     mutationFn: (name: string) =>
-      api.post<{ status: string; latency_ms: number }>(
-        `/v1/admin/peers/${name}/ping`,
-      ),
+      api.post<PingPeerResponse>(`/v1/admin/peers/${name}/ping`),
   });
 }

@@ -42,6 +42,15 @@ const STEP_LABELS = [
   "Test",
 ] as const;
 
+/**
+ * Wrap a user-entered environment variable name as the SecretRef shape the
+ * backend's AuthConfig expects (forge_config/schema.py). The UI never sends
+ * a literal secret value -- only the name of the env var to resolve it from.
+ */
+function toEnvSecretRef(envVarName: string): { source: "env"; name: string } {
+  return { source: "env", name: envVarName };
+}
+
 const STEP_ICONS = [
   FileText,
   Link,
@@ -215,14 +224,18 @@ function MethodAuthStep() {
 
         {manualData.auth.type === "bearer" && (
           <div className="space-y-2">
-            <Label htmlFor="m-auth-token">Bearer Token</Label>
+            <Label htmlFor="m-auth-token">Token Environment Variable</Label>
             <Input
               id="m-auth-token"
-              type="password"
-              placeholder="Enter token..."
+              placeholder="e.g. MY_API_TOKEN"
               value={manualData.auth.token}
               onChange={(e) => setManualAuth({ token: e.target.value })}
             />
+            <p className="text-xs text-muted-foreground">
+              The name of an environment variable that holds the bearer token. Forge
+              resolves the actual secret value from this variable at runtime -- it is
+              never stored in the config itself.
+            </p>
           </div>
         )}
 
@@ -240,14 +253,16 @@ function MethodAuthStep() {
               />
             </div>
             <div className="space-y-2">
-              <Label htmlFor="m-auth-key">API Key</Label>
+              <Label htmlFor="m-auth-key">API Key Environment Variable</Label>
               <Input
                 id="m-auth-key"
-                type="password"
-                placeholder="Enter API key..."
+                placeholder="e.g. MY_API_KEY"
                 value={manualData.auth.token}
                 onChange={(e) => setManualAuth({ token: e.target.value })}
               />
+              <p className="text-xs text-muted-foreground">
+                The name of an environment variable that holds the API key value.
+              </p>
             </div>
           </>
         )}
@@ -255,10 +270,10 @@ function MethodAuthStep() {
         {manualData.auth.type === "basic" && (
           <>
             <div className="space-y-2">
-              <Label htmlFor="m-auth-user">Username</Label>
+              <Label htmlFor="m-auth-user">Username Environment Variable</Label>
               <Input
                 id="m-auth-user"
-                placeholder="Username"
+                placeholder="e.g. API_USERNAME"
                 value={manualData.auth.username}
                 onChange={(e) =>
                   setManualAuth({ username: e.target.value })
@@ -266,17 +281,20 @@ function MethodAuthStep() {
               />
             </div>
             <div className="space-y-2">
-              <Label htmlFor="m-auth-pass">Password</Label>
+              <Label htmlFor="m-auth-pass">Password Environment Variable</Label>
               <Input
                 id="m-auth-pass"
-                type="password"
-                placeholder="Password"
+                placeholder="e.g. API_PASSWORD"
                 value={manualData.auth.password}
                 onChange={(e) =>
                   setManualAuth({ password: e.target.value })
                 }
               />
             </div>
+            <p className="text-xs text-muted-foreground">
+              Both username and password are resolved from environment variables at
+              runtime -- Forge never stores literal credential values in the config.
+            </p>
           </>
         )}
       </div>
@@ -575,8 +593,16 @@ export function ManualToolWizard() {
       manualData.auth.type !== "none"
         ? {
             type: manualData.auth.type,
-            ...(manualData.auth.token ? { token: manualData.auth.token } : {}),
+            ...(manualData.auth.token
+              ? { token: toEnvSecretRef(manualData.auth.token) }
+              : {}),
             ...(manualData.auth.headerName ? { header_name: manualData.auth.headerName } : {}),
+            ...(manualData.auth.type === "basic"
+              ? {
+                  username: toEnvSecretRef(manualData.auth.username),
+                  password: toEnvSecretRef(manualData.auth.password),
+                }
+              : {}),
           }
         : undefined;
 

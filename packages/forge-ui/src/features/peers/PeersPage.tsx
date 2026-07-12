@@ -37,7 +37,6 @@ type ConnectionStatus = "reachable" | "unreachable" | "unknown";
 
 interface PeerPingState {
   status: ConnectionStatus;
-  latency?: number;
   loading: boolean;
 }
 
@@ -120,10 +119,10 @@ function PeerCard({
         <div className="space-y-2 pt-1">
           <div className="flex items-center justify-between">
             <div className="text-xs text-muted-foreground">
-              {pingState.status === "reachable" && pingState.latency != null && (
-                <span className="flex items-center gap-1">
+              {pingState.status === "reachable" && (
+                <span className="flex items-center gap-1 text-[oklch(0.5_0.2_145)]">
                   <Activity className="h-3 w-3" />
-                  {pingState.latency}ms
+                  Reachable
                 </span>
               )}
               {pingState.status === "unreachable" && (
@@ -138,7 +137,7 @@ function PeerCard({
               size="sm"
               onClick={onPing}
               disabled={pingState.loading}
-              title="Test connectivity and measure round-trip latency"
+              title="Test connectivity to this peer"
             >
               {pingState.loading ? (
                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -149,7 +148,7 @@ function PeerCard({
             </Button>
           </div>
           <p className="text-[11px] text-muted-foreground/70">
-            Tests connectivity and measures round-trip latency to this peer
+            Tests connectivity to this peer&apos;s /health/live endpoint
           </p>
         </div>
       </CardContent>
@@ -164,25 +163,22 @@ function AddPeerDialog() {
   const [trustLevel, setTrustLevel] = useState<TrustLevel>("medium");
   const [capabilities, setCapabilities] = useState("");
 
+  // NOTE: the gateway's admin API (forge_gateway/routes/admin.py) only exposes
+  // GET /v1/admin/peers and POST /v1/admin/peers/{name}/ping -- there is no
+  // peer-creation endpoint. Peers can only be added by editing the
+  // `agents.peers` list in forge.yaml (or the Config Builder's YAML tab) and
+  // reloading. This dialog is disabled rather than pretending to save until
+  // a POST /v1/admin/peers endpoint exists on the backend.
+  const canSubmit = false;
+
   const handleSubmit = useCallback(() => {
-    // For now, log the peer data. Integration with a mutation will be added
-    // when the backend supports POST /v1/admin/peers.
-    const _peerData = {
-      name,
-      url: endpoint,
-      trust_level: trustLevel,
-      capabilities: capabilities
-        .split(",")
-        .map((c) => c.trim())
-        .filter(Boolean),
-    };
-    void _peerData;
+    if (!canSubmit) return;
     setOpen(false);
     setName("");
     setEndpoint("");
     setTrustLevel("medium");
     setCapabilities("");
-  }, [name, endpoint, trustLevel, capabilities]);
+  }, [canSubmit]);
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
@@ -199,7 +195,13 @@ function AddPeerDialog() {
             multi-agent collaboration and specialization.
           </DialogDescription>
         </DialogHeader>
-        <div className="space-y-4 py-4">
+        <div className="rounded-lg border border-yellow-500/30 bg-yellow-500/5 px-3 py-2 text-xs text-muted-foreground">
+          The gateway does not yet expose an API to create peers. Add a peer by
+          editing <code className="font-mono">agents.peers</code> in the YAML tab of
+          the Config Builder (or directly in forge.yaml) and saving. This form is
+          disabled until a peer-creation endpoint is added to the backend.
+        </div>
+        <div className="space-y-4 py-4 opacity-60">
           <div className="space-y-2">
             <Label htmlFor="peer-name">Name</Label>
             <Input
@@ -207,6 +209,7 @@ function AddPeerDialog() {
               placeholder="my-peer-agent"
               value={name}
               onChange={(e) => setName(e.target.value)}
+              disabled={!canSubmit}
             />
             <HelpText>
               A unique identifier used when routing requests to this peer.
@@ -221,6 +224,7 @@ function AddPeerDialog() {
               placeholder="https://peer.example.com/a2a"
               value={endpoint}
               onChange={(e) => setEndpoint(e.target.value)}
+              disabled={!canSubmit}
             />
             <HelpText>
               The base URL of the peer agent's A2A interface. This is
@@ -234,6 +238,7 @@ function AddPeerDialog() {
               id="peer-trust"
               value={trustLevel}
               onChange={(e) => setTrustLevel(e.target.value as TrustLevel)}
+              disabled={!canSubmit}
             >
               <option value="high">High</option>
               <option value="medium">Medium</option>
@@ -253,6 +258,7 @@ function AddPeerDialog() {
               placeholder="search, summarize, translate"
               value={capabilities}
               onChange={(e) => setCapabilities(e.target.value)}
+              disabled={!canSubmit}
             />
             <HelpText>
               Comma-separated list of skills this peer offers (e.g., "search,
@@ -264,9 +270,9 @@ function AddPeerDialog() {
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={() => setOpen(false)}>
-            Cancel
+            Close
           </Button>
-          <Button onClick={handleSubmit} disabled={!name.trim() || !endpoint.trim()}>
+          <Button onClick={handleSubmit} disabled={!canSubmit} title="Not yet supported by the backend">
             Add Peer
           </Button>
         </DialogFooter>
@@ -294,8 +300,10 @@ export function PeersPage() {
           setPingStates((prev) => ({
             ...prev,
             [peerName]: {
-              status: data.status === "ok" ? "reachable" : "unreachable",
-              latency: data.latency_ms,
+              // The backend's ping response (AdminPeerStatus) returns the literal
+              // "reachable" / "unreachable" -- it never returns "ok", and it does
+              // not report latency.
+              status: data.status,
               loading: false,
             },
           }));

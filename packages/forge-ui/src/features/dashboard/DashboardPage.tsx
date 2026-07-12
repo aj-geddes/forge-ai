@@ -342,10 +342,11 @@ function SystemInfoCard() {
     (config.tools.workflows?.length ?? 0);
 
   const agentCount = config.agents?.agents?.length ?? 0;
-  const peerCount = config.peers?.length ?? 0;
-  const env = config.metadata.environment ?? config.metadata.labels?.["environment"] ?? "development";
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const litellm = config.llm.litellm as Record<string, any> | undefined;
+  // Peers live under agents.peers on the backend (AgentsConfig.peers) --
+  // there is no top-level config.peers field.
+  const peerCount = config.agents?.peers?.length ?? 0;
+  const env = config.metadata.environment ?? "development";
+  const litellm = config.llm.litellm;
 
   return (
     <Card>
@@ -430,7 +431,7 @@ function SystemInfoCard() {
             {litellm?.fallback_models && litellm.fallback_models.length > 0 && (
               <>
                 <Separator />
-                <InfoRow icon={Layers} label="Fallbacks" value={(litellm.fallback_models as string[]).join(", ")} mono />
+                <InfoRow icon={Layers} label="Fallbacks" value={litellm.fallback_models.join(", ")} mono />
               </>
             )}
           </div>
@@ -494,7 +495,10 @@ function SubsystemChecks() {
     return <SubsystemChecksSkeleton />;
   }
 
-  if (!health?.checks || Object.keys(health.checks).length === 0) {
+  // HealthResponse.components (forge_gateway/models.py) is a flat
+  // Record<string, string> of subsystem name -> status string -- there is no
+  // per-check message field, and the field is named `components`, not `checks`.
+  if (!health?.components || Object.keys(health.components).length === 0) {
     return (
       <p className="py-4 text-center text-sm text-muted-foreground">
         No subsystem checks reported
@@ -504,8 +508,8 @@ function SubsystemChecks() {
 
   return (
     <div className="space-y-2">
-      {Object.entries(health.checks).map(([name, check]) => {
-        const isOk = check.status === "ok" || check.status === "healthy";
+      {Object.entries(health.components).map(([name, status]) => {
+        const isOk = status === "ok" || status === "healthy";
         return (
           <div
             key={name}
@@ -517,14 +521,7 @@ function SubsystemChecks() {
               ) : (
                 <XCircle className="h-5 w-5 text-destructive" />
               )}
-              <div>
-                <span className="text-sm font-medium capitalize">{name}</span>
-                {check.message && (
-                  <p className="text-xs text-muted-foreground">
-                    {check.message}
-                  </p>
-                )}
-              </div>
+              <span className="text-sm font-medium">{name}</span>
             </div>
             <Badge
               variant={isOk ? "default" : "destructive"}
@@ -532,27 +529,13 @@ function SubsystemChecks() {
                 isOk && "bg-[oklch(0.65_0.2_145)] hover:bg-[oklch(0.6_0.2_145)]",
               )}
             >
-              {check.status}
+              {status}
             </Badge>
           </div>
         );
       })}
     </div>
   );
-}
-
-// ---------------------------------------------------------------------------
-// Uptime display helper
-// ---------------------------------------------------------------------------
-
-function formatUptime(seconds: number): string {
-  if (seconds < 60) return `${Math.floor(seconds)}s`;
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${Math.floor(seconds % 60)}s`;
-  const hours = Math.floor(seconds / 3600);
-  const minutes = Math.floor((seconds % 3600) / 60);
-  if (hours < 24) return `${hours}h ${minutes}m`;
-  const days = Math.floor(hours / 24);
-  return `${days}d ${hours % 24}h`;
 }
 
 // ---------------------------------------------------------------------------
@@ -631,11 +614,9 @@ export function DashboardPage() {
               title="Health Status"
               value={isHealthy ? "Healthy" : health ? "Degraded" : "--"}
               description={
-                health?.uptime
-                  ? `Uptime: ${formatUptime(health.uptime)}`
-                  : health?.version
-                    ? `Version ${health.version}`
-                    : "Forge gateway status"
+                // The backend's HealthResponse (forge_gateway/models.py) has no
+                // uptime field -- fall back to version, which it does return.
+                health?.version ? `Version ${health.version}` : "Forge gateway status"
               }
               icon={Heart}
               loading={healthLoading}

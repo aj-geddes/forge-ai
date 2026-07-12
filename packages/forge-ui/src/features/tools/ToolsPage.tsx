@@ -329,22 +329,6 @@ export function ToolsPage() {
                     <p className="mt-0.5 text-xs text-muted-foreground line-clamp-2">
                       {tool.description}
                     </p>
-                    {tool.parameters && tool.parameters.length > 0 && (
-                      <div className="mt-2 flex flex-wrap gap-1">
-                        {tool.parameters.map((param) => (
-                          <Badge
-                            key={param.name}
-                            variant="outline"
-                            className="text-xs font-normal"
-                          >
-                            {param.name}
-                            {param.required && (
-                              <span className="text-destructive ml-0.5">*</span>
-                            )}
-                          </Badge>
-                        ))}
-                      </div>
-                    )}
                   </div>
                   <SourceBadge source={tool.source} />
                 </div>

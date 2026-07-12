@@ -87,11 +87,14 @@ const MODEL_OPTIONS = [
 
 // --- Zod Schema ---
 
+// NOTE: the backend's LiteLLMConfig (forge_config/schema.py) only has
+// {mode, endpoint, model_list, fallback_models, timeout, max_retries}. There
+// is no config_path or port field -- a PUT with those fields would have them
+// silently dropped by pydantic. Tracked as missing backend support if a
+// standalone LiteLLM proxy process needs to be launched from a config file.
 const litellmSchema = z.object({
   mode: z.enum(["embedded", "sidecar", "external"]),
   endpoint: z.string().optional(),
-  config_path: z.string().optional(),
-  port: z.coerce.number().int().positive().optional(),
 });
 
 const metadataSchema = z.object({
@@ -114,6 +117,8 @@ const securitySchema = z.object({
   trust_domain: z.string().optional(),
   trust_policy: z.enum(["strict", "permissive"]).optional(),
   rate_limit_rpm: z.coerce.number().int().positive().optional(),
+  // Comma-separated string in the form; mapped to the backend's flat
+  // `allowed_origins: string[]` field (not `cors_origins`).
   cors_origins: z.string().optional(),
 });
 
@@ -131,14 +136,28 @@ const formSchema = z.object({
 type FormValues = z.infer<typeof formSchema>;
 
 // --- Helpers ---
+//
+// These mirror the backend's ForgeConfig contract field-for-field
+// (forge_config/schema.py). In particular:
+//   - metadata.environment is a direct string field -- there is no
+//     metadata.labels map on the backend.
+//   - security.agentweave.trust_policy lives under `agentweave`, not at the
+//     top level of `security`.
+//   - security.rate_limit_rpm is a flat int, not nested under
+//     `rate_limit.requests_per_minute`.
+//   - security.allowed_origins is the CORS field name, not `cors_origins`.
+//   - agents.default is a plain persona name string, not a `default_agent`
+//     object.
+// llm.litellm intentionally has no config_path/port fields in the form --
+// the backend's LiteLLMConfig does not define them (see litellmSchema above).
 
-function configToForm(config: ForgeConfig): FormValues {
+export function configToForm(config: ForgeConfig): FormValues {
   return {
     metadata: {
       name: config.metadata.name,
       version: config.metadata.version,
       description: config.metadata.description ?? "",
-      environment: (config.metadata.labels?.["environment"] as
+      environment: (config.metadata.environment as
         | "development"
         | "staging"
         | "production"
@@ -148,61 +167,51 @@ function configToForm(config: ForgeConfig): FormValues {
       model: config.llm.default_model,
       temperature: config.llm.temperature,
       max_tokens: config.llm.max_tokens,
-      system_prompt: config.llm.litellm ? undefined : undefined,
+      system_prompt: config.llm.system_prompt ?? undefined,
       litellm: config.llm.litellm
         ? {
             mode: config.llm.litellm.mode,
-            endpoint: config.llm.litellm.endpoint,
-            config_path: config.llm.litellm.config_path,
-            port: config.llm.litellm.port,
+            endpoint: config.llm.litellm.endpoint ?? undefined,
           }
         : undefined,
     },
     security: {
       agentweave_enabled: config.security?.agentweave?.enabled ?? false,
-      trust_domain: config.security?.agentweave?.trust_store ?? "",
-      trust_policy: config.security?.trust_policy ?? undefined,
-      rate_limit_rpm: config.security?.rate_limit?.requests_per_minute,
-      cors_origins: config.security?.cors_origins?.join(", ") ?? "",
+      trust_domain: config.security?.agentweave?.trust_domain ?? "",
+      trust_policy: config.security?.agentweave?.trust_policy ?? undefined,
+      rate_limit_rpm: config.security?.rate_limit_rpm,
+      cors_origins: config.security?.allowed_origins?.join(", ") ?? "",
     },
     agents: {
-      default_agent_name: config.agents?.default_agent?.name ?? "",
+      default_agent_name: config.agents?.default ?? "",
     },
   };
 }
 
-function formToConfig(
+export function formToConfig(
   form: FormValues,
   existing: ForgeConfig,
 ): ForgeConfig {
-  const labels: Record<string, string> = {
-    ...(existing.metadata.labels ?? {}),
-  };
-  if (form.metadata.environment) {
-    labels["environment"] = form.metadata.environment;
-  } else {
-    delete labels["environment"];
-  }
-
   return {
     ...existing,
     metadata: {
+      ...existing.metadata,
       name: form.metadata.name,
       version: form.metadata.version,
       description: form.metadata.description || undefined,
-      labels: Object.keys(labels).length > 0 ? labels : undefined,
+      environment: form.metadata.environment || existing.metadata.environment,
     },
     llm: {
       ...existing.llm,
       default_model: form.llm.model,
       temperature: form.llm.temperature,
       max_tokens: form.llm.max_tokens,
+      system_prompt: form.llm.system_prompt || null,
       litellm: form.llm.litellm
         ? {
+            ...existing.llm.litellm,
             mode: form.llm.litellm.mode as LiteLLMMode,
             endpoint: form.llm.litellm.endpoint || undefined,
-            config_path: form.llm.litellm.config_path || undefined,
-            port: form.llm.litellm.port,
           }
         : existing.llm.litellm,
     },
@@ -211,32 +220,20 @@ function formToConfig(
       agentweave: {
         ...(existing.security?.agentweave ?? { enabled: false }),
         enabled: form.security.agentweave_enabled,
-        trust_store: form.security.trust_domain || undefined,
+        trust_domain: form.security.trust_domain || undefined,
+        trust_policy: (form.security.trust_policy as TrustPolicy) || undefined,
       },
-      trust_policy: (form.security.trust_policy as TrustPolicy) || undefined,
-      rate_limit: form.security.rate_limit_rpm
-        ? {
-            ...existing.security?.rate_limit,
-            requests_per_minute: form.security.rate_limit_rpm,
-          }
-        : existing.security?.rate_limit,
-      cors_origins: form.security.cors_origins
+      rate_limit_rpm: form.security.rate_limit_rpm ?? existing.security?.rate_limit_rpm,
+      allowed_origins: form.security.cors_origins
         ? form.security.cors_origins
             .split(",")
             .map((s) => s.trim())
             .filter(Boolean)
-        : existing.security?.cors_origins,
+        : existing.security?.allowed_origins,
     },
     agents: {
       ...existing.agents,
-      default_agent: form.agents.default_agent_name
-        ? {
-            ...(existing.agents?.default_agent ?? {
-              name: form.agents.default_agent_name,
-            }),
-            name: form.agents.default_agent_name,
-          }
-        : existing.agents?.default_agent,
+      default: form.agents.default_agent_name || existing.agents?.default,
     },
   };
 }
@@ -291,7 +288,7 @@ export function ConfigVisualEditor() {
   const openapiCount = draft.tools.openapi_sources?.length ?? 0;
   const manualCount = draft.tools.manual_tools?.length ?? 0;
   const workflowCount = draft.tools.workflows?.length ?? 0;
-  const peersCount = draft.peers?.length ?? 0;
+  const peersCount = draft.agents?.peers?.length ?? 0;
 
   // Check if current model is in our preset list
   const isCustomModel = !MODEL_OPTIONS.some((g) =>

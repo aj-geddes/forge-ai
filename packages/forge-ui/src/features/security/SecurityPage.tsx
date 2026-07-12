@@ -20,6 +20,7 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { useConfig } from "@/api/hooks";
+import type { SecurityConfig } from "@/types/config";
 
 // --- Contextual help components ---
 
@@ -33,18 +34,15 @@ function HelpText({ children }: { children: React.ReactNode }) {
 }
 
 // --- Security posture summary ---
+//
+// These four checks read the *actual* backend SecurityConfig shape
+// (forge_config/schema.py SecurityConfig): agentweave.enabled,
+// rate_limit_rpm, allowed_origins, and api_keys.{enabled,keys}. The
+// previous version of this page read a shape (cors_origins, rate_limit,
+// trust_policy at the top level, api_keys as a list of {key_hash}) that the
+// backend never returns, so 3 of 4 checks could never pass.
 
-function SecurityPostureBanner({
-  security,
-}: {
-  security?: {
-    agentweave?: { enabled: boolean };
-    rate_limit?: { requests_per_minute?: number };
-    cors_origins?: string[];
-    api_keys?: { key_hash: string }[];
-    trust_policy?: string;
-  };
-}) {
+function SecurityPostureBanner({ security }: { security?: SecurityConfig }) {
   const checks = [
     {
       label: "AgentWeave",
@@ -52,17 +50,17 @@ function SecurityPostureBanner({
     },
     {
       label: "Rate limiting",
-      ok: security?.rate_limit?.requests_per_minute != null,
+      ok: (security?.rate_limit_rpm ?? 0) > 0,
     },
     {
       label: "CORS restricted",
       ok:
-        (security?.cors_origins?.length ?? 0) > 0 &&
-        !security?.cors_origins?.includes("*"),
+        (security?.allowed_origins?.length ?? 0) > 0 &&
+        !security?.allowed_origins?.includes("*"),
     },
     {
       label: "API keys",
-      ok: (security?.api_keys?.length ?? 0) > 0,
+      ok: (security?.api_keys?.enabled ?? false) && (security?.api_keys?.keys.length ?? 0) > 0,
     },
   ];
 
@@ -99,7 +97,7 @@ function SecurityPostureBanner({
                 : "border-muted text-muted-foreground"
             }`}
           >
-            {check.ok ? "\u2713" : "\u2013"} {check.label}
+            {check.ok ? "✓" : "–"} {check.label}
           </Badge>
         ))}
       </div>
@@ -109,17 +107,7 @@ function SecurityPostureBanner({
 
 // --- Card components ---
 
-function AgentWeaveCard({
-  agentweave,
-  trustPolicy,
-}: {
-  agentweave?: {
-    enabled: boolean;
-    agent_id?: string;
-    trust_store?: string;
-  };
-  trustPolicy?: string;
-}) {
+function AgentWeaveCard({ agentweave }: { agentweave?: SecurityConfig["agentweave"] }) {
   const enabled = agentweave?.enabled ?? false;
 
   return (
@@ -157,39 +145,39 @@ function AgentWeaveCard({
       </CardHeader>
       <CardContent className="space-y-3">
         <div className="space-y-2 text-sm">
-          {agentweave?.agent_id && (
+          {agentweave?.trust_domain && (
             <div className="flex items-center justify-between">
-              <span className="text-muted-foreground">Agent ID</span>
-              <span className="font-mono text-xs">{agentweave.agent_id}</span>
+              <span className="text-muted-foreground">Trust Domain</span>
+              <span className="font-mono text-xs">{agentweave.trust_domain}</span>
             </div>
           )}
-          {trustPolicy && (
+          {agentweave?.trust_policy && (
             <>
               <div className="flex items-center justify-between">
                 <span className="text-muted-foreground">Trust Policy</span>
                 <Badge
                   variant="outline"
                   className={
-                    trustPolicy === "strict"
+                    agentweave.trust_policy === "strict"
                       ? "border-green-500/30 text-green-700"
                       : "border-yellow-500/30 text-yellow-700"
                   }
                 >
-                  {trustPolicy}
+                  {agentweave.trust_policy}
                 </Badge>
               </div>
               <HelpText>
-                {trustPolicy === "strict"
+                {agentweave.trust_policy === "strict"
                   ? "Strict mode requires all callers to present a valid, signed identity before requests are processed."
                   : "Permissive mode allows communication from unverified callers. Use strict mode in production."}
               </HelpText>
             </>
           )}
-          {agentweave?.trust_store && (
+          {agentweave?.authz_provider && (
             <div className="flex items-center justify-between">
-              <span className="text-muted-foreground">Trust Store</span>
+              <span className="text-muted-foreground">Authorization Provider</span>
               <span className="max-w-[200px] truncate font-mono text-xs">
-                {agentweave.trust_store}
+                {agentweave.authz_provider}
               </span>
             </div>
           )}
@@ -208,13 +196,8 @@ function AgentWeaveCard({
   );
 }
 
-function RateLimitCard({
-  rateLimit,
-}: {
-  rateLimit?: { requests_per_minute?: number; burst?: number };
-}) {
-  const rpm = rateLimit?.requests_per_minute;
-  const burst = rateLimit?.burst;
+function RateLimitCard({ rateLimitRpm }: { rateLimitRpm?: number }) {
+  const rpm = rateLimitRpm;
 
   return (
     <Card>
@@ -225,13 +208,13 @@ function RateLimitCard({
         </div>
         <CardDescription>Request throttling configuration</CardDescription>
         <HelpText>
-          RPM (requests per minute) is enforced per-caller identity using a
-          sliding window algorithm. This protects your agent against abuse,
-          runaway automation, and unexpected cost spikes from high-volume callers.
+          RPM (requests per minute) is enforced per-caller identity. This protects
+          your agent against abuse, runaway automation, and unexpected cost spikes
+          from high-volume callers.
         </HelpText>
       </CardHeader>
       <CardContent className="space-y-3">
-        {rpm != null ? (
+        {rpm != null && rpm > 0 ? (
           <div className="space-y-3">
             <div className="flex items-center justify-between text-sm">
               <span className="text-muted-foreground">Requests per minute</span>
@@ -243,18 +226,6 @@ function RateLimitCard({
                 style={{ width: `${Math.min((rpm / 1000) * 100, 100)}%` }}
               />
             </div>
-            {burst != null && (
-              <>
-                <div className="flex items-center justify-between text-sm">
-                  <span className="text-muted-foreground">Burst allowance</span>
-                  <span className="font-semibold">{burst}</span>
-                </div>
-                <HelpText>
-                  Burst allows short spikes above the RPM limit. A burst of {burst} means
-                  up to {burst} requests can arrive at once before throttling kicks in.
-                </HelpText>
-              </>
-            )}
           </div>
         ) : (
           <p className="text-sm text-muted-foreground">
@@ -267,7 +238,7 @@ function RateLimitCard({
   );
 }
 
-function CorsOriginsCard({ origins }: { origins?: string[] }) {
+function AllowedOriginsCard({ origins }: { origins?: string[] }) {
   return (
     <Card>
       <CardHeader className="pb-3">
@@ -314,8 +285,9 @@ function CorsOriginsCard({ origins }: { origins?: string[] }) {
   );
 }
 
-function ApiKeysCard({ apiKeys }: { apiKeys?: { key_hash: string; description?: string; scopes?: string[] }[] }) {
-  const count = apiKeys?.length ?? 0;
+function ApiKeysCard({ apiKeys }: { apiKeys?: SecurityConfig["api_keys"] }) {
+  const keys = apiKeys?.keys ?? [];
+  const count = keys.length;
 
   return (
     <Card>
@@ -325,7 +297,9 @@ function ApiKeysCard({ apiKeys }: { apiKeys?: { key_hash: string; description?: 
             <Key className="h-5 w-5 text-muted-foreground" />
             <CardTitle className="text-lg">API Keys</CardTitle>
           </div>
-          <Badge variant="secondary">{count} configured</Badge>
+          <Badge variant="secondary">
+            {apiKeys?.enabled ? `${count} configured` : "disabled"}
+          </Badge>
         </div>
         <CardDescription>Authentication keys (values redacted)</CardDescription>
         <HelpText>
@@ -335,30 +309,20 @@ function ApiKeysCard({ apiKeys }: { apiKeys?: { key_hash: string; description?: 
         </HelpText>
       </CardHeader>
       <CardContent>
-        {count > 0 ? (
+        {apiKeys?.enabled && count > 0 ? (
           <div className="space-y-2">
-            {apiKeys?.map((key, idx) => (
+            {keys.map((key, idx) => (
               <div
-                key={key.key_hash}
+                key={`${key.source}-${key.name}-${idx}`}
                 className="flex items-center justify-between rounded-md bg-muted/50 px-3 py-2"
               >
                 <div className="space-y-0.5">
-                  <p className="text-sm font-medium">
-                    {key.description ?? `API Key ${idx + 1}`}
-                  </p>
-                  <p className="font-mono text-xs text-muted-foreground">
-                    {key.key_hash.slice(0, 8)}{"********"}
-                  </p>
+                  <p className="text-sm font-medium">API Key {idx + 1}</p>
+                  <p className="font-mono text-xs text-muted-foreground">{key.name}</p>
                 </div>
-                {key.scopes && key.scopes.length > 0 && (
-                  <div className="flex gap-1">
-                    {key.scopes.map((scope) => (
-                      <Badge key={scope} variant="outline" className="text-xs">
-                        {scope}
-                      </Badge>
-                    ))}
-                  </div>
-                )}
+                <Badge variant="outline" className="text-xs">
+                  {key.source}
+                </Badge>
               </div>
             ))}
           </div>
@@ -415,12 +379,9 @@ export function SecurityPage() {
       <SecurityPostureBanner security={security} />
 
       <div className="grid gap-4 md:grid-cols-2">
-        <AgentWeaveCard
-          agentweave={security?.agentweave}
-          trustPolicy={security?.trust_policy}
-        />
-        <RateLimitCard rateLimit={security?.rate_limit} />
-        <CorsOriginsCard origins={security?.cors_origins} />
+        <AgentWeaveCard agentweave={security?.agentweave} />
+        <RateLimitCard rateLimitRpm={security?.rate_limit_rpm} />
+        <AllowedOriginsCard origins={security?.allowed_origins} />
         <ApiKeysCard apiKeys={security?.api_keys} />
       </div>
     </div>

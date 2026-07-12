@@ -26,7 +26,7 @@ import { api } from "@/api/client";
 import { useSessions, useDeleteSession } from "@/api/hooks";
 
 interface ChatCompletionResponse {
-  response: string;
+  message: string;
   session_id: string;
   tools_used?: string[];
 }
@@ -247,7 +247,7 @@ function ChatArea() {
       const assistantMessage: Message = {
         id: `msg-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
         role: "assistant",
-        content: response.response,
+        content: response.message,
         toolsUsed: response.tools_used,
         timestamp: Date.now(),
       };
