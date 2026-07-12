@@ -1,4 +1,6 @@
-# Forge AI - Project Instructions
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Agent Workflow — Unicorn Team (REQUIRED)
 
@@ -29,63 +31,72 @@ Never serialize agent work that can be parallelized. The orchestrator skill hand
 
 ## Architecture
 
-Forge is a config-driven AI agent system using a uv monorepo workspace with four packages:
+Forge AI is a config-driven AI agent system with dynamic MCP tool surfaces. It is a uv monorepo workspace (Python 3.12+) with a dependency chain of four packages:
 
-- **forge-config** - Pydantic config schema, YAML loader, hot-reload, secret resolution
-- **forge-security** - AgentWeave integration (identity, signing, audit, rate limiting, trust)
-- **forge-agent** - Tool builder (OpenAPI, manual, workflow) + PydanticAI agent core
-- **forge-gateway** - FastAPI app exposing REST, MCP, and A2A interfaces
+`forge-config` -> `forge-security` -> `forge-agent` -> `forge-gateway`
 
-Dependency chain: `forge-config` -> `forge-security` -> `forge-agent` -> `forge-gateway`
+- **forge-config** — Pydantic config schema, YAML loader, hot-reload watcher, secret resolution (`${ENV_VAR}` refs), versioning.
+- **forge-security** — AgentWeave integration: identity, signing, audit, rate limiting, trust, secrets, middleware.
+- **forge-agent** — Tool builders (`builder/`: openapi, manual, workflow, registry) plus the PydanticAI agent core (`agent/`: core, context, llm via LiteLLM in embedded/sidecar/external modes, peers for A2A).
+- **forge-gateway** — FastAPI app factory `create_app` in `app.py`. Routes: conversational, programmatic, mcp, a2a, admin, persona, health, metrics. Serves the built React SPA from `static/` (or `/app/static` in Docker).
 
-## Development
+Also in the repo but outside the uv workspace:
+
+- **packages/forge-ui** — React 19 + TypeScript + Vite 6 + Tailwind 4, with zustand, TanStack Query, react-hook-form + zod, CodeMirror. Feature folders: chat, config, dashboard, guide, login, peers, security, tools. The Vite dev server (port 5173) proxies `/v1`, `/health`, `/metrics` to `http://localhost:8000`.
+- **e2e-tests/** — separate pytest + pytest-playwright suite (see E2E Tests below).
+- **docs/** — Jekyll documentation site (user/developer/technical).
+
+`forge.yaml` is the single source of truth for a deployment (see `forge.yaml.example`): metadata, llm (LiteLLM model_list, fallbacks), tools (openapi_sources, manual_tools, workflows). Secrets use `${ENV_VAR}` refs resolved by forge-config.
+
+**AgentWeave** is an editable path dependency at `../agentweave` — the sibling directory must exist or `uv sync` fails.
+
+## Commands
 
 ```bash
-# Install all dependencies
-uv sync
-
-# Run all tests
-uv run pytest -v
-
-# Run tests for a specific package
-uv run pytest packages/forge-config/tests/ -v
-
-# Lint and format
+uv sync                                    # install all Python deps
+uv run pytest -v                           # all tests
+uv run pytest packages/forge-config/tests/ -v                       # one package
+uv run pytest packages/forge-config/tests/test_loader.py::test_name -v  # one test
 uv run ruff check .
 uv run ruff format .
-
-# Type check
 uv run mypy packages/
 ```
 
-## Key Files
+UI (run inside `packages/forge-ui`):
 
-- `forge.yaml.example` - Canonical config reference
-- `packages/*/src/` - Source code (each package has `src/<package_name>/`)
-- `packages/*/tests/` - Tests co-located with packages
-- `deploy/helm/forge/` - Helm chart with small/medium/large profiles
-- `Dockerfile` - Multi-stage build targeting <200MB
+```bash
+npm install
+npm run dev          # vite dev server on 5173, proxies to gateway on 8000
+npm run build        # tsc -b && vite build
+npm run lint
+npm run typecheck
+npm run test         # vitest
+npm run test:e2e     # playwright
+```
+
+## Run Locally
+
+```bash
+FORGE_CONFIG_PATH=path/to/forge.yaml uv run uvicorn forge_gateway.app:create_app --factory --port 8000
+```
+
+Or `docker-compose up` (forge on 8000, metrics on 9090, plus redis:7). Skaffold deploys the Helm chart at `deploy/helm/forge` with `values.dev.yaml` and port-forwards 8000.
+
+## E2E Tests
+
+`e2e-tests/` at the repo root is a separate pytest + pytest-playwright suite that runs against an **already-deployed instance** — it does not start the app. Configure with `E2E_BASE_URL` (default `https://forge-ai.hvs`) and `E2E_ADMIN_KEY`. Runs chromium with screenshots on.
 
 ## Conventions
 
-- Python 3.12+, strict mypy, ruff for linting/formatting
+- Python 3.12+, strict mypy with the pydantic plugin, ruff line length 100
 - TDD: write tests first, all tests must pass before committing
-- Line length: 100 characters
 - Async-first: all I/O operations are async
 - Pydantic v2 for all data models
-- Use `from __future__ import annotations` in all source files
-
-## External Dependencies
-
-- **AgentWeave** (`/home/aj-geddes/dev/claude-projects/agentweave`) - Security framework
-- **PydanticAI** - Agent framework with TestModel for testing
-- **LiteLLM** - LLM routing (embedded/sidecar/external modes)
-- **FastMCP** - MCP tool surface builder
-- **FastAPI** - Gateway HTTP framework
+- `from __future__ import annotations` in all source files
 
 ## Testing
 
-- Use `pytest-asyncio` with `asyncio_mode = "auto"`
+- `pytest-asyncio` with `asyncio_mode = "auto"`
 - Use PydanticAI `TestModel` for LLM-dependent tests (no real API calls)
 - Mock external services (AgentWeave, APIs) in unit tests
 - Test fixtures live in `packages/*/tests/fixtures/`
