@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from forge_config.schema import AgentDef, ForgeConfig
+from forge_config.secret_resolver import CompositeSecretResolver, SecretResolver
 from pydantic import BaseModel
 from pydantic_ai import Agent as PydanticAIAgent
 from pydantic_ai.messages import ModelMessage, ModelResponse, ToolCallPart
@@ -87,16 +88,23 @@ class ForgeAgent:
         config: The ForgeConfig defining tools, LLM, and agent settings.
         model_override: Optional PydanticAI Model to use instead of the
             configured LLM (useful for testing with TestModel).
+        secret_resolver: Optional SecretResolver used to resolve auth
+            secrets (api_key/bearer/basic) when building the tool
+            surface. Defaults to a CompositeSecretResolver (env-backed)
+            so configs like ``forge.yaml.example`` work without callers
+            wiring one up explicitly.
     """
 
     def __init__(
         self,
         config: ForgeConfig,
         model_override: Model | None = None,
+        secret_resolver: SecretResolver | None = None,
     ) -> None:
         self._config = config
         self._llm_router = LLMRouter(config.llm)
-        self._registry = ToolSurfaceRegistry()
+        self._secret_resolver: SecretResolver = secret_resolver or CompositeSecretResolver()
+        self._registry = ToolSurfaceRegistry(secret_resolver=self._secret_resolver)
         self._context = ConversationContext()
         self._model_override = model_override
         self._agent: PydanticAIAgent[None] | None = None

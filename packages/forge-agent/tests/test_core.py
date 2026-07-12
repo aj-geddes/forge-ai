@@ -6,9 +6,12 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from forge_agent.agent.core import ForgeAgent, ForgeRunResult
+from forge_config.exceptions import SecretResolutionError
 from forge_config.schema import (
     AgentDef,
     AgentsConfig,
+    AuthConfig,
+    AuthType,
     ForgeConfig,
     HTTPMethod,
     LLMConfig,
@@ -16,10 +19,29 @@ from forge_config.schema import (
     ManualToolAPI,
     ParameterDef,
     ParamType,
+    SecretRef,
+    SecretSource,
     ToolsConfig,
 )
+from forge_config.secret_resolver import SecretResolver
 from pydantic import BaseModel
 from pydantic_ai.models.test import TestModel
+
+
+class FakeSecretResolver:
+    """A fake SecretResolver returning predefined values, for testing."""
+
+    def __init__(self, secrets: dict[str, str] | None = None) -> None:
+        self._secrets = secrets or {}
+
+    def resolve(self, ref: SecretRef) -> str:
+        if ref.name not in self._secrets:
+            msg = f"Secret '{ref.name}' not found"
+            raise SecretResolutionError(msg)
+        return self._secrets[ref.name]
+
+
+_check: SecretResolver = FakeSecretResolver()
 
 
 def _make_config(
@@ -35,6 +57,32 @@ def _make_config(
         ),
         tools=ToolsConfig(manual_tools=manual_tools or []),
         agents=AgentsConfig(agents=agents or []),
+    )
+
+
+def _make_api_key_manual_tool(env_var_name: str) -> ManualTool:
+    """Create a ManualTool whose API call requires api_key auth from an env secret."""
+    return ManualTool(
+        name="get_weather",
+        description="Get current weather for a location",
+        api=_build_api_key_auth_api(env_var_name),
+    )
+
+
+def _build_api_key_auth_api(env_var_name: str) -> ManualToolAPI:
+    """Build a ManualToolAPI requiring api_key auth resolved from an env var."""
+    return ManualToolAPI(
+        url="https://api.weatherapi.com/v1/current.json",
+        method=HTTPMethod.GET,
+        auth=_build_api_key_auth_config(env_var_name),
+    )
+
+
+def _build_api_key_auth_config(env_var_name: str) -> AuthConfig:
+    """Build an AuthConfig for api_key auth resolved from an env var."""
+    return AuthConfig(
+        type=AuthType.API_KEY,
+        token=SecretRef(source=SecretSource.ENV, name=env_var_name),
     )
 
 
@@ -73,6 +121,70 @@ class TestForgeAgentInitialization:
         assert agent.registry is not None
         assert agent.context is not None
         assert agent.llm_router is not None
+
+
+class TestForgeAgentSecretResolverWiring:
+    """Tests that ForgeAgent threads a SecretResolver through to the registry."""
+
+    @pytest.mark.anyio
+    async def test_initialize_resolves_api_key_auth_via_default_resolver(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A manual tool with api_key auth builds when no resolver is passed explicitly.
+
+        ForgeAgent must fall back to a working default SecretResolver (e.g. one
+        that resolves env-sourced secrets) so that gateway callers who only pass
+        a ForgeConfig -- ``ForgeAgent(config)`` -- still get a working agent for
+        configs shaped like ``forge.yaml.example`` (manual tool, api_key auth,
+        env secret source).
+        """
+        monkeypatch.setenv("WEATHER_API_KEY", "shh-its-a-secret")
+        config = _make_config(
+            manual_tools=[_make_api_key_manual_tool("WEATHER_API_KEY")],
+        )
+        agent = ForgeAgent(config, model_override=TestModel())
+
+        await agent.initialize()
+
+        assert agent.registry.tool_count == 1
+
+    @pytest.mark.anyio
+    async def test_initialize_still_raises_when_env_secret_missing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The default resolver is real -- a genuinely missing secret still fails."""
+        monkeypatch.delenv("UNSET_WEATHER_API_KEY", raising=False)
+        config = _make_config(
+            manual_tools=[_make_api_key_manual_tool("UNSET_WEATHER_API_KEY")],
+        )
+        agent = ForgeAgent(config, model_override=TestModel())
+
+        with pytest.raises(SecretResolutionError, match="not set"):
+            await agent.initialize()
+
+    @pytest.mark.anyio
+    async def test_explicit_secret_resolver_overrides_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An explicit ``secret_resolver`` kwarg is used instead of the default.
+
+        Even when the underlying env var is unset, a caller-supplied resolver
+        (e.g. wired to Vault or another backend) must still be honored.
+        """
+        monkeypatch.delenv("VAULT_ONLY_KEY", raising=False)
+        fake_resolver = FakeSecretResolver({"VAULT_ONLY_KEY": "vault-value"})
+        config = _make_config(
+            manual_tools=[_make_api_key_manual_tool("VAULT_ONLY_KEY")],
+        )
+        agent = ForgeAgent(
+            config,
+            model_override=TestModel(),
+            secret_resolver=fake_resolver,
+        )
+
+        await agent.initialize()
+
+        assert agent.registry.tool_count == 1
 
 
 class TestForgeAgentConversational:
