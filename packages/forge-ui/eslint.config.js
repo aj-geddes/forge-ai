@@ -35,6 +35,8 @@ export default [
         Response: "readonly",
         // DOM types
         React: "readonly",
+        Window: "readonly",
+        Storage: "readonly",
         HTMLElement: "readonly",
         HTMLDialogElement: "readonly",
         HTMLInputElement: "readonly",

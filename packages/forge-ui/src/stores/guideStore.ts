@@ -1,8 +1,8 @@
 import { create } from "zustand";
+import { safeStorage } from "@/lib/storage";
 
 function getInitialTourCompleted(): boolean {
-  if (typeof window === "undefined") return false;
-  return localStorage.getItem("forge-tour-completed") === "true";
+  return safeStorage.getItem("forge-tour-completed") === "true";
 }
 
 interface GuideState {
@@ -51,7 +51,7 @@ export const useGuideStore = create<GuideState>((set) => ({
     set((state) => {
       const next = state.tourStep + 1;
       if (next >= TOTAL_TOUR_STEPS) {
-        localStorage.setItem("forge-tour-completed", "true");
+        safeStorage.setItem("forge-tour-completed", "true");
         return { tourActive: false, tourStep: 0, tourCompleted: true };
       }
       return { tourStep: next };
@@ -64,7 +64,7 @@ export const useGuideStore = create<GuideState>((set) => ({
 
   endTour: () =>
     set(() => {
-      localStorage.setItem("forge-tour-completed", "true");
+      safeStorage.setItem("forge-tour-completed", "true");
       return { tourActive: false, tourStep: 0, tourCompleted: true };
     }),
 
