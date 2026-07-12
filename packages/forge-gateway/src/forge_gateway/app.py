@@ -245,6 +245,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
             config = load_config(config_path)
             logger.info("Loaded config: %s", config.metadata.name)
+            health.set_version(config.metadata.version)
 
             # Try to build the agent
             try:
@@ -252,6 +253,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
                 agent = ForgeAgent(config)
                 await agent.initialize()
+                health.set_component_status("agent", "ready")
 
                 # Wire agent and config into all route modules
                 programmatic.set_agent(agent)
@@ -266,8 +268,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 logger.info("Agent initialized successfully")
             except ImportError:
                 logger.warning("forge-agent not available, running in gateway-only mode")
+                health.set_component_status("agent", "unavailable")
             except Exception:
                 logger.exception("Failed to initialize agent")
+                health.set_component_status("agent", "failed")
 
             # Populate the A2A agent card from config + live tool registry
             _refresh_agent_card(config, agent)
@@ -308,6 +312,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 logger.exception("Error stopping config watcher")
         health.set_ready(False)
         health.set_started(False)
+        health.reset_components()
 
 
 def _resolve_cors_origins() -> list[str]:

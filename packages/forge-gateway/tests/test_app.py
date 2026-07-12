@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi import FastAPI
+from fastapi.testclient import TestClient
 from forge_gateway.app import (
     _make_reload_callback,
     _rebuild_tool_surface,
@@ -30,6 +31,8 @@ def _reset_health_state() -> Iterator[None]:
     yield
     health.set_ready(False)
     health.set_started(False)
+    health.set_version("")
+    health.reset_components()
 
 
 @pytest.fixture()
@@ -37,6 +40,7 @@ def mock_config() -> MagicMock:
     """A minimal mock ForgeConfig."""
     config = MagicMock()
     config.metadata.name = "test-forge"
+    config.metadata.version = "0.0.0-test"
     config.security.api_keys = None
     return config
 
@@ -861,3 +865,177 @@ class TestMakeReloadCallbackAgent:
             callback(Path("/tmp/forge.yaml"))
 
             mock_schedule.assert_called_once_with(new_config, None)
+
+
+# ---------------------------------------------------------------------------
+# 8. Agent initialization outcome drives readiness health state
+# ---------------------------------------------------------------------------
+
+
+class TestAgentInitializationHealthState:
+    """Verify agent init success/failure/absence is reflected in health state."""
+
+    async def test_agent_init_failure_sets_component_failed(
+        self,
+        mock_config: MagicMock,
+        mock_watcher: MagicMock,
+        config_file: Path,
+    ) -> None:
+        """A raised exception from agent.initialize() must mark 'agent' as failed."""
+        app = FastAPI(lifespan=lifespan)
+
+        mock_agent = MagicMock()
+        mock_agent.initialize = AsyncMock(side_effect=RuntimeError("boom"))
+
+        with (
+            patch.dict("os.environ", {"FORGE_CONFIG_PATH": str(config_file)}),
+            patch("forge_config.load_config", return_value=mock_config),
+            patch("forge_config.ConfigWatcher", return_value=mock_watcher),
+            patch("forge_agent.ForgeAgent", return_value=mock_agent),
+        ):
+            async with lifespan(app):
+                assert health._components.get("agent") == "failed"
+
+    async def test_agent_init_failure_makes_readiness_endpoint_return_503(
+        self,
+        mock_config: MagicMock,
+        mock_watcher: MagicMock,
+        config_file: Path,
+    ) -> None:
+        """The public /health/ready endpoint must surface the agent failure as 503."""
+        app = FastAPI(lifespan=lifespan)
+        app.include_router(health.router)
+
+        mock_agent = MagicMock()
+        mock_agent.initialize = AsyncMock(side_effect=RuntimeError("boom"))
+
+        with (
+            patch.dict("os.environ", {"FORGE_CONFIG_PATH": str(config_file)}),
+            patch("forge_config.load_config", return_value=mock_config),
+            patch("forge_config.ConfigWatcher", return_value=mock_watcher),
+            patch("forge_agent.ForgeAgent", return_value=mock_agent),
+        ):
+            async with lifespan(app):
+                client = TestClient(app)
+                response = client.get("/health/ready")
+                assert response.status_code == 503
+
+    async def test_agent_init_success_sets_component_ready(
+        self,
+        mock_config: MagicMock,
+        mock_watcher: MagicMock,
+        config_file: Path,
+    ) -> None:
+        """A successful agent.initialize() call must mark 'agent' as ready."""
+        app = FastAPI(lifespan=lifespan)
+
+        mock_agent = MagicMock()
+        mock_agent.initialize = AsyncMock(return_value=None)
+        mock_agent._registry = None
+
+        with (
+            patch.dict("os.environ", {"FORGE_CONFIG_PATH": str(config_file)}),
+            patch("forge_config.load_config", return_value=mock_config),
+            patch("forge_config.ConfigWatcher", return_value=mock_watcher),
+            patch("forge_agent.ForgeAgent", return_value=mock_agent),
+        ):
+            async with lifespan(app):
+                assert health._components.get("agent") == "ready"
+
+    async def test_agent_init_success_readiness_endpoint_returns_200(
+        self,
+        mock_config: MagicMock,
+        mock_watcher: MagicMock,
+        config_file: Path,
+    ) -> None:
+        """The public /health/ready endpoint must return 200 when the agent is ready."""
+        app = FastAPI(lifespan=lifespan)
+        app.include_router(health.router)
+
+        mock_agent = MagicMock()
+        mock_agent.initialize = AsyncMock(return_value=None)
+        mock_agent._registry = None
+
+        with (
+            patch.dict("os.environ", {"FORGE_CONFIG_PATH": str(config_file)}),
+            patch("forge_config.load_config", return_value=mock_config),
+            patch("forge_config.ConfigWatcher", return_value=mock_watcher),
+            patch("forge_agent.ForgeAgent", return_value=mock_agent),
+        ):
+            async with lifespan(app):
+                client = TestClient(app)
+                response = client.get("/health/ready")
+                assert response.status_code == 200
+                assert response.json()["status"] == "ready"
+
+    async def test_agent_unavailable_when_forge_agent_import_fails(
+        self,
+        mock_config: MagicMock,
+        mock_watcher: MagicMock,
+        config_file: Path,
+    ) -> None:
+        """forge-agent not being installed is a valid gateway-only mode, not a failure."""
+        app = FastAPI(lifespan=lifespan)
+
+        with (
+            patch.dict("os.environ", {"FORGE_CONFIG_PATH": str(config_file)}),
+            patch("forge_config.load_config", return_value=mock_config),
+            patch("forge_config.ConfigWatcher", return_value=mock_watcher),
+            patch("forge_agent.ForgeAgent", side_effect=ImportError("no module")),
+        ):
+            async with lifespan(app):
+                assert health._components.get("agent") == "unavailable"
+
+
+# ---------------------------------------------------------------------------
+# 9. Version is populated from config metadata
+# ---------------------------------------------------------------------------
+
+
+class TestVersionReportedFromConfigMetadata:
+    """Verify health.set_version() is driven by config.metadata.version."""
+
+    async def test_version_set_from_config_metadata(
+        self,
+        mock_watcher: MagicMock,
+        config_file: Path,
+    ) -> None:
+        """The lifespan must propagate config.metadata.version into health state."""
+        app = FastAPI(lifespan=lifespan)
+
+        local_config = MagicMock()
+        local_config.metadata.name = "test-forge"
+        local_config.metadata.version = "3.4.5"
+        local_config.security.api_keys = None
+
+        with (
+            patch.dict("os.environ", {"FORGE_CONFIG_PATH": str(config_file)}),
+            patch("forge_config.load_config", return_value=local_config),
+            patch("forge_config.ConfigWatcher", return_value=mock_watcher),
+        ):
+            async with lifespan(app):
+                assert health._version == "3.4.5"
+
+    async def test_readiness_endpoint_reports_version_from_config(
+        self,
+        mock_watcher: MagicMock,
+        config_file: Path,
+    ) -> None:
+        """The public /health/ready endpoint must report the configured version."""
+        app = FastAPI(lifespan=lifespan)
+        app.include_router(health.router)
+
+        local_config = MagicMock()
+        local_config.metadata.name = "test-forge"
+        local_config.metadata.version = "3.4.5"
+        local_config.security.api_keys = None
+
+        with (
+            patch.dict("os.environ", {"FORGE_CONFIG_PATH": str(config_file)}),
+            patch("forge_config.load_config", return_value=local_config),
+            patch("forge_config.ConfigWatcher", return_value=mock_watcher),
+        ):
+            async with lifespan(app):
+                client = TestClient(app)
+                response = client.get("/health/ready")
+                assert response.json()["version"] == "3.4.5"
