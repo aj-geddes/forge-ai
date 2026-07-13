@@ -1472,9 +1472,15 @@ class TestSpaFallbackPathTraversalIntegration:
 
         assert "do-not-serve-me" not in resp.text
 
-    def test_unknown_path_returns_404(
+    def test_unreserved_unknown_path_serves_index_as_spa_route(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """A path with no matching static file and no reserved (API/mount)
+        first segment is treated as a client-side React Router route --
+        including ones the server has never heard of -- and gets
+        index.html, exactly like any other SPA route. The React app is
+        responsible for rendering its own not-found UI for genuinely bogus
+        paths; the server no longer needs a hand-maintained allowlist."""
         static_dir = tmp_path / "static"
         static_dir.mkdir()
         app = self._build_app_with_static_dir(static_dir, monkeypatch)
@@ -1482,7 +1488,8 @@ class TestSpaFallbackPathTraversalIntegration:
 
         resp = client.get("/this-does-not-exist-anywhere")
 
-        assert resp.status_code == 404
+        assert resp.status_code == 200
+        assert "SPA shell" in resp.text
 
     def test_known_spa_route_serves_index(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1496,6 +1503,71 @@ class TestSpaFallbackPathTraversalIntegration:
 
         assert resp.status_code == 200
         assert "SPA shell" in resp.text
+
+    @pytest.mark.parametrize(
+        "route",
+        [
+            "",
+            "config",
+            "tools",
+            "chat",
+            "peers",
+            "security",
+            "guide",
+            "login",
+            "api-keys",
+        ],
+    )
+    def test_every_sidebar_route_serves_index_on_hard_load(
+        self, route: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Regression test for the /api-keys 404 bug: every route in the
+        sidebar nav (packages/forge-ui/src/App.tsx) must serve index.html
+        on a hard GET (refresh / deep link), not just when reached via
+        client-side navigation from an already-loaded SPA."""
+        static_dir = tmp_path / "static"
+        static_dir.mkdir()
+        app = self._build_app_with_static_dir(static_dir, monkeypatch)
+        client = TestClient(app)
+
+        resp = client.get(f"/{route}")
+
+        assert resp.status_code == 200
+        assert "SPA shell" in resp.text
+
+    def test_future_unregistered_client_route_serves_index(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Proves the fix is drift-proof: a brand-new React Router route
+        added to the SPA with no corresponding server-side change still
+        serves index.html on hard load."""
+        static_dir = tmp_path / "static"
+        static_dir.mkdir()
+        app = self._build_app_with_static_dir(static_dir, monkeypatch)
+        client = TestClient(app)
+
+        resp = client.get("/some-future-page")
+
+        assert resp.status_code == 200
+        assert "SPA shell" in resp.text
+
+    def test_unknown_path_under_reserved_api_prefix_stays_json_404(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A path whose first segment is a real API prefix (here /v1) but
+        that doesn't match any registered route is a genuine API 404 and
+        must stay JSON -- it must NOT be swallowed into index.html just
+        because it fell through to the SPA catch-all."""
+        static_dir = tmp_path / "static"
+        static_dir.mkdir()
+        app = self._build_app_with_static_dir(static_dir, monkeypatch)
+        client = TestClient(app)
+
+        resp = client.get("/v1/does-not-exist")
+
+        assert resp.status_code == 404
+        assert resp.json() == {"detail": "Not Found"}
+        assert "SPA shell" not in resp.text
 
 
 # ---------------------------------------------------------------------------

@@ -859,6 +859,33 @@ def _safe_static_path(static_dir: Path, requested_path: str) -> Path | None:
     return candidate
 
 
+def _reserved_top_level_segments(app: FastAPI) -> frozenset[str]:
+    """Derive the set of URL path segments already claimed by real API
+    routes and mounts (``/v1/...``, ``/health/...``, ``/metrics``,
+    ``/a2a/...``, ``/mcp``, ``/assets/...``, ``/auth/...``, etc.) from the
+    routes actually registered on *app*.
+
+    Used by :func:`create_app`'s SPA catch-all to tell "genuinely unknown
+    API path under a real API prefix" (must stay a JSON 404) apart from
+    "client-side React Router route" (must serve ``index.html``) without a
+    hand-maintained allowlist that silently drifts out of sync every time a
+    new API route -- or a new React route -- is added.
+
+    Must be called after every API router and mount is registered but
+    *before* the catch-all ``/{path:path}`` route itself is added, so the
+    catch-all's own path never pollutes the set.
+    """
+    segments: set[str] = set()
+    for route in app.routes:
+        path = getattr(route, "path", None)
+        if not path:
+            continue
+        first_segment = path.strip("/").split("/", 1)[0]
+        if first_segment:
+            segments.add(first_segment)
+    return frozenset(segments)
+
+
 def create_app() -> FastAPI:
     """Create the FastAPI application."""
     app = FastAPI(
@@ -923,24 +950,41 @@ def create_app() -> FastAPI:
         # SPA catch-all: serve index.html for client-side routes
         spa_index = static_dir / "index.html"
 
-        # Known SPA client-side routes (React Router paths)
-        spa_routes = {"", "config", "tools", "chat", "peers", "security", "guide", "login"}
+        # Top-level path segments already claimed by real API routes and
+        # mounts (v1, health, metrics, a2a, mcp, assets, auth, ...),
+        # derived from the app's own registered routes so this can never
+        # drift out of sync with the actual API surface -- unlike a
+        # hand-maintained allowlist of client routes.
+        reserved_segments = _reserved_top_level_segments(app)
 
         @app.get("/{path:path}", response_model=None)
         async def spa_fallback(request: Request, path: str) -> FileResponse | JSONResponse:
-            """Serve index.html for SPA client-side routes, static files, or 404."""
+            """Serve index.html for SPA client-side routes, static files, or 404.
+
+            Any GET that isn't a real static file and whose first path
+            segment isn't a reserved API prefix (see
+            ``_reserved_top_level_segments``) is treated as a client-side
+            React Router route -- including routes added to the SPA after
+            this file was last touched -- and gets ``index.html``, same as
+            any standard SPA server. A first segment that IS a reserved API
+            prefix but still reached this catch-all is a genuine API 404
+            and stays JSON.
+            """
             # Serve actual static files if they exist and stay within static_dir
             static_file = _safe_static_path(static_dir, path)
             if static_file is not None:
                 return FileResponse(str(static_file))
-            # Serve index.html for known SPA routes (no-cache so deploys take effect)
-            if path in spa_routes:
-                return FileResponse(
-                    str(spa_index),
-                    headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
-                )
-            # Everything else is a 404
-            return JSONResponse({"detail": "Not Found"}, status_code=404)
+
+            first_segment = path.split("/", 1)[0]
+            if first_segment in reserved_segments:
+                return JSONResponse({"detail": "Not Found"}, status_code=404)
+
+            # Client-side route (known or future): serve the SPA shell
+            # (no-cache so deploys take effect immediately).
+            return FileResponse(
+                str(spa_index),
+                headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+            )
 
         logger.info("Serving UI from %s", static_dir)
     else:
