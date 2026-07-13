@@ -1,0 +1,205 @@
+# SPIRE (SPIFFE Runtime Environment) production values for the hvs-k8s cluster.
+#
+# Chart:   spiffe/spire  (https://spiffe.github.io/helm-charts-hardened/)
+# Pinned:  spire-crds  0.5.0
+#          spire       0.29.0   (app version 1.14.5)
+#
+# Install:
+#   helm repo add spiffe https://spiffe.github.io/helm-charts-hardened/
+#   helm repo update spiffe
+#   helm upgrade --install -n spire-server spire-crds spiffe/spire-crds \
+#     --version 0.5.0 --create-namespace
+#   helm upgrade --install -n spire-server spire spiffe/spire \
+#     --version 0.29.0 -f deploy/cluster/spire/values-spire.yaml
+#
+# This deploys:
+#   - spire-server   (StatefulSet, 1 replica, SQLite datastore on a Longhorn PVC) -> ns spire-server
+#   - spire-agent    (DaemonSet, one pod per node)                                 -> ns spire-system
+#   - spiffe-csi-driver (DaemonSet, one pod per node)                              -> ns spire-system
+#   - spire-controller-manager (sidecar in the spire-server pod) reconciling the
+#     ClusterSPIFFEID custom resources declared below into SPIRE registration entries.
+#
+# Explicitly NOT deployed (kept out of scope / minimal footprint on a shared cluster):
+#   - spiffe-oidc-discovery-provider (OIDC federation -- not needed for AgentWeave's
+#     X.509-SVID + Workload API usage; would also require an ingress controller)
+#   - tornjak-frontend, SPIKE keeper/nexus/pilot (admin UI / secrets components, unused)
+
+global:
+  openshift: false
+
+  spire:
+    trustDomain: hvslocal
+    clusterName: hvs-k8s
+
+    recommendations:
+      # Turns on hardened production defaults: Pod Security Standards labels on the
+      # spire namespaces, hardened pod/container securityContexts, priorityClassName,
+      # and strictMode (fails the install if trustDomain/clusterName are left at the
+      # chart's insecure example.org/example-cluster defaults).
+      enabled: true
+
+    namespaces:
+      # Creates the spire-server and spire-system namespaces (names below) so the
+      # server, agent, and CSI driver land in the chart's conventional layout instead
+      # of colliding with the release namespace.
+      create: true
+      system:
+        name: spire-system
+      server:
+        name: spire-server
+
+    caSubject:
+      country: US
+      organization: hvslocal
+      commonName: hvslocal
+
+    persistence:
+      # Cluster default StorageClass; pinned explicitly for reproducibility. Longhorn
+      # is replicated (survives single-node loss) which is why it's used for the
+      # SPIRE server's SQLite datastore instead of an ephemeral/hostPath volume.
+      storageClass: longhorn
+
+# ---------------------------------------------------------------------------
+# spire-server
+# ---------------------------------------------------------------------------
+spire-server:
+  enabled: true
+  kind: statefulset
+  replicaCount: 1
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+  persistence:
+    type: pvc
+    size: 1Gi
+    accessMode: ReadWriteOnce
+    storageClass: longhorn
+
+  dataStore:
+    sql:
+      databaseType: sqlite3
+      # Default file path (/run/spire/data/datastore.sqlite3) lives on the PVC above.
+
+  # PSAT (Projected Service Account Token) node attestation: agents prove node
+  # identity to the server using their kubelet-issued, audience-bound token. This is
+  # the standard, credential-free node attestor for in-cluster SPIRE on Kubernetes.
+  nodeAttestor:
+    k8sPSAT:
+      enabled: true
+      audience: ["spire-server"]
+
+  controllerManager:
+    enabled: true
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        cpu: 200m
+        memory: 128Mi
+
+    identities:
+      clusterSPIFFEIDs:
+        # Disable the chart's catch-all identity. Its default namespaceSelector/
+        # podSelector are both empty (`{}`), which matches every pod in every
+        # namespace on the cluster and would silently start minting SPIFFE IDs
+        # (spiffe://hvslocal/ns/<ns>/sa/<sa>) for every workload in hvs-k8s the
+        # moment it requested the CSI socket. On a shared cluster we only want
+        # entries for workloads we've deliberately reviewed and registered, so this
+        # is disabled in favor of the explicit "forge-ai" entry below.
+        default:
+          enabled: false
+
+        # Forge AI (packages/forge-security -> AgentWeave SPIFFEIdentityProvider).
+        # Scoped narrowly to the forge-ai-agent Deployment's own pods: namespace
+        # dev-aj-geddes AND the exact pod labels Helm sets on that Deployment's pod
+        # template (app.kubernetes.io/instance=forge-ai, app.kubernetes.io/name=forge).
+        # Other workloads in dev-aj-geddes (apex-*, codemind, discord-mcp-server,
+        # etc.) also run as the default ServiceAccount but do NOT match this
+        # podSelector, so they get no entry and are unaffected.
+        forge-ai:
+          enabled: true
+          spiffeIDTemplate: "spiffe://{{ .TrustDomain }}/ns/{{ .PodMeta.Namespace }}/sa/{{ .PodSpec.ServiceAccountName }}"
+          namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: dev-aj-geddes
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/instance: forge-ai
+              app.kubernetes.io/name: forge
+          fallback: false
+
+# ---------------------------------------------------------------------------
+# spire-agent (DaemonSet, one per node: hvs1-k8s, hvs2-k8s, hvs3-k8s)
+# ---------------------------------------------------------------------------
+spire-agent:
+  enabled: true
+
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
+
+  nodeAttestor:
+    k8sPSAT:
+      enabled: true
+
+  workloadAttestors:
+    k8s:
+      enabled: true
+      verification:
+        # "skip" avoids requiring kubelet serving-cert verification wiring on a
+        # cluster we don't control kubelet cert issuance for; workload attestation
+        # itself (matching pod -> selectors) is unaffected. Can be tightened later
+        # to hostCert/apiServerCA if kubelet serving certs are verified elsewhere.
+        type: skip
+
+  # Socket the agent listens on (host path, bind-mounted into the CSI driver's
+  # DaemonSet pod and re-exposed to workloads via the CSI volume -- workloads never
+  # get direct hostPath access to this).
+  socketPath: /run/spire/agent-sockets/spire-agent.sock
+
+# ---------------------------------------------------------------------------
+# SPIFFE CSI driver (DaemonSet, one per node) -- how workloads reach the agent
+# ---------------------------------------------------------------------------
+spiffe-csi-driver:
+  enabled: true
+
+  resources:
+    requests:
+      cpu: 50m
+      memory: 32Mi
+    limits:
+      cpu: 100m
+      memory: 64Mi
+
+  agentSocketPath: /run/spire/agent-sockets/spire-agent.sock
+
+# ---------------------------------------------------------------------------
+# Explicitly disabled -- not needed for AgentWeave's X.509-SVID + OPA usage,
+# kept off to minimize footprint/attack surface on a shared cluster.
+# ---------------------------------------------------------------------------
+spiffe-oidc-discovery-provider:
+  enabled: false
+
+tornjak-frontend:
+  enabled: false
+
+spike-keeper:
+  enabled: false
+spike-nexus:
+  enabled: false
+spike-pilot:
+  enabled: false
+
+upstream:
+  enabled: false

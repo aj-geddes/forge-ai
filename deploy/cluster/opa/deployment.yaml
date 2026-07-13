@@ -1,0 +1,95 @@
+# OPA serving the REST Data API for AgentWeave (agentweave/authz/opa.py -> OPAProvider).
+#
+# The starter policy (policy/agentweave_authz.rego) is loaded from the
+# "opa-policy-agentweave-authz" ConfigMap (see deploy.sh -- generated via
+# `kubectl create configmap --from-file` so the ConfigMap never drifts from the
+# checked-in .rego source of truth).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: opa
+  namespace: opa
+  labels:
+    app.kubernetes.io/name: opa
+    app.kubernetes.io/component: policy-engine
+spec:
+  replicas: 1
+  revisionHistoryLimit: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: opa
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: opa
+        app.kubernetes.io/component: policy-engine
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8181"
+        prometheus.io/path: "/metrics"
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: opa
+          image: openpolicyagent/opa:1.18.2-static
+          imagePullPolicy: IfNotPresent
+          args:
+            - "run"
+            - "--server"
+            - "--addr=0.0.0.0:8181"
+            - "--log-level=info"
+            - "--log-format=json"
+            - "--set=decision_logs.console=true"
+            - "/policy/agentweave_authz.rego"
+          ports:
+            - name: http
+              containerPort: 8181
+              protocol: TCP
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 128Mi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          volumeMounts:
+            - name: policy
+              mountPath: /policy
+              readOnly: true
+      volumes:
+        - name: policy
+          configMap:
+            name: opa-policy-agentweave-authz
