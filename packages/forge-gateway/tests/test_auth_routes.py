@@ -97,9 +97,14 @@ def _wire_oidc(
     jwks_unreachable: bool = False,
     roles_bindings: list[RoleBinding] | None = None,
     nonce_holder: dict[str, str] | None = None,
+    email_verified: bool | None = True,
 ) -> tuple[httpx.AsyncClient, bytes, bytes]:
     """Wire the auth subsystem for the OIDC browser flow against a mocked
-    Dex (token endpoint + JWKS) via httpx.MockTransport."""
+    Dex (token endpoint + JWKS) via httpx.MockTransport.
+
+    *email_verified* controls the minted id_token's ``email_verified``
+    claim: ``True``/``False`` sets it explicitly, ``None`` omits the claim
+    entirely (simulating a connector that never sends it)."""
 
     def _handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/keys"):
@@ -111,20 +116,21 @@ def _wire_oidc(
                 return httpx.Response(token_status, json=token_response)
             nonce = nonce_holder.get("nonce", "") if nonce_holder else ""
             now = int(time.time())
-            id_token = keypair.sign(
-                {
-                    "iss": ISSUER,
-                    "aud": CLIENT_ID,
-                    "sub": "dex-sub-1",
-                    "email": "ageddes75@gmail.com",
-                    "name": "AJ Geddes",
-                    "preferred_username": "aj-geddes",
-                    "groups": ["hvs-platform:admins"],
-                    "nonce": nonce,
-                    "iat": now,
-                    "exp": now + 3600,
-                }
-            )
+            claims: dict[str, Any] = {
+                "iss": ISSUER,
+                "aud": CLIENT_ID,
+                "sub": "dex-sub-1",
+                "email": "ageddes75@gmail.com",
+                "name": "AJ Geddes",
+                "preferred_username": "aj-geddes",
+                "groups": ["hvs-platform:admins"],
+                "nonce": nonce,
+                "iat": now,
+                "exp": now + 3600,
+            }
+            if email_verified is not None:
+                claims["email_verified"] = email_verified
+            id_token = keypair.sign(claims)
             return httpx.Response(200, json={"id_token": id_token, "token_type": "Bearer"})
         return httpx.Response(404)
 
@@ -371,6 +377,73 @@ class TestCallback:
         assert resp.json()["error"] == "forbidden"
         assert "forge_session=" not in resp.headers.get("set-cookie", "")
 
+    async def test_callback_with_email_verified_false_returns_403_and_sets_no_cookie(
+        self,
+    ) -> None:
+        """Security-review finding #2 (HIGH): the only configured binding
+        is email-based, so an id_token with email_verified=false must not
+        be granted the role -- and with zero roles, the callback denies
+        login the same way an unbound principal would."""
+        keypair = _RSAKeyPair("kid-1")
+        nonce_holder: dict[str, str] = {}
+        _wire_oidc(keypair=keypair, nonce_holder=nonce_holder, email_verified=False)
+        app = _make_app()
+
+        async with await _client(app) as ac:
+            state, nonce = await _do_login(ac)
+            nonce_holder["nonce"] = nonce
+
+            resp = await ac.get(f"/auth/callback?code=abc123&state={state}", follow_redirects=False)
+
+        assert resp.status_code == 403
+        assert resp.json()["error"] == "forbidden"
+        assert "forge_session=" not in resp.headers.get("set-cookie", "")
+
+    async def test_callback_with_email_verified_absent_returns_403_and_logs_warning(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A connector that never sends email_verified must not silently
+        grant the email-bound role either -- and it must log a WARNING so
+        a first-login investigation can find the cause quickly."""
+        import logging
+
+        keypair = _RSAKeyPair("kid-1")
+        nonce_holder: dict[str, str] = {}
+        _wire_oidc(keypair=keypair, nonce_holder=nonce_holder, email_verified=None)
+        app = _make_app()
+
+        with caplog.at_level(logging.WARNING, logger="forge.security.oidc.authorizer"):
+            async with await _client(app) as ac:
+                state, nonce = await _do_login(ac)
+                nonce_holder["nonce"] = nonce
+
+                resp = await ac.get(
+                    f"/auth/callback?code=abc123&state={state}", follow_redirects=False
+                )
+
+        assert resp.status_code == 403
+        assert resp.json()["error"] == "forbidden"
+        assert any("email_verified" in record.getMessage() for record in caplog.records)
+
+    async def test_callback_with_email_verified_true_still_grants_admin(self) -> None:
+        """Do-not-brick-bootstrap check: when Dex does send
+        email_verified=true, login succeeds exactly as before."""
+        keypair = _RSAKeyPair("kid-1")
+        nonce_holder: dict[str, str] = {}
+        _wire_oidc(keypair=keypair, nonce_holder=nonce_holder, email_verified=True)
+        app = _make_app()
+
+        async with await _client(app) as ac:
+            state, nonce = await _do_login(ac)
+            nonce_holder["nonce"] = nonce
+
+            resp = await ac.get(f"/auth/callback?code=abc123&state={state}", follow_redirects=False)
+
+        assert resp.status_code == 302
+        set_cookie_headers = resp.headers.get_list("set-cookie")
+        assert any(c.startswith("forge_session=") for c in set_cookie_headers)
+
 
 # ---------------------------------------------------------------------------
 # POST /auth/logout
@@ -408,6 +481,7 @@ class TestAuthMe:
             name="AJ Geddes",
             preferred_username="aj-geddes",
             groups=["hvs-platform:admins"],
+            email_verified=True,
         )
 
         app = _make_app()
@@ -454,6 +528,7 @@ class TestSessionCookieAuthorizesPerRole:
             name="AJ Geddes",
             preferred_username="aj-geddes",
             groups=[],
+            email_verified=True,
         )
 
         mock_agent = AsyncMock()

@@ -87,6 +87,7 @@ class TestSessionCookiePath:
             name="AJ Geddes",
             preferred_username="aj-geddes",
             groups=[],
+            email_verified=True,
         )
 
         principal = await _resolve(session_cookie=token, session_codec=codec)
@@ -113,6 +114,7 @@ class TestSessionCookiePath:
             name=None,
             preferred_username=None,
             groups=[],
+            email_verified=True,
         )
 
         principal = await _resolve(
@@ -122,6 +124,60 @@ class TestSessionCookiePath:
         )
 
         assert principal.sub == "sub-cookie"
+
+
+class TestSessionCookieEmailVerifiedGating:
+    """Security-review finding #2 (HIGH): the session-cookie path
+    re-derives roles from claims snapshotted in the cookie at login time
+    (Authorizer.roles_for is claims-driven on every request, not a
+    one-time decision) -- so the stored email_verified must gate the
+    email-derived role here too, not just at /auth/callback."""
+
+    async def test_session_cookie_with_email_verified_true_grants_email_role(self):
+        codec = _make_session_codec()
+        token, _sid = codec.encode(
+            sub="sub-123",
+            email="ageddes75@gmail.com",
+            name=None,
+            preferred_username=None,
+            groups=[],
+            email_verified=True,
+        )
+
+        principal = await _resolve(session_cookie=token, session_codec=codec)
+
+        assert "admin" in principal.roles
+
+    async def test_session_cookie_with_email_verified_false_does_not_grant_email_role(self):
+        codec = _make_session_codec()
+        token, _sid = codec.encode(
+            sub="sub-123",
+            email="ageddes75@gmail.com",
+            name=None,
+            preferred_username=None,
+            groups=[],
+            email_verified=False,
+        )
+
+        principal = await _resolve(session_cookie=token, session_codec=codec)
+
+        assert principal.roles == []
+
+    async def test_session_cookie_with_email_verified_omitted_does_not_grant_email_role(self):
+        """encode()'s email_verified defaults to False -- an old-shaped or
+        naively-minted cookie must not silently grant an email role."""
+        codec = _make_session_codec()
+        token, _sid = codec.encode(
+            sub="sub-123",
+            email="ageddes75@gmail.com",
+            name=None,
+            preferred_username=None,
+            groups=[],
+        )
+
+        principal = await _resolve(session_cookie=token, session_codec=codec)
+
+        assert principal.roles == []
 
 
 class TestServiceTokenPath:
@@ -162,6 +218,7 @@ class TestOIDCBearerPath:
                 "aud": AUDIENCE,
                 "sub": "dex-sub-1",
                 "email": "ageddes75@gmail.com",
+                "email_verified": True,
                 "exp": now + 3600,
                 "iat": now,
             }
@@ -197,6 +254,79 @@ class TestOIDCBearerPath:
 
         assert exc.value.status == 401
         assert exc.value.code == "invalid_credential_format"
+
+
+class TestOIDCBearerEmailVerifiedGating:
+    """Security-review finding #2 (HIGH): an id_token/bearer JWS's
+    email_verified claim gates whether its email claim may match an
+    email-based role binding."""
+
+    def _sign_claims(self, kp: RSAKeyPair, **overrides: object) -> str:
+        now = int(time.time())
+        claims: dict[str, object] = {
+            "iss": ISSUER,
+            "aud": AUDIENCE,
+            "sub": "dex-sub-1",
+            "email": "ageddes75@gmail.com",
+            "exp": now + 3600,
+            "iat": now,
+        }
+        claims.update(overrides)
+        return kp.sign(claims)
+
+    async def test_email_verified_true_grants_email_role(self):
+        kp = RSAKeyPair.generate("kid-1")
+        oidc_verifier = _make_oidc_verifier(kp)
+        token = self._sign_claims(kp, email_verified=True)
+
+        principal = await _resolve(
+            authorization_header=f"Bearer {token}", oidc_verifier=oidc_verifier
+        )
+
+        assert "admin" in principal.roles
+
+    async def test_email_verified_false_does_not_grant_email_role(self):
+        kp = RSAKeyPair.generate("kid-1")
+        oidc_verifier = _make_oidc_verifier(kp)
+        token = self._sign_claims(kp, email_verified=False)
+
+        principal = await _resolve(
+            authorization_header=f"Bearer {token}", oidc_verifier=oidc_verifier
+        )
+
+        assert principal.roles == []
+
+    async def test_email_verified_absent_does_not_grant_email_role(self):
+        kp = RSAKeyPair.generate("kid-1")
+        oidc_verifier = _make_oidc_verifier(kp)
+        token = self._sign_claims(kp)  # no email_verified claim at all
+
+        principal = await _resolve(
+            authorization_header=f"Bearer {token}", oidc_verifier=oidc_verifier
+        )
+
+        assert principal.roles == []
+
+    async def test_groups_binding_unaffected_by_missing_email_verified(self):
+        kp = RSAKeyPair.generate("kid-1")
+        authorizer = Authorizer(
+            AuthorizationConfig(
+                bindings=[
+                    RoleBinding(role="admin", emails=["ageddes75@gmail.com"]),
+                    RoleBinding(role="user", groups=["hvs-platform:engineers"]),
+                ],
+            )
+        )
+        oidc_verifier = _make_oidc_verifier(kp)
+        token = self._sign_claims(kp, groups=["hvs-platform:engineers"])  # no email_verified
+
+        principal = await _resolve(
+            authorization_header=f"Bearer {token}",
+            oidc_verifier=oidc_verifier,
+            authorizer=authorizer,
+        )
+
+        assert principal.roles == ["user"]
 
 
 class TestNoFallthrough:

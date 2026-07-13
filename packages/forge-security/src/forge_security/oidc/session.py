@@ -33,6 +33,14 @@ class SessionData:
     name: str | None
     preferred_username: str | None
     groups: list[str] = field(default_factory=list)
+    # Security-review finding #2 (HIGH): whether the ID token's
+    # email_verified claim was True at login time (/auth/callback). The
+    # session-cookie authorization path re-derives roles from this stored
+    # snapshot on every request (Authorizer.roles_for is claims-driven, not
+    # a one-time decision) -- see resolver.py's session-cookie branch.
+    # Defaults False (fail-safe) for cookies minted before this field
+    # existed.
+    email_verified: bool = False
     iat: int = 0
     exp: int = 0
     sid: str = ""
@@ -86,8 +94,16 @@ class SessionCodec:
         name: str | None,
         preferred_username: str | None,
         groups: list[str],
+        email_verified: bool = False,
     ) -> tuple[str, str]:
-        """Encrypt a new session and return ``(cookie_value, sid)``."""
+        """Encrypt a new session and return ``(cookie_value, sid)``.
+
+        *email_verified* is the ID token's ``email_verified`` claim at
+        login time (ADR-0001 finding #2) -- it gates whether *email* may
+        later be used to match an email-based role binding. Defaults
+        ``False`` (fail-safe): callers must explicitly assert a verified
+        email.
+        """
         now = int(self._clock())
         sid = str(uuid.uuid4())
         payload = {
@@ -97,6 +113,7 @@ class SessionCodec:
             "name": name,
             "preferred_username": preferred_username,
             "groups": groups,
+            "email_verified": email_verified,
             "iat": now,
             "exp": now + self._lifetime_seconds,
             "sid": sid,
@@ -133,6 +150,7 @@ class SessionCodec:
                 name=payload.get("name"),
                 preferred_username=payload.get("preferred_username"),
                 groups=list(payload.get("groups", [])),
+                email_verified=bool(payload.get("email_verified", False)),
                 iat=payload["iat"],
                 exp=payload["exp"],
                 sid=payload.get("sid", ""),

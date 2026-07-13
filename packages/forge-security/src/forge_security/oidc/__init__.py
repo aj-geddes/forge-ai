@@ -28,7 +28,7 @@ from forge_security.oidc.discovery import (
 from forge_security.oidc.errors import AuthError
 from forge_security.oidc.jwks import JwksCache
 from forge_security.oidc.principal import Principal, PrincipalKind
-from forge_security.oidc.resolver import resolve_principal
+from forge_security.oidc.resolver import is_email_verified_claim, resolve_principal
 from forge_security.oidc.service_tokens import (
     SERVICE_TOKEN_PREFIX,
     ServiceTokenPrincipalInfo,
@@ -54,6 +54,7 @@ __all__ = [
     "SessionCodec",
     "SessionData",
     "fetch_discovery_document",
+    "is_email_verified_claim",
     "resolve_endpoints",
     "resolve_principal",
 ]

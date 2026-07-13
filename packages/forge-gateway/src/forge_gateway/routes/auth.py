@@ -43,7 +43,7 @@ import httpx
 from cryptography.fernet import Fernet, InvalidToken
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, RedirectResponse
-from forge_security.oidc import AuthError
+from forge_security.oidc import AuthError, is_email_verified_claim
 
 from forge_gateway import rate_limit, security
 
@@ -302,8 +302,14 @@ async def callback(request: Request) -> RedirectResponse | JSONResponse:
     name = claims.get("name")
     preferred_username = claims.get("preferred_username")
     groups = list(claims.get("groups", []))
+    # Security-review finding #2 (HIGH): only trust `email` for role
+    # binding when Dex asserts it verified. Missing/false email_verified
+    # disables the email-derived role(s) only -- groups/sub bindings still
+    # work (see Authorizer.roles_for), so this does not brick admin
+    # bootstrap once the Dex github connector does send email_verified=true.
+    email_verified = is_email_verified_claim(claims)
 
-    roles = authorizer.roles_for(groups=groups, email=email, sub=sub)
+    roles = authorizer.roles_for(groups=groups, email=email, email_verified=email_verified, sub=sub)
     if not roles:
         forbidden_response = JSONResponse({"error": "forbidden"}, status_code=403)
         _clear_cookie(forbidden_response, _TX_COOKIE_NAME, path=_TX_COOKIE_PATH)
@@ -315,6 +321,7 @@ async def callback(request: Request) -> RedirectResponse | JSONResponse:
         name=name,
         preferred_username=preferred_username,
         groups=groups,
+        email_verified=email_verified,
     )
     csrf_token = secrets.token_urlsafe(32)
 

@@ -21,6 +21,8 @@ request; this module stays framework-agnostic.
 
 from __future__ import annotations
 
+from typing import Any
+
 from forge_security.oidc.authorizer import Authorizer
 from forge_security.oidc.errors import AuthError
 from forge_security.oidc.principal import Principal
@@ -29,6 +31,26 @@ from forge_security.oidc.session import SessionCodec
 from forge_security.oidc.verifier import OIDCTokenVerifier
 
 _JWS_SEGMENT_COUNT = 3  # header.payload.signature
+
+
+def is_email_verified_claim(claims: dict[str, Any]) -> bool:
+    """True if a claims payload asserts ``email_verified`` (ADR-0001
+    finding #2, security review of commit 408a9b4).
+
+    Accepts the spec-correct JSON boolean ``True`` and, defensively, the
+    string ``"true"`` (case-insensitive) -- some identity providers have
+    historically encoded boolean claims as strings. Anything else
+    (missing, ``False``, ``"false"``, ``1``, ...) is treated as NOT
+    verified: this must fail safe, since it gates whether an
+    attacker-influenced ``email`` claim (e.g. a GitHub profile email) can
+    be used to match an email-based role binding.
+    """
+    value = claims.get("email_verified")
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() == "true"
+    return False
 
 
 async def resolve_principal(
@@ -56,7 +78,12 @@ async def resolve_principal(
     """
     if session_cookie:
         data = session_codec.decode(session_cookie)
-        roles = authorizer.roles_for(groups=data.groups, email=data.email, sub=data.sub)
+        roles = authorizer.roles_for(
+            groups=data.groups,
+            email=data.email,
+            email_verified=data.email_verified,
+            sub=data.sub,
+        )
         permissions = authorizer.permissions_for_roles(roles)
         return Principal(
             kind="user",
@@ -90,8 +117,11 @@ async def resolve_principal(
             claims = await oidc_verifier.verify(credential)
             groups = list(claims.get("groups", []))
             email = claims.get("email")
+            email_verified = is_email_verified_claim(claims)
             sub = claims["sub"]
-            roles = authorizer.roles_for(groups=groups, email=email, sub=sub)
+            roles = authorizer.roles_for(
+                groups=groups, email=email, email_verified=email_verified, sub=sub
+            )
             permissions = authorizer.permissions_for_roles(roles)
             return Principal(
                 kind="user",

@@ -26,6 +26,8 @@ from forge_config.schema import (
     AgentsConfig,
     AuthorizationConfig,
     ForgeConfig,
+    LiteLLMConfig,
+    LLMConfig,
     PeerAgent,
     ServiceToken,
 )
@@ -826,6 +828,166 @@ class TestRedactSecrets:
         admin._redact_secrets(data)
         assert data["name"] == "test"
         assert data["value"] == 42
+
+    def test_redacts_plaintext_api_key_from_env_substitution(self) -> None:
+        """CRITICAL (finding #1): forge_config.loader substitutes ${ENV}
+        placeholders with their literal value BEFORE Pydantic validation, so
+        an ``api_key`` that *should* be a SecretRef can arrive as an
+        ordinary plaintext string inside the permissive
+        ``LiteLLMConfig.model_list: list[dict[str, Any]]`` field. The
+        structural SecretRef check must not be the only redaction path."""
+        data: dict[str, Any] = {
+            "model_list": [
+                {
+                    "model_name": "claude-sonnet",
+                    "litellm_params": {
+                        "model": "anthropic/claude-3-5-sonnet",
+                        "api_key": "sk-ant-SECRET-CANARY-9999",
+                        "api_base": "https://api.anthropic.com",
+                    },
+                }
+            ]
+        }
+        admin._redact_secrets(data)
+        assert data["model_list"][0]["litellm_params"]["api_key"] == "***REDACTED***"
+
+    def test_still_redacts_secretref_alongside_plaintext_redaction(self) -> None:
+        """The structural SecretRef redaction must keep working once
+        key-name-based redaction is added -- both mechanisms are required."""
+        data: dict[str, Any] = {
+            "token": {"source": "env", "name": "MY_SECRET", "key": None},
+            "litellm_params": {"api_key": "sk-ant-plain-text-value"},
+        }
+        admin._redact_secrets(data)
+        assert data["token"]["name"] == "***REDACTED***"
+        assert data["litellm_params"]["api_key"] == "***REDACTED***"
+
+    def test_redacts_plaintext_secret_nested_anywhere(self) -> None:
+        """A plaintext token/password/secret must be redacted no matter how
+        deeply it is nested, and regardless of the dict key that contains
+        it (only the leaf key name matters)."""
+        data: dict[str, Any] = {
+            "a": {"b": {"c": [{"token": "raw-bearer-token-value"}]}},
+            "security": {"nested": {"password": "hunter2", "passwd": "hunter3"}},
+            "peer": {"auth": {"secret": "shared-peer-secret"}},
+            "oidc": {"client_secret": "dex-client-secret-value"},
+            "vault": {"private_key": "-----BEGIN PRIVATE KEY-----..."},
+            "headers": {"authorization": "Bearer raw-token-in-header"},
+        }
+        admin._redact_secrets(data)
+        assert data["a"]["b"]["c"][0]["token"] == "***REDACTED***"
+        assert data["security"]["nested"]["password"] == "***REDACTED***"
+        assert data["security"]["nested"]["passwd"] == "***REDACTED***"
+        assert data["peer"]["auth"]["secret"] == "***REDACTED***"
+        assert data["oidc"]["client_secret"] == "***REDACTED***"
+        assert data["vault"]["private_key"] == "***REDACTED***"
+        assert data["headers"]["authorization"] == "***REDACTED***"
+
+    def test_does_not_redact_non_sensitive_keys(self) -> None:
+        """Model names, hostnames, and other benign fields must survive
+        redaction unchanged -- over-redaction breaks the admin UI."""
+        data: dict[str, Any] = {
+            "model_name": "claude-sonnet",
+            "hostname": "api.anthropic.com",
+            "endpoint": "https://api.anthropic.com",
+            "token_id": "ci-deployer",  # a non-secret service-token label
+            "name": "forge-agent",
+        }
+        admin._redact_secrets(data)
+        assert data["model_name"] == "claude-sonnet"
+        assert data["hostname"] == "api.anthropic.com"
+        assert data["endpoint"] == "https://api.anthropic.com"
+        assert data["token_id"] == "ci-deployer"
+        assert data["name"] == "forge-agent"
+
+    def test_null_sensitive_value_is_left_as_none(self) -> None:
+        """An unset secret field (``None``) should stay ``None``, not become
+        the string ``"***REDACTED***"`` -- that would misrepresent an unset
+        credential as a redacted one."""
+        data: dict[str, Any] = {"api_key": None}
+        admin._redact_secrets(data)
+        assert data["api_key"] is None
+
+
+@pytest.mark.usefixtures("_wire_auth")
+class TestGetConfigRedactsPlaintextSecrets:
+    """End-to-end proof for finding #1: GET /v1/admin/config must not leak
+    a plaintext secret that arrived via ${ENV} substitution, and must not
+    mutate the live in-memory config while redacting the response."""
+
+    _CANARY = "sk-ant-SECRET-CANARY-9999"
+
+    def _config_with_plaintext_api_key(self) -> ForgeConfig:
+        return ForgeConfig(
+            llm=LLMConfig(
+                litellm=LiteLLMConfig(
+                    model_list=[
+                        {
+                            "model_name": "claude-sonnet",
+                            "litellm_params": {
+                                "model": "anthropic/claude-3-5-sonnet",
+                                "api_key": self._CANARY,
+                            },
+                        }
+                    ]
+                )
+            )
+        )
+
+    async def test_plaintext_api_key_is_redacted_in_response(
+        self,
+        async_client: httpx.AsyncClient,
+        auth_headers: dict[str, str],
+    ) -> None:
+        admin.set_state(
+            config=self._config_with_plaintext_api_key(),
+            config_path="/tmp/test-forge.yaml",  # noqa: S108
+            agent=None,
+        )
+
+        resp = await async_client.get("/v1/admin/config", headers=auth_headers)
+
+        assert resp.status_code == 200
+        body = resp.text
+        assert self._CANARY not in body
+        params = resp.json()["config"]["llm"]["litellm"]["model_list"][0]["litellm_params"]
+        assert params["api_key"] == "***REDACTED***"
+        # Non-sensitive sibling fields survive redaction.
+        assert params["model"] == "anthropic/claude-3-5-sonnet"
+
+        admin.set_state(config=None, config_path="", agent=None)
+
+    async def test_live_in_memory_config_is_not_mutated_by_redaction(
+        self,
+        async_client: httpx.AsyncClient,
+        auth_headers: dict[str, str],
+    ) -> None:
+        live_config = self._config_with_plaintext_api_key()
+        admin.set_state(config=live_config, config_path="/tmp/test-forge.yaml", agent=None)  # noqa: S108
+
+        resp = await async_client.get("/v1/admin/config", headers=auth_headers)
+        assert resp.status_code == 200
+
+        # The response is redacted...
+        assert (
+            resp.json()["config"]["llm"]["litellm"]["model_list"][0]["litellm_params"]["api_key"]
+            == "***REDACTED***"
+        )
+        # ...but the live config object handed to set_state still holds the
+        # real value -- redaction must operate on a serialized copy, never
+        # the live object (a second GET must still see the real secret to
+        # redact, proving it wasn't blanked in place).
+        assert live_config.llm.litellm.model_list[0]["litellm_params"]["api_key"] == self._CANARY
+
+        second_resp = await async_client.get("/v1/admin/config", headers=auth_headers)
+        assert (
+            second_resp.json()["config"]["llm"]["litellm"]["model_list"][0]["litellm_params"][
+                "api_key"
+            ]
+            == "***REDACTED***"
+        )
+
+        admin.set_state(config=None, config_path="", agent=None)
 
 
 # =========================================================================

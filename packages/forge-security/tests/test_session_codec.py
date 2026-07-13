@@ -60,6 +60,25 @@ class TestRoundtrip:
         assert data.groups == ["hvs-platform:admins"]
         assert data.sid == sid
 
+    def test_email_verified_defaults_to_false_when_not_passed_to_encode(self):
+        """Security-review finding #2: an omitted email_verified must
+        decode fail-safe as False, not silently grant email-derived
+        roles."""
+        codec = _make_codec()
+        token, _sid = _encode(codec)
+
+        data = codec.decode(token)
+
+        assert data.email_verified is False
+
+    def test_email_verified_true_roundtrips(self):
+        codec = _make_codec()
+        token, _sid = _encode(codec, email_verified=True)
+
+        data = codec.decode(token)
+
+        assert data.email_verified is True
+
     def test_session_blob_contains_no_tokens(self):
         """The cookie must never carry an access/refresh/id token -- only
         identity claims (ADR-0001 SS4.1)."""
