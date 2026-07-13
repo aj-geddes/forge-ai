@@ -439,11 +439,75 @@ class ServiceToken(BaseModel):
         return v
 
 
+USER_TOKEN_ID_PREFIX = "u_"
+
+# ADR-0002 SS7.2: the hard floor on a user-minted token's TTL. Not itself a
+# configurable knob -- only default_ttl_seconds and max_ttl_seconds are.
+_USER_TOKEN_MIN_TTL_SECONDS = 3600  # 1 hour
+
+
+class UserTokenConfig(BaseModel):
+    """Self-service, user-issued API keys (ADR-0002).
+
+    ``enabled`` defaults to ``False`` so a PVC-less deployment (local dev,
+    a pre-rollout pod) parses and runs unchanged -- this feature is
+    strictly opt-in and additive to the ADR-0001 static service-token
+    model. Persistence and lifecycle semantics live in
+    ``forge_security.oidc.user_tokens``; this block only carries the
+    switch and the TTL bounds enforced at mint time.
+    """
+
+    enabled: bool = False
+    store_path: str = "/app/data/user_tokens.json"
+    default_ttl_seconds: int = 2_592_000  # 30 days
+    max_ttl_seconds: int = 7_776_000  # 90 days
+
+    @field_validator("store_path")
+    @classmethod
+    def validate_store_path_absolute(cls, v: str) -> str:
+        if not v.startswith("/"):
+            msg = (
+                "security.service_tokens.user_tokens.store_path must be an "
+                f"absolute path, got {v!r}"
+            )
+            raise ValueError(msg)
+        return v
+
+    @model_validator(mode="after")
+    def validate_ttl_bounds(self) -> UserTokenConfig:
+        if not (_USER_TOKEN_MIN_TTL_SECONDS <= self.default_ttl_seconds <= self.max_ttl_seconds):
+            msg = (
+                "security.service_tokens.user_tokens.default_ttl_seconds "
+                f"({self.default_ttl_seconds}) must be between "
+                f"{_USER_TOKEN_MIN_TTL_SECONDS} (the 1-hour floor) and "
+                f"max_ttl_seconds ({self.max_ttl_seconds}), inclusive"
+            )
+            raise ValueError(msg)
+        return self
+
+
 class ServiceTokenConfig(BaseModel):
     """Machine-client credentials (MCP, A2A, CI)."""
 
     enabled: bool = False
     tokens: list[ServiceToken] = Field(default_factory=list)
+    user_tokens: UserTokenConfig = Field(default_factory=UserTokenConfig)
+
+    @model_validator(mode="after")
+    def validate_reserved_id_namespace(self) -> ServiceTokenConfig:
+        """The ``u_`` id prefix is reserved for dynamically-minted user
+        tokens (ADR-0002 SS7.1) -- a statically configured token cannot
+        claim it, so a future mint can never collide with a static entry."""
+        for token in self.tokens:
+            if token.id.startswith(USER_TOKEN_ID_PREFIX):
+                msg = (
+                    f"security.service_tokens.tokens id {token.id!r} uses the "
+                    f"{USER_TOKEN_ID_PREFIX!r} prefix, which is reserved for "
+                    "dynamically-minted user tokens (ADR-0002). Rename the "
+                    "static token id."
+                )
+                raise ValueError(msg)
+        return self
 
 
 class RoleBinding(BaseModel):
