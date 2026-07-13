@@ -155,8 +155,15 @@ forgeConfig:
     # email aj_geddes@yahoo.com. Dex's github connector sends no `groups`, so
     # sub is the robust identifier (unspoofable, survives email changes); the
     # verified email is kept as a readable secondary match.
+    # Dex's authorized-GitHub-user list is the outer gate (only those users can
+    # authenticate at all). Everyone Dex admits gets the `user` role and can use
+    # the product (chat + tools; API-key issuance once that ships). aj-geddes is
+    # the sole admin, bound explicitly by sub below. NOTE: default_role: user
+    # means every authenticated Dex user is a user -- that is only safe because
+    # login itself is gated (GitHub OAuth app org restriction + the private
+    # network). Do NOT combine this with an unrestricted Dex login.
     authorization:
-      default_role: null
+      default_role: user
       metrics_public: true
       bindings:
         - role: admin
