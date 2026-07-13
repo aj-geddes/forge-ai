@@ -86,6 +86,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import uvicorn
+from cryptography.hazmat.primitives import serialization
 from fastapi import FastAPI, HTTPException, Request
 from forge_security.workload import (
     WorkloadForbidden,
@@ -261,8 +262,12 @@ async def _reload_ssl_context_on_rotation(
     unique = uuid.uuid4().hex
     cert_path = Path(temp_dir.name) / f"cert-{unique}.pem"
     key_path = Path(temp_dir.name) / f"key-{unique}.pem"
-    cert_path.write_bytes(svid.cert_chain_bytes)
-    key_path.write_bytes(svid.private_key_bytes)
+    # The real spiffe.X509Svid (py-spiffe 0.2.4+) has no
+    # cert_chain_bytes/private_key_bytes attributes -- only cert_chain
+    # (list[Certificate]), private_key, leaf, and save(). save() writes
+    # the full cert chain PEM to cert_path and the private key PEM to
+    # key_path, matching agentweave/identity/spiffe.py::_write_svid_to_files.
+    svid.save(str(cert_path), str(key_path), serialization.Encoding.PEM)
     os.chmod(key_path, _SVID_KEY_FILE_MODE)
     ctx.load_cert_chain(certfile=str(cert_path), keyfile=str(key_path))
     logger.info("workload plane: :8443 listener SVID rotated and reloaded")

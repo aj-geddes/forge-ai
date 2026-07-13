@@ -11,11 +11,14 @@ from __future__ import annotations
 
 import asyncio
 import ssl
+import tempfile
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
+import spiffe
 from _mtls_fixtures import (
     build_client_ssl_context,
     build_server_ssl_context,
@@ -28,6 +31,7 @@ from forge_config.schema import AgentsConfig, ForgeConfig, PeerAgent, TrustLevel
 from forge_gateway.workload import (
     WorkloadListenerStartupError,
     _extract_peer_spiffe_id_from_transport,
+    _reload_ssl_context_on_rotation,
     build_workload_app,
     start_workload_listener,
     wrap_app_with_peer_identity,
@@ -469,3 +473,53 @@ class TestStartWorkloadListenerEndToEnd:
             assert len(identity.registered_rotation_callbacks) == 1
         finally:
             await handle.stop()
+
+
+# ---------------------------------------------------------------------------
+# SVID rotation callback -- the real spiffe.X509Svid API (regression test
+# for the live-bug AttributeError: 'X509Svid' object has no attribute
+# 'cert_chain_bytes').
+# ---------------------------------------------------------------------------
+
+
+class TestRotationCallbackReloadsRealX509Svid:
+    async def test_rotation_callback_reloads_context_with_real_x509svid(self) -> None:
+        """Reproduces the live :8443 bug: py-spiffe's real ``X509Svid``
+        (0.2.4/0.2.5) has no ``cert_chain_bytes``/``private_key_bytes``
+        attributes -- only ``cert_chain``, ``private_key``, ``leaf``, and
+        ``save()``. Pre-fix, ``_reload_ssl_context_on_rotation`` raised
+        ``AttributeError`` on the very first SVID rotation, so the
+        listener kept serving the original SSLContext's cert forever --
+        which then failed mTLS handshakes once that SVID actually
+        expired. This must NOT raise, and the reloaded context's on-disk
+        cert file must contain the newly-rotated leaf, not the original
+        one."""
+        ca = make_ca()
+        initial_leaf = issue_leaf_cert(ca, common_name="forge", spiffe_id=MY_SPIFFE_ID)
+        rotated_leaf = issue_leaf_cert(ca, common_name="forge-rotated", spiffe_id=MY_SPIFFE_ID)
+
+        ctx = build_server_ssl_context(initial_leaf, ca)
+
+        svid = spiffe.X509Svid(
+            spiffe.SpiffeId(MY_SPIFFE_ID),
+            [rotated_leaf.cert],
+            rotated_leaf.key,
+        )
+
+        temp_dir = tempfile.TemporaryDirectory(prefix="forge_workload_svid_test_")
+        try:
+            await _reload_ssl_context_on_rotation(ctx, temp_dir, svid)
+
+            cert_files = list(Path(temp_dir.name).glob("cert-*.pem"))
+            key_files = list(Path(temp_dir.name).glob("key-*.pem"))
+            assert len(cert_files) == 1
+            assert len(key_files) == 1
+
+            written_cert_pem = cert_files[0].read_bytes()
+            assert written_cert_pem == rotated_leaf.cert_pem
+            assert written_cert_pem != initial_leaf.cert_pem
+
+            key_mode = key_files[0].stat().st_mode & 0o777
+            assert key_mode == 0o600
+        finally:
+            temp_dir.cleanup()
