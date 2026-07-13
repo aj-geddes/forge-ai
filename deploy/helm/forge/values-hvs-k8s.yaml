@@ -149,15 +149,19 @@ forgeConfig:
           secret_sha256: "3bb9578430956ca1030a081b547467b526a679053cc12054ff886171609d804a"
           roles: ["admin"]
 
-    # Deny by default: no matching binding => 403. Bootstrapped by EMAIL because
-    # the exact GitHub `groups` claim format is not yet known (ADR D-4); confirm
-    # it against GET /v1/auth/me after first login, then add a group binding.
+    # Deny by default: no matching binding => 403. Bound to the operator's
+    # identity as Dex actually asserts it (confirmed via a real login on
+    # 2026-07-12): GitHub aj-geddes -> stable opaque sub + verified primary
+    # email aj_geddes@yahoo.com. Dex's github connector sends no `groups`, so
+    # sub is the robust identifier (unspoofable, survives email changes); the
+    # verified email is kept as a readable secondary match.
     authorization:
       default_role: null
       metrics_public: true
       bindings:
         - role: admin
-          emails: ["ageddes75@gmail.com"]
+          subs: ["CgkyMTEyMTk0NDISBmdpdGh1Yg"]
+          emails: ["aj_geddes@yahoo.com"]
 
     # Deprecated, inert. Kept explicitly false so nothing silently re-enables them.
     agentweave:
