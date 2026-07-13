@@ -111,6 +111,171 @@ forgeConfig:
         - claude-sonnet
       timeout: 60.0
       max_retries: 3
+  # First real tool surface for the agent. Every endpoint here is keyless and
+  # was verified reachable from a pod in this namespace, and every tool exercises
+  # a distinct tool-builder feature so this doubles as a live smoke test of the
+  # builder (path templating, query forwarding, result_path, field_map dot-paths,
+  # raw passthrough, and workflow step chaining). No API keys => nothing to leak
+  # and no OpenBao dependency. These are manual_tools with a hard-coded URL, so a
+  # transient upstream outage fails the individual call at request time; it does
+  # NOT fail the tool-surface build (that only happens for openapi_sources that
+  # must be fetched at startup), so the pod stays Ready regardless.
+  tools:
+    manual_tools:
+      # wttr.in returns a one-line text summary for format=4 (not JSON), so the
+      # tool returns that string verbatim (no response_mapping). `location` is
+      # consumed by the URL template; `format` is not, so for a GET it is
+      # forwarded as the ?format= query param.
+      - name: get_weather
+        description: >-
+          Get a short current-weather summary for a location (city name,
+          airport code, or "lat,lon"). Returns a one-line text summary.
+        parameters:
+          - name: location
+            type: string
+            description: "City name, airport code, or 'lat,lon' coordinates"
+            required: true
+          - name: format
+            type: string
+            description: "wttr.in format string; '4' is a compact one-liner"
+            required: false
+            default: "4"
+        api:
+          url: "https://wttr.in/{{location}}"
+          method: GET
+          timeout: 15.0
+      # ip-api.com returns a flat JSON object; field_map pulls the useful fields
+      # out by dot-path (regionName -> region) and drops the rest.
+      - name: geolocate_ip
+        description: >-
+          Look up the approximate geographic location (city, region, country,
+          latitude/longitude) of a public IPv4/IPv6 address.
+        parameters:
+          - name: ip
+            type: string
+            description: "Public IP address, e.g. 8.8.8.8"
+            required: true
+        api:
+          url: "http://ip-api.com/json/{{ip}}"
+          method: GET
+          timeout: 15.0
+          response_mapping:
+            field_map:
+              ip: "query"
+              city: "city"
+              region: "regionName"
+              country: "country"
+              lat: "lat"
+              lon: "lon"
+      # GitHub's public repo endpoint needs no auth for public repos. Accept
+      # header pins the v3 media type; field_map trims the large payload to the
+      # handful of fields worth returning to the model.
+      - name: github_repo
+        description: >-
+          Fetch public metadata for a GitHub repository: description, primary
+          language, star/fork counts, and open-issue count.
+        parameters:
+          - name: owner
+            type: string
+            description: "Repository owner or org, e.g. 'astral-sh'"
+            required: true
+          - name: repo
+            type: string
+            description: "Repository name, e.g. 'uv'"
+            required: true
+        api:
+          url: "https://api.github.com/repos/{{owner}}/{{repo}}"
+          method: GET
+          timeout: 15.0
+          headers:
+            Accept: "application/vnd.github+json"
+          response_mapping:
+            field_map:
+              name: "full_name"
+              description: "description"
+              language: "language"
+              stars: "stargazers_count"
+              forks: "forks_count"
+              open_issues: "open_issues_count"
+      # Coinbase spot price. The payload nests under `data`; field_map dot-paths
+      # (data.amount, ...) read straight into the nested object from the root.
+      - name: crypto_price
+        description: >-
+          Get the current spot price of a cryptocurrency in a fiat currency.
+          Pass a Coinbase pair like 'BTC-USD' or 'ETH-EUR'.
+        parameters:
+          - name: pair
+            type: string
+            description: "Coinbase price pair, e.g. 'BTC-USD'"
+            required: true
+        api:
+          url: "https://api.coinbase.com/v2/prices/{{pair}}/spot"
+          method: GET
+          timeout: 15.0
+          response_mapping:
+            field_map:
+              price: "data.amount"
+              base: "data.base"
+              currency: "data.currency"
+      # open.er-api.com returns {result, base_code, rates:{USD:1, EUR:..., ...}}.
+      # result_path extracts just the rates map; `base` is consumed by the URL
+      # template so it is not forwarded as a query param.
+      - name: exchange_rates
+        description: >-
+          Get current fiat exchange rates for a base currency (default USD).
+          Returns a map of ISO currency code -> rate relative to the base.
+        parameters:
+          - name: base
+            type: string
+            description: "ISO 4217 base currency code, e.g. 'USD'"
+            required: false
+            default: "USD"
+        api:
+          url: "https://open.er-api.com/v6/latest/{{base}}"
+          method: GET
+          timeout: 15.0
+          response_mapping:
+            result_path: "$.rates"
+      # dictionaryapi.dev returns a JSON ARRAY of entries. field_map/result_path
+      # only apply to dict responses, so the raw array is returned and the model
+      # reads the definitions out of it directly.
+      - name: define_word
+        description: >-
+          Look up the dictionary definition(s), part of speech, and phonetics
+          for an English word.
+        parameters:
+          - name: word
+            type: string
+            description: "The English word to define"
+            required: true
+        api:
+          url: "https://api.dictionaryapi.dev/api/v2/entries/en/{{word}}"
+          method: GET
+          timeout: 15.0
+    workflows:
+      # Composes two of the manual tools above: geolocate an IP, then fetch the
+      # weather for the resulting city. Demonstrates step chaining via output_as
+      # + {{loc.city}} template refs and a sandboxed `condition` guard (skips the
+      # weather step if geolocation produced no city).
+      - name: weather_at_ip
+        description: >-
+          Given a public IP address, look up its city and return the current
+          weather there. Chains geolocate_ip -> get_weather.
+        parameters:
+          - name: ip
+            type: string
+            description: "Public IP address to locate and get weather for"
+            required: true
+        steps:
+          - tool: geolocate_ip
+            params:
+              ip: "{{ip}}"
+            output_as: loc
+          - tool: get_weather
+            params:
+              location: "{{loc.city}}"
+            output_as: weather
+            condition: "loc.city is not None"
   security:
     # Authentication is ENFORCED. Per ADR-0001 this is also the schema default,
     # so removing this block does not silently disable auth.
