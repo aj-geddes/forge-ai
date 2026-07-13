@@ -135,3 +135,52 @@ class AdminPeerResponse(BaseModel):
     trust_level: str = "low"
     capabilities: list[str] = Field(default_factory=list)
     status: AdminPeerStatus = AdminPeerStatus.UNKNOWN
+
+
+# --- User-issued API key models (ADR-0002) ---
+
+
+class MintTokenRequest(BaseModel):
+    """POST /v1/auth/tokens request body.
+
+    ``roles`` omitted defaults to the caller's own current roles;
+    ``ttl_seconds`` omitted defaults to
+    ``security.service_tokens.user_tokens.default_ttl_seconds``.
+    """
+
+    label: str
+    roles: list[str] | None = None
+    ttl_seconds: int | None = None
+
+
+class MintTokenResponse(BaseModel):
+    """POST /v1/auth/tokens response -- the ONLY time the raw token is
+    ever returned. It is not persisted anywhere and cannot be retrieved
+    again after this response."""
+
+    id: str
+    token: str
+    label: str
+    roles: list[str]
+    created_at: str
+    expires_at: str
+
+
+class TokenListItem(BaseModel):
+    """One entry in GET /v1/auth/tokens -- metadata only, never the
+    secret or its digest. ``owner_email`` is populated only in the
+    admin ``?all=true`` view."""
+
+    id: str
+    label: str
+    roles: list[str]
+    created_at: str
+    expires_at: str
+    revoked_at: str | None = None
+    owner_email: str | None = None
+
+
+class TokenListResponse(BaseModel):
+    """GET /v1/auth/tokens response."""
+
+    tokens: list[TokenListItem] = Field(default_factory=list)

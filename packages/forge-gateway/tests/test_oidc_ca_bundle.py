@@ -10,12 +10,43 @@ verification (``verify=False``) entirely.
 
 from __future__ import annotations
 
+import datetime
 import logging
+import ssl
+import warnings
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from forge_gateway.app import _oidc_ca_verify
+from forge_gateway.app import _httpx_verify_kwarg, _oidc_ca_verify
+
+
+def _self_signed_ca_pem() -> bytes:
+    """A real (self-signed, throwaway) CA certificate in PEM form -- needed
+    because ``ssl.create_default_context(cafile=...)`` parses its contents
+    immediately, unlike the plain string a bare ``verify=<path>`` kwarg
+    used to accept without ever reading the file."""
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.x509.oid import NameOID
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "forge-test-ca")])
+    now = datetime.datetime.now(datetime.UTC)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - datetime.timedelta(days=1))
+        .not_valid_after(now + datetime.timedelta(days=1))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .sign(key, hashes.SHA256())
+    )
+    return cert.public_bytes(serialization.Encoding.PEM)
+
 
 # ---------------------------------------------------------------------------
 # _oidc_ca_verify() resolution logic
@@ -143,7 +174,7 @@ class TestInitAuthHttpClientUsesCaBundle:
         from forge_gateway.app import _init_auth
 
         bundle = tmp_path / "hvslocal-ca.crt"
-        bundle.write_text("bundle")
+        bundle.write_bytes(_self_signed_ca_pem())
         monkeypatch.setenv("FORGE_OIDC_CA_BUNDLE", str(bundle))
         monkeypatch.delenv("SSL_CERT_FILE", raising=False)
 
@@ -155,7 +186,11 @@ class TestInitAuthHttpClientUsesCaBundle:
             await _init_auth(ForgeConfig())
             try:
                 ctor.assert_called_once()
-                assert ctor.call_args.kwargs.get("verify") == str(bundle)
+                verify_kwarg = ctor.call_args.kwargs.get("verify")
+                # Not a bare path string (that's the deprecated httpx form) --
+                # an SSLContext pinned to the resolved bundle.
+                assert isinstance(verify_kwarg, ssl.SSLContext)
+                assert not isinstance(verify_kwarg, str)
             finally:
                 await security.shutdown_auth()
                 security.reset_auth()
@@ -204,7 +239,7 @@ class TestTokenExchangeUsesSameCaBundle:
         from forge_gateway.routes.auth import _exchange_code
 
         bundle = tmp_path / "hvslocal-ca.crt"
-        bundle.write_text("bundle")
+        bundle.write_bytes(_self_signed_ca_pem())
         monkeypatch.setenv("FORGE_OIDC_CA_BUNDLE", str(bundle))
         monkeypatch.delenv("SSL_CERT_FILE", raising=False)
 
@@ -219,7 +254,7 @@ class TestTokenExchangeUsesSameCaBundle:
                 # must be the exact same instance constructed with the CA bundle.
                 exchange_client = security.get_http_client()
                 assert exchange_client is real_client
-                assert ctor.call_args.kwargs.get("verify") == str(bundle)
+                assert isinstance(ctor.call_args.kwargs.get("verify"), ssl.SSLContext)
 
                 real_client.post.return_value.raise_for_status = MagicMock()
                 real_client.post.return_value.json = MagicMock(return_value={"ok": True})
@@ -236,3 +271,45 @@ class TestTokenExchangeUsesSameCaBundle:
             finally:
                 await security.shutdown_auth()
                 security.reset_auth()
+
+
+# ---------------------------------------------------------------------------
+# _httpx_verify_kwarg() -- avoids httpx's verify=<str> DeprecationWarning
+# ---------------------------------------------------------------------------
+
+
+class TestHttpxVerifyKwarg:
+    def test_bundle_path_becomes_ssl_context(self, tmp_path: Path) -> None:
+        """A resolved bundle path is converted to an ssl.SSLContext, not
+        passed through as a bare string."""
+        bundle = tmp_path / "hvslocal-ca.crt"
+        bundle.write_bytes(_self_signed_ca_pem())
+
+        result = _httpx_verify_kwarg(str(bundle))
+
+        assert isinstance(result, ssl.SSLContext)
+
+    def test_true_passes_through_unchanged(self) -> None:
+        """The 'no bundle configured' sentinel (True) is untouched."""
+        assert _httpx_verify_kwarg(True) is True
+
+    def test_never_returns_false(self) -> None:
+        """This helper must never produce verify=False -- that would
+        disable TLS verification entirely."""
+        assert _httpx_verify_kwarg(True) is not False
+
+    def test_constructing_httpx_client_with_result_emits_no_deprecation_warning(
+        self, tmp_path: Path
+    ) -> None:
+        """The actual regression this fix addresses: constructing
+        httpx.AsyncClient(verify=...) with the resolved value must not
+        raise httpx's 'verify=<str> is deprecated' DeprecationWarning."""
+        import httpx
+
+        bundle = tmp_path / "hvslocal-ca.crt"
+        bundle.write_bytes(_self_signed_ca_pem())
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
+            client = httpx.AsyncClient(verify=_httpx_verify_kwarg(str(bundle)))
+        assert client is not None

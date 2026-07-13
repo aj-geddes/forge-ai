@@ -16,13 +16,23 @@ everything else.
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Iterator
+from pathlib import Path
 
 import pytest
 from forge_config.schema import AuthorizationConfig
 from forge_gateway import security
 from forge_gateway.routes import health
 from forge_security.oidc import Authorizer
+
+# Makes this package's tests/ directory importable via a plain
+# `from _token_fixtures import ...` (mirrors forge-security/tests/conftest.py),
+# independent of any cross-package "tests" package-name collision under the
+# monorepo's --import-mode=importlib pytest configuration.
+_TESTS_DIR = str(Path(__file__).parent)
+if _TESTS_DIR not in sys.path:
+    sys.path.insert(0, _TESTS_DIR)
 
 
 @pytest.fixture(autouse=True)

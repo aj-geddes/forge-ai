@@ -19,10 +19,18 @@ import logging
 import os
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import httpx
 from fastapi import HTTPException, Request
-from forge_config.schema import AuthMode, OIDCConfig, Permission, SecurityConfig
+from forge_config.schema import (
+    AuthMode,
+    AuthorizationConfig,
+    OIDCConfig,
+    Permission,
+    SecurityConfig,
+    UserTokenConfig,
+)
 from forge_security.oidc import (
     AuthError,
     Authorizer,
@@ -34,6 +42,9 @@ from forge_security.oidc import (
 )
 
 from forge_gateway import rate_limit
+
+if TYPE_CHECKING:
+    from forge_security.oidc.user_tokens import UserTokenStore
 
 logger = logging.getLogger("forge.gateway.security")
 
@@ -73,6 +84,15 @@ class _AuthState:
     oidc_config: OIDCConfig | None = None
     endpoints: DiscoveryDocument | None = None
     tx_key: bytes | None = None
+    # ADR-0002 (user-issued API keys): the live user-token store instance
+    # handed to ServiceTokenVerifier, the UserTokenConfig it was built
+    # from (TTL bounds + the enabled switch), and the AuthorizationConfig
+    # (role -> permission map) that routes/tokens.py needs to reject
+    # unknown role names at mint time -- Authorizer itself exposes no
+    # public accessor for its underlying config.
+    user_token_store: UserTokenStore | None = None
+    user_token_config: UserTokenConfig | None = None
+    authorization_config: AuthorizationConfig | None = None
 
 
 _state = _AuthState()
@@ -101,12 +121,17 @@ def configure_auth(
     endpoints: DiscoveryDocument | None = None,
     tx_key: bytes | None = None,
     rate_limit_rpm: int | None = None,
+    user_token_store: UserTokenStore | None = None,
+    user_token_config: UserTokenConfig | None = None,
+    authorization_config: AuthorizationConfig | None = None,
 ) -> None:
     """Wire the auth subsystem from the application lifespan.
 
     ``healthy`` (ADR-0001 SS7.3's "total auth failure" row) is ``True``
     when *any* credential mechanism can actually operate: dev_insecure,
-    a working OIDC verifier, or at least one configured service token.
+    a working OIDC verifier, at least one configured service token, or
+    (ADR-0002 SS4.4) a live user-token store -- a machine-only deployment
+    with only user-issued tokens and no static ones still reports healthy.
     When none of these hold, :func:`get_principal` denies every request
     with ``503 auth_unavailable`` rather than silently allowing traffic.
 
@@ -117,12 +142,23 @@ def configure_auth(
     fixture -- are never rate limited by surprise; real config-driven
     startup (``forge_gateway.app._init_auth``) always passes the configured
     value explicitly.
+
+    ``user_token_store`` is the live ``FileUserTokenStore`` instance
+    (ADR-0002) -- the *same* object passed to ``ServiceTokenVerifier``'s
+    ``store=`` kwarg by the caller, so a mint/revoke through
+    ``routes/tokens.py`` is visible to verification on the very next
+    request. ``user_token_config``/``authorization_config`` are the raw
+    config blocks ``routes/tokens.py`` needs (TTL bounds, the feature
+    switch, and the known role set) that have no other accessor.
     """
     global _state
     has_service_tokens = bool(
         service_token_verifier is not None and service_token_verifier._tokens  # noqa: SLF001
     )
-    healthy = dev_insecure or oidc_verifier is not None or has_service_tokens
+    has_user_token_store = user_token_store is not None
+    healthy = (
+        dev_insecure or oidc_verifier is not None or has_service_tokens or has_user_token_store
+    )
     _state = _AuthState(
         session_codec=session_codec,
         service_token_verifier=service_token_verifier,
@@ -136,6 +172,9 @@ def configure_auth(
         oidc_config=oidc_config,
         endpoints=endpoints,
         tx_key=tx_key,
+        user_token_store=user_token_store,
+        user_token_config=user_token_config,
+        authorization_config=authorization_config,
     )
     rate_limit.configure_rate_limiting(rate_limit_rpm)
     if dev_insecure:
@@ -193,6 +232,25 @@ def get_session_codec() -> SessionCodec | None:
 
 def get_authorizer() -> Authorizer | None:
     return _state.authorizer
+
+
+def get_user_token_store() -> UserTokenStore | None:
+    """The live user-token store (ADR-0002), or ``None`` when
+    ``security.service_tokens.user_tokens.enabled`` is false."""
+    return _state.user_token_store
+
+
+def get_user_token_config() -> UserTokenConfig | None:
+    """The ``security.service_tokens.user_tokens`` config block (TTL
+    bounds + the feature switch), or ``None`` before auth has been wired."""
+    return _state.user_token_config
+
+
+def get_authorization_config() -> AuthorizationConfig | None:
+    """The raw ``security.authorization`` config block -- used by
+    ``routes/tokens.py`` to validate requested role names against the
+    known role set (``Authorizer`` exposes no public accessor for it)."""
+    return _state.authorization_config
 
 
 def reset_auth() -> None:

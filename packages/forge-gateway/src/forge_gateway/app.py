@@ -5,9 +5,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import ssl
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import httpx
 from fastapi import FastAPI, Request
@@ -42,6 +44,12 @@ from forge_gateway.routes import (
 from forge_gateway.routes import (
     auth as auth_routes,
 )
+from forge_gateway.routes import (
+    tokens as tokens_routes,
+)
+
+if TYPE_CHECKING:
+    from forge_security.oidc.user_tokens import UserTokenStore
 
 logger = logging.getLogger("forge.gateway")
 
@@ -270,6 +278,25 @@ def _oidc_ca_verify() -> str | bool:
     return True
 
 
+def _httpx_verify_kwarg(resolved: str | bool) -> ssl.SSLContext | bool:
+    """Adapt :func:`_oidc_ca_verify`'s resolved value to httpx's ``verify=``
+    kwarg without triggering httpx's ``verify=<str>`` ``DeprecationWarning``
+    (httpx expects ``ssl.SSLContext | bool``, not a bare path string).
+
+    A resolved bundle *path* becomes a default SSL context pinned to that
+    CA file (``ssl.create_default_context(cafile=...)``), which is exactly
+    what httpx itself does internally for a string ``verify=`` today --
+    this only does it explicitly, ahead of the deprecation. ``True`` (no
+    bundle configured -- trust the public CA store) passes through
+    unchanged. This function is never handed ``False`` by
+    :func:`_oidc_ca_verify` and never returns ``False`` itself -- TLS
+    verification must never be silently disabled.
+    """
+    if isinstance(resolved, str):
+        return ssl.create_default_context(cafile=resolved)
+    return resolved
+
+
 def _build_oidc_verifier(
     oidc_config: OIDCConfig, http_client: httpx.AsyncClient
 ) -> OIDCTokenVerifier:
@@ -342,7 +369,7 @@ async def _init_auth(config: object | None) -> None:
     tx_key: bytes | None = None
 
     if sec_config.oidc.enabled:
-        http_client = httpx.AsyncClient(verify=_oidc_ca_verify())
+        http_client = httpx.AsyncClient(verify=_httpx_verify_kwarg(_oidc_ca_verify()))
         discovery_doc = None
         if sec_config.oidc.discovery:
             try:
@@ -367,12 +394,31 @@ async def _init_auth(config: object | None) -> None:
         except Exception:
             logger.exception("Failed to initialize session codec")
 
+    user_token_config = sec_config.service_tokens.user_tokens
+    user_token_store: UserTokenStore | None = None
+    if user_token_config.enabled:
+        from forge_security.oidc.user_tokens import FileUserTokenStore
+
+        user_token_store = FileUserTokenStore(user_token_config.store_path)
+        try:
+            await user_token_store.load()
+        except Exception:
+            # FileUserTokenStore.load() is documented to never raise (it
+            # marks itself unavailable internally on a corrupt file
+            # instead) -- this is defence-in-depth only, matching every
+            # other subsystem init step in this function.
+            logger.exception(
+                "Failed to load user token store at %s -- user-issued API "
+                "keys are unavailable; static tokens and OIDC are unaffected",
+                user_token_config.store_path,
+            )
+
     try:
         all_tokens = list(sec_config.service_tokens.tokens) + _resolve_legacy_service_tokens(config)
     except Exception:
         logger.exception("Failed to resolve configured service tokens")
         all_tokens = []
-    service_token_verifier = ServiceTokenVerifier(all_tokens)
+    service_token_verifier = ServiceTokenVerifier(all_tokens, store=user_token_store)
 
     try:
         authorizer = Authorizer(sec_config.authorization)
@@ -395,6 +441,9 @@ async def _init_auth(config: object | None) -> None:
         endpoints=endpoints,
         tx_key=tx_key,
         rate_limit_rpm=sec_config.rate_limit_rpm,
+        user_token_store=user_token_store,
+        user_token_config=user_token_config,
+        authorization_config=sec_config.authorization,
     )
     health.set_auth_mode(sec_config.auth.mode.value)
     health.set_auth_healthy(security.is_auth_healthy())
@@ -693,6 +742,7 @@ def create_app() -> FastAPI:
     # API Routes
     app.include_router(health.router)
     app.include_router(auth_routes.router)
+    app.include_router(tokens_routes.router)
     app.include_router(programmatic.router)
     app.include_router(conversational.router)
     app.include_router(a2a.router)
