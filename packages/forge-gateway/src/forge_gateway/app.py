@@ -33,6 +33,7 @@ from forge_security.workload import WorkloadUnavailable, build_workload_plane
 from forge_gateway import security
 from forge_gateway.middleware.csrf import CSRFMiddleware
 from forge_gateway.middleware.logging import RequestLoggingMiddleware
+from forge_gateway.middleware.metrics import PrometheusMetricsMiddleware
 from forge_gateway.routes import (
     a2a,
     admin,
@@ -838,6 +839,10 @@ def create_app() -> FastAPI:
     )
     app.add_middleware(security.DevInsecureHeaderMiddleware)
     app.add_middleware(RequestLoggingMiddleware)
+    # Outermost middleware: wraps the entire chain below so it always sees
+    # the final response status and the full end-to-end elapsed time,
+    # regardless of where in the chain a request is short-circuited.
+    app.add_middleware(PrometheusMetricsMiddleware)
 
     # API Routes
     app.include_router(health.router)

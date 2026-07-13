@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from forge_config.schema import AgentDef, ForgeConfig
 from pydantic import BaseModel
 
-from forge_gateway import security
+from forge_gateway import metrics_registry, security
 from forge_gateway.models import ErrorResponse, InvokeRequest, InvokeResponse
 from forge_gateway.routes.persona import resolve_persona
 from forge_gateway.schema import json_schema_to_model
@@ -71,6 +72,8 @@ async def invoke(request: InvokeRequest) -> InvokeResponse:
 
     persona = _resolve_persona(request.agent)
 
+    start_time = time.monotonic()
+    status = "success"
     try:
         output_schema = _resolve_output_schema(request.output_schema)
         persona_tools = (persona.tools or None) if persona else None
@@ -85,6 +88,8 @@ async def invoke(request: InvokeRequest) -> InvokeResponse:
             tool_names_filter=persona_tools,
             tool_hints_filter=tool_hints,
         )
+        for tool_name in run_result.tools_used:
+            metrics_registry.record_tool_invocation(tool_name)
         return InvokeResponse(
             result=run_result.output,
             session_id=request.session_id,
@@ -92,7 +97,11 @@ async def invoke(request: InvokeRequest) -> InvokeResponse:
             model=run_result.model_name,
         )
     except HTTPException:
+        status = "error"
         raise
     except Exception as e:
+        status = "error"
         logger.exception("Agent invocation failed")
         raise HTTPException(status_code=500, detail="Internal server error") from e
+    finally:
+        metrics_registry.record_agent_invocation("invoke", status, time.monotonic() - start_time)

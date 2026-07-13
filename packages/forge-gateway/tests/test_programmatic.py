@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from forge_agent.agent.core import ForgeRunResult
 from forge_config.schema import AgentDef, AgentsConfig, ForgeConfig, LLMConfig
 from forge_gateway.routes import programmatic
+from prometheus_client import REGISTRY
 from pydantic import BaseModel
 
 
@@ -24,6 +25,11 @@ def _mock_run_result(
         tools_used=tools_used or [],
         model_name=model_name,
     )
+
+
+def _counter_value(name: str, labels: dict[str, str] | None = None) -> float:
+    """Read a Prometheus sample value, treating an absent sample as 0.0."""
+    return REGISTRY.get_sample_value(name, labels) or 0.0
 
 
 @pytest.fixture
@@ -401,3 +407,102 @@ class TestErrorDetailRedaction:
         assert detail == "Internal server error"
         assert "/etc/db.conf" not in detail
         assert "secret" not in detail
+
+
+class TestInvokeMetrics:
+    """Prometheus metrics recorded from the POST /v1/agent/invoke route."""
+
+    def test_successful_invoke_records_agent_invocation_metric(
+        self, client: TestClient, mock_agent: AsyncMock
+    ) -> None:
+        before = _counter_value(
+            "forge_agent_invocations_total",
+            {"interface": "invoke", "status": "success"},
+        )
+        response = client.post("/v1/agent/invoke", json={"intent": "test"})
+        after = _counter_value(
+            "forge_agent_invocations_total",
+            {"interface": "invoke", "status": "success"},
+        )
+        assert response.status_code == 200
+        assert after - before == 1.0
+
+    def test_invoke_agent_error_records_error_status_metric(
+        self, client: TestClient, mock_agent: AsyncMock
+    ) -> None:
+        mock_agent.run_structured.side_effect = RuntimeError("boom")
+        before = _counter_value(
+            "forge_agent_invocations_total",
+            {"interface": "invoke", "status": "error"},
+        )
+        response = client.post("/v1/agent/invoke", json={"intent": "test"})
+        after = _counter_value(
+            "forge_agent_invocations_total",
+            {"interface": "invoke", "status": "error"},
+        )
+        assert response.status_code == 500
+        assert after - before == 1.0
+
+    def test_invoke_with_tools_used_records_tool_invocation_metrics(
+        self, client: TestClient, mock_agent: AsyncMock
+    ) -> None:
+        mock_agent.run_structured.return_value = _mock_run_result(
+            tools_used=["unit_test_invoke_tool_a", "unit_test_invoke_tool_b"]
+        )
+        before_a = _counter_value(
+            "forge_tool_invocations_total", {"tool": "unit_test_invoke_tool_a"}
+        )
+        before_b = _counter_value(
+            "forge_tool_invocations_total", {"tool": "unit_test_invoke_tool_b"}
+        )
+        response = client.post("/v1/agent/invoke", json={"intent": "test"})
+        after_a = _counter_value(
+            "forge_tool_invocations_total", {"tool": "unit_test_invoke_tool_a"}
+        )
+        after_b = _counter_value(
+            "forge_tool_invocations_total", {"tool": "unit_test_invoke_tool_b"}
+        )
+        assert response.status_code == 200
+        assert after_a - before_a == 1.0
+        assert after_b - before_b == 1.0
+
+    def test_invoke_without_tools_used_does_not_record_tool_metric(
+        self, client: TestClient, mock_agent: AsyncMock
+    ) -> None:
+        before = _counter_value(
+            "forge_tool_invocations_total",
+            {"tool": "__never_called_placeholder_tool__"},
+        )
+        response = client.post("/v1/agent/invoke", json={"intent": "test"})
+        after = _counter_value(
+            "forge_tool_invocations_total",
+            {"tool": "__never_called_placeholder_tool__"},
+        )
+        assert response.status_code == 200
+        assert after == before == 0.0
+
+    def test_invoke_no_agent_does_not_record_metric(self) -> None:
+        before_success = _counter_value(
+            "forge_agent_invocations_total",
+            {"interface": "invoke", "status": "success"},
+        )
+        before_error = _counter_value(
+            "forge_agent_invocations_total",
+            {"interface": "invoke", "status": "error"},
+        )
+        app = FastAPI()
+        programmatic.set_agent(None)
+        app.include_router(programmatic.router)
+        test_client = TestClient(app)
+        response = test_client.post("/v1/agent/invoke", json={"intent": "test"})
+        after_success = _counter_value(
+            "forge_agent_invocations_total",
+            {"interface": "invoke", "status": "success"},
+        )
+        after_error = _counter_value(
+            "forge_agent_invocations_total",
+            {"interface": "invoke", "status": "error"},
+        )
+        assert response.status_code == 503
+        assert after_success == before_success
+        assert after_error == before_error

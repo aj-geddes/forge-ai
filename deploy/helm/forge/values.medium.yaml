@@ -1,0 +1,24 @@
+# Medium profile overrides.
+# This profile is functionally identical to the chart's default values today,
+# provided for explicit selection symmetry with values.dev.yaml/values.prod.yaml
+# and to match the documented three-profile matrix in docs/technical/infrastructure.md.
+# If base values.yaml defaults drift from the documented Medium row, this file
+# is the source of truth for 'medium'; values.yaml is just where those same numbers
+# currently also happen to live as the implicit default.
+profile: medium
+
+agent:
+  replicaCount: 1
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+autoscaling:
+  enabled: false
+
+podDisruptionBudget:
+  enabled: false

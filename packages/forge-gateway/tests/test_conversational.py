@@ -12,6 +12,7 @@ from forge_agent.agent.core import ForgeRunResult, ToolCallRecord
 from forge_config.schema import AgentDef, AgentsConfig, ForgeConfig, LLMConfig
 from forge_gateway.routes import conversational
 from httpx import ASGITransport, AsyncClient
+from prometheus_client import REGISTRY
 from starlette.testclient import TestClient
 
 # ---------------------------------------------------------------------------
@@ -40,6 +41,11 @@ async def _async_iter_mixed(
     as the real ``_make_stream`` yields (tool calls first, then text deltas)."""
     for item in items:
         yield item
+
+
+def _counter_value(name: str, labels: dict[str, str] | None = None) -> float:
+    """Read a Prometheus sample value, treating an absent sample as 0.0."""
+    return REGISTRY.get_sample_value(name, labels) or 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -1030,3 +1036,126 @@ class TestConversationalToolCallRecords:
         events = _parse_sse_events(response.text)
         tool_call_frame = _parse_sse_payload(events[0])
         assert tool_call_frame["session_id"] == "tc-sess"
+
+
+class TestConversationalMetrics:
+    """Prometheus metrics recorded from the POST /v1/chat/completions routes."""
+
+    def test_successful_chat_records_agent_invocation_metric(
+        self, client: TestClient, mock_agent: AsyncMock
+    ) -> None:
+        before = _counter_value(
+            "forge_agent_invocations_total",
+            {"interface": "chat", "status": "success"},
+        )
+        response = client.post(
+            "/v1/chat/completions",
+            json={"message": "Hello"},
+        )
+        assert response.status_code == 200
+        after = _counter_value(
+            "forge_agent_invocations_total",
+            {"interface": "chat", "status": "success"},
+        )
+        assert after - before == 1.0
+
+    def test_chat_agent_error_records_error_status_metric(
+        self, client: TestClient, mock_agent: AsyncMock
+    ) -> None:
+        mock_agent.run_conversational.side_effect = RuntimeError("boom")
+        before = _counter_value(
+            "forge_agent_invocations_total",
+            {"interface": "chat", "status": "error"},
+        )
+        response = client.post(
+            "/v1/chat/completions",
+            json={"message": "Hello"},
+        )
+        assert response.status_code == 500
+        after = _counter_value(
+            "forge_agent_invocations_total",
+            {"interface": "chat", "status": "error"},
+        )
+        assert after - before == 1.0
+
+    def test_chat_with_tool_calls_records_tool_invocation_metric(
+        self, client: TestClient, mock_agent: AsyncMock
+    ) -> None:
+        mock_agent.run_conversational.return_value = ForgeRunResult(
+            output="Test output",
+            tool_calls=[ToolCallRecord(name="unit_test_metric_tool", arguments={}, result="ok")],
+        )
+        before = _counter_value(
+            "forge_tool_invocations_total",
+            {"tool": "unit_test_metric_tool"},
+        )
+        response = client.post(
+            "/v1/chat/completions",
+            json={"message": "Use a tool"},
+        )
+        assert response.status_code == 200
+        after = _counter_value(
+            "forge_tool_invocations_total",
+            {"tool": "unit_test_metric_tool"},
+        )
+        assert after - before == 1.0
+
+    def test_chat_without_tool_calls_does_not_record_tool_metric(
+        self, client: TestClient, mock_agent: AsyncMock
+    ) -> None:
+        before = REGISTRY.get_sample_value(
+            "forge_tool_invocations_total",
+            {"tool": "__never_called_placeholder_tool__"},
+        )
+        response = client.post(
+            "/v1/chat/completions",
+            json={"message": "Hello"},
+        )
+        assert response.status_code == 200
+        after = REGISTRY.get_sample_value(
+            "forge_tool_invocations_total",
+            {"tool": "__never_called_placeholder_tool__"},
+        )
+        assert (before or 0.0) == (after or 0.0)
+
+    async def test_streaming_chat_records_chat_stream_interface_metric(
+        self, async_client: AsyncClient, mock_agent: AsyncMock
+    ) -> None:
+        mock_agent.run_conversational.return_value = _async_iter("chunk1\n", "chunk2\n")
+        before = _counter_value(
+            "forge_agent_invocations_total",
+            {"interface": "chat_stream", "status": "success"},
+        )
+        response = await async_client.post(
+            "/v1/chat/completions",
+            json={"message": "Stream me", "stream": True},
+        )
+        assert response.status_code == 200
+        after = _counter_value(
+            "forge_agent_invocations_total",
+            {"interface": "chat_stream", "status": "success"},
+        )
+        assert after - before == 1.0
+
+    async def test_streaming_chat_with_tool_call_records_tool_invocation_metric(
+        self, async_client: AsyncClient, mock_agent: AsyncMock
+    ) -> None:
+        mock_agent.run_conversational.return_value = _async_iter_mixed(
+            "chunk before tool\n",
+            ToolCallRecord(name="unit_test_stream_tool", arguments={}, result="r"),
+            "chunk after tool\n",
+        )
+        before = _counter_value(
+            "forge_tool_invocations_total",
+            {"tool": "unit_test_stream_tool"},
+        )
+        response = await async_client.post(
+            "/v1/chat/completions",
+            json={"message": "Stream with tool", "stream": True},
+        )
+        assert response.status_code == 200
+        after = _counter_value(
+            "forge_tool_invocations_total",
+            {"tool": "unit_test_stream_tool"},
+        )
+        assert after - before == 1.0

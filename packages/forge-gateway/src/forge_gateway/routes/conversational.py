@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 import uuid
 from collections.abc import AsyncIterator
 from typing import Any
@@ -13,7 +14,7 @@ from fastapi.responses import StreamingResponse
 from forge_agent.agent.core import ToolCallRecord
 from forge_config.schema import AgentDef, ForgeConfig
 
-from forge_gateway import security
+from forge_gateway import metrics_registry, security
 from forge_gateway.models import (
     ConversationRequest,
     ConversationResponse,
@@ -71,6 +72,8 @@ def _tool_call_payload(record: ToolCallRecord, session_id: str) -> str:
 async def _sse_generator(
     chunks: AsyncIterator[str | ToolCallRecord],
     session_id: str,
+    *,
+    start_time: float,
 ) -> AsyncIterator[str]:
     """Wrap agent stream items as SSE events.
 
@@ -80,18 +83,24 @@ async def _sse_generator(
 
     Sends ``data: [DONE]\n\n`` as the final sentinel.
     """
+    status = "success"
     try:
         async for item in chunks:
             if isinstance(item, ToolCallRecord):
+                metrics_registry.record_tool_invocation(item.name)
                 payload = _tool_call_payload(item, session_id)
             else:
                 payload = json.dumps({"chunk": item, "session_id": session_id})
             yield f"data: {payload}\n\n"
     except Exception:
+        status = "error"
         logger.exception("Error during streaming response")
         error_payload = json.dumps({"error": "Internal server error", "session_id": session_id})
         yield f"data: {error_payload}\n\n"
     finally:
+        metrics_registry.record_agent_invocation(
+            "chat_stream", status, time.monotonic() - start_time
+        )
         yield "data: [DONE]\n\n"
 
 
@@ -120,6 +129,8 @@ async def _handle_non_streaming(
     persona: AgentDef | None = None,
 ) -> ConversationResponse:
     """Handle a standard (non-streaming) chat request."""
+    start_time = time.monotonic()
+    status = "success"
     try:
         persona_tools = (persona.tools or None) if persona else None
         run_result = await _forge_agent.run_conversational(
@@ -130,6 +141,8 @@ async def _handle_non_streaming(
             max_turns_override=(persona.max_turns if persona else None),
             tool_names_filter=persona_tools,
         )
+        for tc in run_result.tool_calls:
+            metrics_registry.record_tool_invocation(tc.name)
         return ConversationResponse(
             message=run_result.output,
             session_id=session_id,
@@ -141,10 +154,14 @@ async def _handle_non_streaming(
             ],
         )
     except HTTPException:
+        status = "error"
         raise
     except Exception as e:
+        status = "error"
         logger.exception("Conversational request failed")
         raise HTTPException(status_code=500, detail="Internal server error") from e
+    finally:
+        metrics_registry.record_agent_invocation("chat", status, time.monotonic() - start_time)
 
 
 async def _handle_streaming(
@@ -153,6 +170,7 @@ async def _handle_streaming(
     persona: AgentDef | None = None,
 ) -> StreamingResponse:
     """Handle a streaming chat request, returning SSE."""
+    start = time.monotonic()
     try:
         persona_tools = (persona.tools or None) if persona else None
         chunks: AsyncIterator[str | ToolCallRecord] = await _forge_agent.run_conversational(
@@ -169,7 +187,7 @@ async def _handle_streaming(
         raise HTTPException(status_code=500, detail="Internal server error") from e
 
     return StreamingResponse(
-        _sse_generator(chunks, session_id),
+        _sse_generator(chunks, session_id, start_time=start),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
