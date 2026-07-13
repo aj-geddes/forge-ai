@@ -9,7 +9,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from forge_gateway.security import security_dependency
+from forge_gateway import security
 
 logger = logging.getLogger(__name__)
 
@@ -99,9 +99,16 @@ async def get_agent_card() -> AgentCard:
 
 
 class A2ATaskRequest(BaseModel):
+    """A2A task request.
+
+    ADR-0001 SS5.1: the caller's identity comes exclusively from the
+    verified ``Principal`` resolved by ``require_permission("agent:peer")``
+    -- there is deliberately no ``caller_id`` body field to read identity
+    from anymore (that was the original A2A instance of the bypass this
+    ADR closes)."""
+
     task_type: str
     payload: dict[str, Any] = Field(default_factory=dict)
-    caller_id: str = ""
 
 
 class A2ATaskResponse(BaseModel):
@@ -121,7 +128,7 @@ def set_agent(agent: Any) -> None:
 @router.post(
     "/tasks",
     response_model=A2ATaskResponse,
-    dependencies=[Depends(security_dependency)],
+    dependencies=[Depends(security.require_permission("agent:peer"))],
 )
 async def submit_task(request: A2ATaskRequest) -> A2ATaskResponse:
     """Handle incoming A2A task requests."""

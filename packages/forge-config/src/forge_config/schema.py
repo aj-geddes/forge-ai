@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
+import re
+import warnings
+from datetime import datetime
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+# SHA-256 hex digest: exactly 64 lowercase hex characters.
+_SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
 
 # --- Enums ---
 
@@ -287,11 +293,201 @@ class ToolsConfig(BaseModel):
         return self.manual_tools
 
 
-# --- Security Configuration ---
+# --- Security Configuration (ADR-0001: Dex OIDC authentication) ---
+
+
+class AuthMode(str, Enum):
+    """Declared enforcement mode for the auth subsystem.
+
+    ``enforce`` is the schema default: the absence of a ``security`` block
+    in ``forge.yaml`` can never mean the absence of authentication.
+    ``dev_insecure`` additionally requires the ``FORGE_DEV_INSECURE=1``
+    environment variable at process start (checked by forge-gateway, not
+    by this schema) before it is allowed to actually engage.
+    """
+
+    ENFORCE = "enforce"
+    DEV_INSECURE = "dev_insecure"
+
+
+class Permission(str, Enum):
+    """The closed set of permissions guarding gateway routes."""
+
+    AGENT_INVOKE = "agent:invoke"
+    TOOLS_INVOKE = "tools:invoke"
+    AGENT_PEER = "agent:peer"
+    CONFIG_READ = "config:read"
+    CONFIG_WRITE = "config:write"
+    METRICS_READ = "metrics:read"
+
+
+# Sentinel permission granting every permission in the closed set (used by
+# the built-in "admin" role). Not itself a member of ``Permission``.
+PERMISSION_WILDCARD = "*"
+
+
+class SecurityAuthConfig(BaseModel):
+    """Declares (rather than infers) the auth enforcement posture."""
+
+    mode: AuthMode = AuthMode.ENFORCE
+
+
+class SessionConfig(BaseModel):
+    """BFF session-cookie codec settings.
+
+    The cookie is a stateless, authenticated-encrypted blob (Fernet /
+    MultiFernet) containing only identity claims -- never an access or
+    refresh token.
+    """
+
+    cookie_name: str = "forge_session"
+    encryption_key: SecretRef | None = Field(
+        default_factory=lambda: SecretRef(source=SecretSource.ENV, name="FORGE_SESSION_KEY")
+    )
+    previous_encryption_key: SecretRef | None = None
+    lifetime_seconds: int = 28800  # 8h absolute
+    idle_timeout_seconds: int = 3600  # 1h sliding
+    same_site: str = "lax"
+    secure: bool = True
+    csrf_cookie_name: str = "forge_csrf"
+
+    @field_validator("same_site")
+    @classmethod
+    def validate_same_site(cls, v: str) -> str:
+        if v == "none":
+            msg = (
+                "session.same_site cannot be 'none' -- that would defeat the "
+                "primary CSRF control (ADR-0001 SS4.2). Use 'lax' (default) or "
+                "'strict'."
+            )
+            raise ValueError(msg)
+        if v not in ("lax", "strict"):
+            msg = f"session.same_site must be 'lax' or 'strict', got {v!r}"
+            raise ValueError(msg)
+        return v
+
+
+class OIDCConfig(BaseModel):
+    """Dex OIDC settings.
+
+    Defaults are pre-filled with the verified, live values for this
+    deployment's Dex instance so that an unconfigured ``forge.yaml`` still
+    enforces against a real identity provider (see SecurityConfig's
+    "enforce requires a mechanism" validator).
+
+    ``client_secret`` is optional: the registered ``forge-ai`` Dex client
+    is a PUBLIC client secured by PKCE, not a confidential client -- see
+    the developer report for this deviation from the ADR's confidential-
+    client example.
+    """
+
+    enabled: bool = True
+    issuer: str = "https://dex.hvslocal/dex"
+    client_id: str = "forge-ai"
+    client_secret: SecretRef | None = None
+    audience: str | None = None  # defaults to client_id, resolved below
+    scopes: list[str] = Field(default_factory=lambda: ["openid", "email", "profile", "groups"])
+    redirect_uri: str = "https://forgeai.hvslocal/auth/callback"
+    post_login_default_path: str = "/"
+
+    discovery: bool = True
+    authorization_endpoint: str | None = None
+    token_endpoint: str | None = None
+    jwks_uri: str = "https://dex.hvslocal/dex/keys"
+
+    allowed_algorithms: list[str] = Field(default_factory=lambda: ["RS256"])
+    clock_skew_seconds: int = 60
+    jwks_cache_ttl_seconds: int = 300
+    jwks_min_refresh_seconds: int = 30
+    jwks_stale_grace_seconds: int = 86400
+
+    accept_bearer_tokens: bool = True
+
+    session: SessionConfig = Field(default_factory=SessionConfig)
+
+    @model_validator(mode="after")
+    def resolve_audience(self) -> OIDCConfig:
+        if self.audience is None:
+            self.audience = self.client_id
+        return self
+
+
+class ServiceToken(BaseModel):
+    """A single Forge-issued service-token principal.
+
+    Only the SHA-256 hex digest of the token is stored -- never the
+    token itself. A digest of a 256-bit random value is not brute-
+    forceable and carries no exploitable material, so it may live in
+    ``forge.yaml`` in git.
+    """
+
+    id: str
+    description: str = ""
+    secret_sha256: str
+    roles: list[str] = Field(default_factory=list)
+    expires_at: datetime | None = None
+
+    @field_validator("secret_sha256")
+    @classmethod
+    def validate_sha256_hex(cls, v: str) -> str:
+        if not _SHA256_HEX_RE.fullmatch(v):
+            msg = (
+                "service token secret_sha256 must be exactly 64 lowercase hex "
+                f"characters (a SHA-256 digest), got {v!r}"
+            )
+            raise ValueError(msg)
+        return v
+
+
+class ServiceTokenConfig(BaseModel):
+    """Machine-client credentials (MCP, A2A, CI)."""
+
+    enabled: bool = False
+    tokens: list[ServiceToken] = Field(default_factory=list)
+
+
+class RoleBinding(BaseModel):
+    """Maps claims (groups / emails / subs) to a role.
+
+    A principal receives the union of roles from every binding it
+    matches. ``groups``/``subs`` match case-sensitively; ``emails`` match
+    case-insensitively (see ADR-0001 SS6.3).
+    """
+
+    role: str
+    groups: list[str] = Field(default_factory=list)
+    emails: list[str] = Field(default_factory=list)
+    subs: list[str] = Field(default_factory=list)
+
+
+_DEFAULT_ROLES: dict[str, list[str]] = {
+    "viewer": ["config:read", "metrics:read"],
+    "user": ["config:read", "metrics:read", "agent:invoke", "tools:invoke"],
+    "admin": ["*"],
+}
+
+
+class AuthorizationConfig(BaseModel):
+    """Claims -> roles -> permissions. Deny by default.
+
+    A principal matching no binding receives zero permissions
+    (``default_role`` is ``None`` by default -- deny). Setting
+    ``default_role`` is a deliberate, greppable act of trusting everyone
+    the IdP authenticates.
+    """
+
+    default_role: str | None = None
+    metrics_public: bool = True
+    roles: dict[str, list[str]] = Field(default_factory=lambda: dict(_DEFAULT_ROLES))
+    bindings: list[RoleBinding] = Field(default_factory=list)
 
 
 class AgentWeaveConfig(BaseModel):
-    """AgentWeave integration settings."""
+    """AgentWeave integration settings.
+
+    Inert as of ADR-0001: retained only so old configs still parse. It
+    can no longer disable authentication (see SecurityConfig).
+    """
 
     enabled: bool = True
     trust_domain: str = "forge.local"
@@ -303,20 +499,162 @@ class AgentWeaveConfig(BaseModel):
 
 
 class APIKeyConfig(BaseModel):
-    """API key authentication for the gateway."""
+    """API key authentication for the gateway.
+
+    Deprecated (ADR-0001 SS11): accepted for one minor release and
+    internally represents a synthetic ``legacy-api-key`` admin service
+    token. Emits a ``DeprecationWarning`` at every construction where a
+    key is actually configured.
+    """
 
     enabled: bool = False
     keys: list[SecretRef] = Field(default_factory=list)
 
+    @model_validator(mode="after")
+    def warn_if_configured(self) -> APIKeyConfig:
+        if self.enabled or self.keys:
+            warnings.warn(
+                "security.api_keys is deprecated (ADR-0001) and will be removed "
+                "in the next minor release. It is translated into a synthetic "
+                "'legacy-api-key' admin service token. Migrate to "
+                "security.service_tokens.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        return self
+
 
 class SecurityConfig(BaseModel):
-    """Top-level security configuration."""
+    """Top-level security configuration (ADR-0001: Dex OIDC authentication).
 
+    ``auth.mode`` defaults to ``enforce`` and the default ``oidc`` block
+    points at this deployment's real Dex instance, so an entirely absent
+    ``security:`` block in ``forge.yaml`` still enforces authentication
+    against a working mechanism -- the absence of configuration can never
+    mean the absence of authentication.
+    """
+
+    auth: SecurityAuthConfig = Field(default_factory=SecurityAuthConfig)
+    oidc: OIDCConfig = Field(default_factory=OIDCConfig)
+    service_tokens: ServiceTokenConfig = Field(default_factory=ServiceTokenConfig)
+    authorization: AuthorizationConfig = Field(default_factory=AuthorizationConfig)
+
+    rate_limit_rpm: int = 60
+    allowed_origins: list[str] = Field(default_factory=lambda: ["https://forgeai.hvslocal"])
+
+    # --- Deprecated / inert (kept so old configs still parse) ---
     agentweave: AgentWeaveConfig = Field(default_factory=AgentWeaveConfig)
     api_keys: APIKeyConfig = Field(default_factory=APIKeyConfig)
-    jwt_secret: SecretRef | None = None
-    rate_limit_rpm: int = 60
-    allowed_origins: list[str] = Field(default_factory=lambda: ["*"])
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_jwt_secret(cls, data: Any) -> Any:
+        """security.jwt_secret is REMOVED (ADR-0001 SS11). It was a symmetric
+        HS256 shared secret verified with ``verify_aud=False`` -- leaving it
+        accepted would leave a second, weaker door. Its presence (from a
+        loaded YAML dict, or a direct keyword argument) is a hard error."""
+        if isinstance(data, dict) and data.get("jwt_secret") is not None:
+            msg = (
+                "security.jwt_secret has been removed (ADR-0001): it was an "
+                "HS256 shared secret verified with verify_aud=False, which "
+                "cannot validate Dex's RS256 tokens and accepted tokens from "
+                "any Dex client. Migrate to security.oidc (Dex RS256 + JWKS) "
+                "or security.service_tokens (machine clients). Remove "
+                "jwt_secret from your config."
+            )
+            raise ValueError(msg)
+        return data
+
+    @model_validator(mode="after")
+    def validate_enforce_has_mechanism(self) -> SecurityConfig:
+        """ADR-0001 SS8.4 #1: enforce + oidc disabled + no service tokens is a
+        declaration with nothing to enforce with."""
+        if (
+            self.auth.mode == AuthMode.ENFORCE
+            and not self.oidc.enabled
+            and not self.service_tokens.tokens
+        ):
+            msg = (
+                "security.auth.mode is 'enforce' but there is nothing to "
+                "enforce with: security.oidc.enabled is false and "
+                "security.service_tokens.tokens is empty. Enable OIDC, "
+                "configure at least one service token, or set "
+                "auth.mode: dev_insecure (also requires FORGE_DEV_INSECURE=1)."
+            )
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def validate_session_secure(self) -> SecurityConfig:
+        """ADR-0001 SS8.4 #2: a non-secure session cookie is only tolerable in
+        dev_insecure mode."""
+        if (
+            self.oidc.enabled
+            and not self.oidc.session.secure
+            and self.auth.mode != AuthMode.DEV_INSECURE
+        ):
+            msg = (
+                "security.oidc.session.secure is false but security.auth.mode "
+                "is not 'dev_insecure'. The session cookie must be Secure "
+                "outside of dev_insecure mode."
+            )
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def validate_wildcard_origin(self) -> SecurityConfig:
+        """ADR-0001 SS8.4 #4: a wildcard origin with allow_credentials=True
+        reflects any origin -- with a session cookie in play that is a total
+        compromise."""
+        if "*" in self.allowed_origins and self.oidc.enabled:
+            msg = (
+                "security.allowed_origins contains '*' while security.oidc is "
+                "enabled. A wildcard origin combined with credentialed CORS "
+                "(required for the session cookie) reflects any origin, which "
+                "is a total compromise once a session cookie exists. List "
+                "explicit origins."
+            )
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def validate_issuer_scheme(self) -> SecurityConfig:
+        """ADR-0001 SS8.4 #8: oidc.issuer must be https:// unless dev_insecure."""
+        if (
+            self.oidc.enabled
+            and self.auth.mode != AuthMode.DEV_INSECURE
+            and not self.oidc.issuer.startswith("https://")
+        ):
+            msg = (
+                f"security.oidc.issuer ({self.oidc.issuer!r}) must use https:// "
+                "outside of dev_insecure mode."
+            )
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def validate_bindings_and_roles(self) -> SecurityConfig:
+        """ADR-0001 SS8.4 #6: typo-proofing -- a misspelled permission must
+        never fail open."""
+        known_permissions = {p.value for p in Permission} | {PERMISSION_WILDCARD}
+        for role_name, perms in self.authorization.roles.items():
+            for perm in perms:
+                if perm not in known_permissions:
+                    msg = (
+                        f"authorization.roles[{role_name!r}] references unknown "
+                        f"permission {perm!r}. Known permissions: "
+                        f"{sorted(known_permissions)}"
+                    )
+                    raise ValueError(msg)
+        for binding in self.authorization.bindings:
+            if binding.role not in self.authorization.roles:
+                msg = (
+                    f"authorization.bindings references unknown role "
+                    f"{binding.role!r}. Known roles: "
+                    f"{sorted(self.authorization.roles)}"
+                )
+                raise ValueError(msg)
+        return self
 
 
 # --- Agents Configuration ---

@@ -1,19 +1,24 @@
-"""Tests for forge_security.middleware."""
+"""Tests for forge_security.middleware.
+
+Credential verification (formerly an insecure HS256 ``jwt.decode`` with a
+silent trust-as-is fallthrough -- ADR-0001 SS1.2/SS7.4) has been removed
+from ``SecurityGate``. Those behaviours are now covered by
+``forge_security.oidc`` (see test_oidc_verifier.py, test_service_tokens.py,
+test_authorizer.py). This file covers only the remaining trust-policy /
+authorization-provider / audit composition, over an already-verified
+identity.
+"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
 from typing import Any
 
-import jwt
-import pytest
-from forge_config.schema import SecurityConfig
+from forge_config.schema import AuthMode, OIDCConfig, SecurityAuthConfig, SecurityConfig
 from forge_security.audit import AuditLogger
 from forge_security.identity import ForgeIdentityManager
 from forge_security.middleware import (
     GateResult,
-    JWTAuthenticationError,
     SecurityGate,
 )
 from forge_security.trust import TrustPolicyEnforcer
@@ -60,9 +65,10 @@ def _make_gate(
     authz=None,
     allowed_origins: list[str] | None = None,
     rate_limit_rpm: int = 60,
-    jwt_secret: str | None = None,
 ) -> SecurityGate:
     config = SecurityConfig(
+        auth=SecurityAuthConfig(mode=AuthMode.DEV_INSECURE),
+        oidc=OIDCConfig(enabled=False),
         allowed_origins=allowed_origins if allowed_origins is not None else ["*"],
         rate_limit_rpm=rate_limit_rpm,
     )
@@ -71,7 +77,6 @@ def _make_gate(
         trust_enforcer=TrustPolicyEnforcer(config),
         audit_logger=AuditLogger(),
         authz_provider=authz,
-        jwt_secret=jwt_secret,
     )
 
 
@@ -154,159 +159,22 @@ class TestSecurityGate:
         assert result.reason == "all checks passed"
 
 
-# ---------------------------------------------------------------------------
-# JWT Authentication Tests
-# ---------------------------------------------------------------------------
+class TestAuthenticateIsIdentityPassthrough:
+    """SecurityGate.authenticate performs NO credential verification -- it
+    trusts caller_id as an already-verified identity. This is safe only
+    because upstream callers (forge_security.oidc.resolve_principal) are
+    responsible for verification; SecurityGate itself must never be fed
+    unauthenticated request input (see the module deprecation docstring).
+    """
 
-JWT_SECRET = "test-secret-key-for-jwt-hs256-min32bytes!"
-WRONG_SECRET = "wrong-secret-key-definitely-not-right!!"
+    async def test_authenticate_returns_caller_id_unchanged(self):
+        gate = _make_gate()
+        identity = await gate.authenticate("already-verified-principal-sub")
+        assert identity == "already-verified-principal-sub"
 
+    async def test_no_jwt_module_is_imported_by_middleware(self):
+        """Regression guard for the ADR-0001 HS256 / verify_aud=False
+        removal: forge_security.middleware must not import jwt at all."""
+        import forge_security.middleware as mw
 
-def _make_jwt(
-    sub: str | None = "agent-1",
-    secret: str = JWT_SECRET,
-    exp_delta: timedelta | None = None,
-    extra_claims: dict[str, Any] | None = None,
-) -> str:
-    """Create an HS256-signed JWT for testing."""
-    payload: dict[str, Any] = {}
-    if sub is not None:
-        payload["sub"] = sub
-    if exp_delta is not None:
-        payload["exp"] = datetime.now(tz=UTC) + exp_delta
-    else:
-        # Default: valid for 1 hour
-        payload["exp"] = datetime.now(tz=UTC) + timedelta(hours=1)
-    if extra_claims:
-        payload.update(extra_claims)
-    return jwt.encode(payload, secret, algorithm="HS256")
-
-
-class TestJWTAuthentication:
-    """Tests for JWT-based authentication in SecurityGate."""
-
-    async def test_authenticate_with_valid_jwt(self):
-        """A valid HS256 JWT with sub claim returns the subject."""
-        gate = _make_gate(jwt_secret=JWT_SECRET)
-        token = _make_jwt(sub="agent-1")
-        identity = await gate.authenticate(token)
-        assert identity == "agent-1"
-
-    async def test_authenticate_with_invalid_jwt_signature(self):
-        """A JWT signed with the wrong secret is rejected."""
-        gate = _make_gate(jwt_secret=JWT_SECRET)
-        token = _make_jwt(sub="agent-1", secret=WRONG_SECRET)
-        with pytest.raises(JWTAuthenticationError, match="JWT verification failed"):
-            await gate.authenticate(token)
-
-    async def test_authenticate_with_expired_jwt(self):
-        """An expired JWT is rejected."""
-        gate = _make_gate(jwt_secret=JWT_SECRET)
-        token = _make_jwt(sub="agent-1", exp_delta=timedelta(hours=-1))
-        with pytest.raises(JWTAuthenticationError, match="JWT verification failed"):
-            await gate.authenticate(token)
-
-    async def test_authenticate_with_missing_sub_claim(self):
-        """A valid JWT that lacks a 'sub' claim is rejected."""
-        gate = _make_gate(jwt_secret=JWT_SECRET)
-        token = _make_jwt(sub=None)
-        with pytest.raises(JWTAuthenticationError, match="missing required 'sub' claim"):
-            await gate.authenticate(token)
-
-    async def test_authenticate_without_jwt_secret_trusts_raw(self):
-        """Without jwt_secret configured, raw caller_id is trusted as-is."""
-        gate = _make_gate(jwt_secret=None)
-        identity = await gate.authenticate("raw-id")
-        assert identity == "raw-id"
-
-    async def test_authenticate_with_non_jwt_token_and_secret(self):
-        """When jwt_secret is set but token is not a JWT, it passes through.
-
-        Non-JWT tokens (plain strings, dotted API keys, semver strings,
-        SPIFFE IDs) pass through as raw identities because they fail
-        structural JWT decoding.
-        """
-        gate = _make_gate(jwt_secret=JWT_SECRET)
-
-        # Plain string with no dots
-        assert await gate.authenticate("plain-api-key") == "plain-api-key"
-
-        # Dotted API key
-        assert await gate.authenticate("my.api.key") == "my.api.key"
-
-        # Semver-like string
-        assert await gate.authenticate("1.2.3") == "1.2.3"
-
-        # SPIFFE ID with dots
-        assert (
-            await gate.authenticate("spiffe://domain/path.to.service")
-            == "spiffe://domain/path.to.service"
-        )
-
-    async def test_valid_jwt_through_full_pipeline(self):
-        """A valid JWT flows through the full __call__ pipeline."""
-        gate = _make_gate(jwt_secret=JWT_SECRET)
-        token = _make_jwt(sub="pipeline-agent")
-        result = await gate(token, "search")
-        assert result.allowed is True
-        assert result.identity == "pipeline-agent"
-
-    async def test_invalid_jwt_through_full_pipeline_denied(self):
-        """An invalid JWT through __call__ returns a denied GateResult."""
-        gate = _make_gate(jwt_secret=JWT_SECRET)
-        token = _make_jwt(sub="agent-1", secret=WRONG_SECRET)
-        result = await gate(token, "search")
-        assert result.allowed is False
-        assert "JWT verification failed" in result.reason
-
-    async def test_jwt_with_additional_claims(self):
-        """Extra claims in the JWT do not interfere; sub is extracted."""
-        gate = _make_gate(jwt_secret=JWT_SECRET)
-        token = _make_jwt(
-            sub="agent-42",
-            extra_claims={"iss": "forge", "role": "admin", "org": "acme"},
-        )
-        identity = await gate.authenticate(token)
-        assert identity == "agent-42"
-
-    async def test_jwt_warning_logged_without_secret(self, caplog):
-        """A warning is logged once when no jwt_secret is configured."""
-        gate = _make_gate(jwt_secret=None)
-        with caplog.at_level("WARNING", logger="forge.security.middleware"):
-            await gate.authenticate("id-1")
-            await gate.authenticate("id-2")
-        warning_msgs = [r.message for r in caplog.records if "jwt_secret" in r.message]
-        # Warning should appear exactly once (not on the second call)
-        assert len(warning_msgs) == 1
-
-    async def test_dotted_api_key_passes_through_with_jwt_secret(self):
-        """A dotted API key like 'my.api.key' is not a JWT and passes through."""
-        gate = _make_gate(jwt_secret=JWT_SECRET)
-        identity = await gate.authenticate("my.api.key")
-        assert identity == "my.api.key"
-
-    async def test_semver_string_passes_through_with_jwt_secret(self):
-        """A semver-like string '1.2.3' passes through as raw identity."""
-        gate = _make_gate(jwt_secret=JWT_SECRET)
-        identity = await gate.authenticate("1.2.3")
-        assert identity == "1.2.3"
-
-    async def test_spiffe_id_passes_through_with_jwt_secret(self):
-        """A SPIFFE ID passes through as raw identity even with jwt_secret."""
-        gate = _make_gate(jwt_secret=JWT_SECRET)
-        spiffe = "spiffe://example.org/ns/prod/sa/agent"
-        identity = await gate.authenticate(spiffe)
-        assert identity == spiffe
-
-    async def test_valid_jwt_wrong_signature_denied(self):
-        """A properly formatted JWT with wrong signature is denied, not passed through."""
-        gate = _make_gate(jwt_secret=JWT_SECRET)
-        token = _make_jwt(sub="attacker", secret=WRONG_SECRET)
-        with pytest.raises(JWTAuthenticationError, match="JWT verification failed"):
-            await gate.authenticate(token)
-
-    async def test_malformed_base64_jwt_passes_through(self):
-        """A string with two dots but invalid base64 passes through as raw identity."""
-        gate = _make_gate(jwt_secret=JWT_SECRET)
-        identity = await gate.authenticate("not.valid.base64jwt")
-        assert identity == "not.valid.base64jwt"
+        assert "jwt" not in dir(mw)

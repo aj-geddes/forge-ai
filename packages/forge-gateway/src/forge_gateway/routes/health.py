@@ -15,6 +15,8 @@ _ready = False
 _started = False
 _version = ""
 _components: dict[str, str] = {}
+_auth_mode = "enforce"
+_auth_healthy = True
 
 
 def set_ready(ready: bool) -> None:
@@ -40,6 +42,22 @@ def set_component_status(name: str, status: str) -> None:
     _components[name] = status
 
 
+def set_auth_mode(mode: str) -> None:
+    """Record the declared auth enforcement mode (ADR-0001 SS7.1) for
+    ``/health/ready`` and the UI's insecure-mode banner."""
+    global _auth_mode
+    _auth_mode = mode
+
+
+def set_auth_healthy(healthy: bool) -> None:
+    """Record whether the auth subsystem has at least one working
+    credential mechanism. ``False`` marks the gateway NOT READY
+    (ADR-0001 SS7.3) so a pod with a broken auth config never takes
+    traffic in a rolling update."""
+    global _auth_healthy
+    _auth_healthy = healthy
+
+
 def reset_components() -> None:
     """Clear all recorded component statuses."""
     _components.clear()
@@ -48,12 +66,16 @@ def reset_components() -> None:
 def _is_ready() -> bool:
     """Whether the gateway is ready to serve traffic.
 
-    Overall readiness requires startup to have completed *and* no tracked
-    component to be in a ``"failed"`` state. A component that is merely
-    ``"unavailable"`` (e.g. an optional subsystem was never configured) does
-    not block readiness.
+    Overall readiness requires startup to have completed, no tracked
+    component to be in a ``"failed"`` state, and the auth subsystem to
+    have at least one working credential mechanism (ADR-0001 SS7.3: total
+    auth failure is NOT READY, never a silent bypass). A component that is
+    merely ``"unavailable"`` (e.g. an optional subsystem was never
+    configured) does not block readiness.
     """
     if not _ready:
+        return False
+    if not _auth_healthy:
         return False
     return _FAILED not in _components.values()
 
@@ -66,15 +88,24 @@ async def liveness() -> HealthResponse:
 
 @router.get("/health/ready", response_model=HealthResponse)
 async def readiness() -> HealthResponse | JSONResponse:
-    """Readiness probe: 503 when startup is incomplete or a component failed."""
+    """Readiness probe: 503 when startup is incomplete, a component failed,
+    or the auth subsystem cannot operate."""
     if not _is_ready():
         body = HealthResponse(
             status="not_ready",
             version=_version,
             components=dict(_components),
+            auth_mode=_auth_mode,
+            auth_healthy=_auth_healthy,
         )
         return JSONResponse(status_code=503, content=body.model_dump())
-    return HealthResponse(status="ready", version=_version, components=dict(_components))
+    return HealthResponse(
+        status="ready",
+        version=_version,
+        components=dict(_components),
+        auth_mode=_auth_mode,
+        auth_healthy=_auth_healthy,
+    )
 
 
 @router.get("/health/startup", response_model=HealthResponse)

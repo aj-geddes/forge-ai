@@ -421,7 +421,7 @@ class TestConfigReloadCallback:
             patch("forge_config.load_config", return_value=mock_config) as mock_load,
             patch("forge_config.ConfigWatcher", side_effect=capture_watcher),
             patch.object(admin_module, "set_state") as mock_set_state,
-            patch("forge_gateway.app.set_api_key_config") as mock_set_keys,
+            patch("forge_gateway.app._schedule_auth_reinit") as mock_auth_reinit,
         ):
             async with lifespan(app):
                 mock_load.return_value = new_config
@@ -436,7 +436,7 @@ class TestConfigReloadCallback:
                 # Agent should NOT be passed (preserved from prior state)
                 assert "agent" not in call_kwargs
 
-                mock_set_keys.assert_called_with(new_config.security.api_keys)
+                mock_auth_reinit.assert_called_once_with(new_config)
 
     async def test_reload_callback_handles_load_failure(
         self,
@@ -472,19 +472,19 @@ class TestConfigReloadCallback:
                 # Admin state should NOT have been updated on failure
                 mock_set_state.assert_not_called()
 
-    async def test_reload_callback_updates_api_key_config(
+    async def test_reload_callback_schedules_auth_reinit(
         self,
         mock_config: MagicMock,
         mock_watcher: MagicMock,
         config_file: Path,
     ) -> None:
-        """The reload callback should update API key auth configuration."""
+        """The reload callback should re-wire the auth subsystem (ADR-0001):
+        updated bindings/service tokens/OIDC settings must take effect on
+        hot-reload, not just at process startup."""
         app = FastAPI(lifespan=lifespan)
 
         new_config = MagicMock()
         new_config.metadata.name = "reloaded"
-        new_api_keys = MagicMock()
-        new_config.security.api_keys = new_api_keys
 
         captured_callback: Any = None
 
@@ -497,15 +497,15 @@ class TestConfigReloadCallback:
             patch.dict("os.environ", {"FORGE_CONFIG_PATH": str(config_file)}),
             patch("forge_config.load_config", return_value=mock_config) as mock_load,
             patch("forge_config.ConfigWatcher", side_effect=capture_watcher),
-            patch("forge_gateway.app.set_api_key_config") as mock_set_keys,
+            patch("forge_gateway.app._schedule_auth_reinit") as mock_auth_reinit,
         ):
             async with lifespan(app):
                 mock_load.return_value = new_config
-                mock_set_keys.reset_mock()
+                mock_auth_reinit.reset_mock()
 
                 captured_callback(config_file)
 
-                mock_set_keys.assert_called_once_with(new_api_keys)
+                mock_auth_reinit.assert_called_once_with(new_config)
 
 
 # ---------------------------------------------------------------------------
@@ -870,7 +870,7 @@ class TestMakeReloadCallbackAgent:
         with (
             patch("forge_config.load_config", return_value=new_config),
             patch("forge_gateway.app._schedule_tool_rebuild") as mock_schedule,
-            patch("forge_gateway.app._init_security_gate"),
+            patch("forge_gateway.app._schedule_auth_reinit"),
             patch("forge_gateway.app._refresh_agent_card"),
         ):
             callback(Path("/tmp/forge.yaml"))
@@ -889,7 +889,7 @@ class TestMakeReloadCallbackAgent:
         with (
             patch("forge_config.load_config", return_value=new_config),
             patch("forge_gateway.app._schedule_tool_rebuild") as mock_schedule,
-            patch("forge_gateway.app._init_security_gate"),
+            patch("forge_gateway.app._schedule_auth_reinit"),
             patch("forge_gateway.app._refresh_agent_card"),
         ):
             callback(Path("/tmp/forge.yaml"))
@@ -978,7 +978,12 @@ class TestAgentInitializationHealthState:
         mock_watcher: MagicMock,
         config_file: Path,
     ) -> None:
-        """The public /health/ready endpoint must return 200 when the agent is ready."""
+        """The public /health/ready endpoint must return 200 when the agent is
+        ready and the auth subsystem is healthy. ``mock_config`` is a loosely
+        typed MagicMock (not a real ForgeConfig), so ``_init_auth`` is
+        stubbed here -- this test's concern is agent-readiness reporting,
+        covered separately by the auth-specific readiness tests in
+        test_auth_enforcement.py."""
         app = FastAPI(lifespan=lifespan)
         app.include_router(health.router)
 
@@ -986,11 +991,15 @@ class TestAgentInitializationHealthState:
         mock_agent.initialize = AsyncMock(return_value=None)
         mock_agent._registry = None
 
+        async def _fake_init_auth(config: object) -> None:
+            health.set_auth_healthy(True)
+
         with (
             patch.dict("os.environ", {"FORGE_CONFIG_PATH": str(config_file)}),
             patch("forge_config.load_config", return_value=mock_config),
             patch("forge_config.ConfigWatcher", return_value=mock_watcher),
             patch("forge_agent.ForgeAgent", return_value=mock_agent),
+            patch("forge_gateway.app._init_auth", _fake_init_auth),
         ):
             async with lifespan(app):
                 client = TestClient(app)

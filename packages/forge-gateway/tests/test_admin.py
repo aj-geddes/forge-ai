@@ -12,6 +12,7 @@ Covers:
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 from typing import Any
@@ -23,21 +24,25 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from forge_config.schema import (
     AgentsConfig,
-    APIKeyConfig,
+    AuthorizationConfig,
     ForgeConfig,
     PeerAgent,
-    SecretRef,
-    SecretSource,
+    ServiceToken,
 )
 from forge_gateway import auth as auth_module
+from forge_gateway import security
 from forge_gateway.routes import admin
+from forge_security.oidc import Authorizer, ServiceTokenVerifier
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
-VALID_API_KEY = "test-secret-key"
-WRONG_API_KEY = "wrong-key-xyz789"
+# ADR-0001: admin auth is now a Forge-issued service token (forge_sk_...),
+# not a static API key.
+VALID_API_KEY = "forge_sk_admin-test_abcdefghijklmnopqrstuvwxyz0123456789ABCD"
+WRONG_API_KEY = "forge_sk_admin-test_ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ"
+_VALID_TOKEN_DIGEST = hashlib.sha256(VALID_API_KEY.encode("utf-8")).hexdigest()
 
 
 # ---------------------------------------------------------------------------
@@ -61,36 +66,44 @@ def _wire_admin(default_config: ForgeConfig) -> Iterator[None]:
 
 @pytest.fixture()
 def _wire_auth() -> Iterator[None]:
-    """Enable API key auth with a known test key."""
-    config = APIKeyConfig(
-        enabled=True,
-        keys=[SecretRef(source=SecretSource.ENV, name="TEST_ADMIN_KEY")],
+    """Wire the auth subsystem with a single admin-scoped service token
+    (ADR-0001): the static admin API key is retired."""
+    security.configure_auth(
+        session_codec=None,
+        service_token_verifier=ServiceTokenVerifier(
+            [ServiceToken(id="admin-test", secret_sha256=_VALID_TOKEN_DIGEST, roles=["admin"])]
+        ),
+        oidc_verifier=None,
+        authorizer=Authorizer(AuthorizationConfig()),
+        dev_insecure=False,
     )
-    auth_module._api_key_config = config
-    auth_module._resolved_keys = [VALID_API_KEY]
     yield
-    auth_module._api_key_config = None
-    auth_module._resolved_keys = []
+    security.reset_auth()
 
 
 @pytest.fixture()
-def _wire_auth_disabled() -> Iterator[None]:
-    """Configure auth module with API key auth disabled."""
-    auth_module._api_key_config = APIKeyConfig(enabled=False, keys=[])
-    auth_module._resolved_keys = []
+def _wire_auth_unavailable() -> Iterator[None]:
+    """Simulate total auth-subsystem failure: no working credential
+    mechanism at all (ADR-0001 SS7.3) -- every request is denied 503
+    ``auth_unavailable``, not 403."""
+    security.reset_auth()
     yield
-    auth_module._api_key_config = None
-    auth_module._resolved_keys = []
+    security.reset_auth()
 
 
 @pytest.fixture()
 def _wire_auth_no_keys() -> Iterator[None]:
-    """Configure auth module with auth enabled but no keys resolved."""
-    auth_module._api_key_config = APIKeyConfig(enabled=True, keys=[])
-    auth_module._resolved_keys = []
+    """Auth is wired but no service tokens are configured -- also a total
+    failure per ADR-0001 SS7.3 (nothing can authenticate a caller)."""
+    security.configure_auth(
+        session_codec=None,
+        service_token_verifier=ServiceTokenVerifier([]),
+        oidc_verifier=None,
+        authorizer=Authorizer(AuthorizationConfig()),
+        dev_insecure=False,
+    )
     yield
-    auth_module._api_key_config = None
-    auth_module._resolved_keys = []
+    security.reset_auth()
 
 
 @pytest.fixture()
@@ -214,11 +227,11 @@ class TestAdminNoAuthHeader:
         assert resp.status_code == 401
 
     async def test_no_auth_response_includes_detail(self, async_client: httpx.AsyncClient) -> None:
-        """The 401 body should contain a descriptive detail message."""
+        """The 401 body should contain a machine-readable error code."""
         resp = await async_client.get("/v1/admin/config")
         body = resp.json()
         assert "detail" in body
-        assert "Missing" in body["detail"] or "authentication" in body["detail"]
+        assert body["detail"] == "missing_credentials"
 
 
 # =========================================================================
@@ -293,7 +306,7 @@ class TestAdminInvalidApiKey:
         self, async_client: httpx.AsyncClient
     ) -> None:
         resp = await async_client.get("/v1/admin/config", headers=self._bad())
-        assert "Invalid" in resp.json()["detail"]
+        assert resp.json()["detail"] == "invalid_token"
 
 
 # =========================================================================
@@ -375,11 +388,6 @@ class TestAdminValidApiKey:
         # Unknown peer -> 404 (but NOT 401, proving auth passed)
         resp = await async_client.post("/v1/admin/peers/nonexistent/ping", headers=auth_headers)
         assert resp.status_code == 404
-
-    async def test_admin_x_api_key_header_accepted(self, async_client: httpx.AsyncClient) -> None:
-        """X-API-Key header is accepted as an alternative to Bearer."""
-        resp = await async_client.get("/v1/admin/config", headers={"X-API-Key": VALID_API_KEY})
-        assert resp.status_code == 200
 
     async def test_admin_tools_registry_with_valid_key(
         self, async_client: httpx.AsyncClient, auth_headers: dict[str, str]
@@ -538,42 +546,10 @@ class TestAdminAuthEdgeCases:
         )
         assert resp.status_code == 200
 
-    async def test_x_api_key_with_invalid_value(self, async_client: httpx.AsyncClient) -> None:
-        resp = await async_client.get("/v1/admin/config", headers={"X-API-Key": WRONG_API_KEY})
-        assert resp.status_code == 401
-
-    async def test_x_api_key_with_empty_value(self, async_client: httpx.AsyncClient) -> None:
-        resp = await async_client.get("/v1/admin/config", headers={"X-API-Key": ""})
-        assert resp.status_code == 401
-
-    async def test_both_headers_bearer_takes_priority(
-        self, async_client: httpx.AsyncClient
-    ) -> None:
-        """When both Authorization and X-API-Key are present, Bearer wins."""
-        resp = await async_client.get(
-            "/v1/admin/config",
-            headers={
-                "Authorization": f"Bearer {VALID_API_KEY}",
-                "X-API-Key": WRONG_API_KEY,
-            },
-        )
-        assert resp.status_code == 200
-
-    async def test_invalid_bearer_fails_despite_valid_x_api_key(
-        self, async_client: httpx.AsyncClient
-    ) -> None:
-        """Invalid Bearer should fail even if X-API-Key is valid."""
-        resp = await async_client.get(
-            "/v1/admin/config",
-            headers={
-                "Authorization": f"Bearer {WRONG_API_KEY}",
-                "X-API-Key": VALID_API_KEY,
-            },
-        )
-        assert resp.status_code == 401
-
     async def test_bearer_with_leading_whitespace(self, async_client: httpx.AsyncClient) -> None:
-        """Leading space in Authorization header is rejected."""
+        """A leading space in the Authorization header value changes the
+        scheme token itself (``request.headers.get`` does not strip it),
+        so this must still be rejected."""
         resp = await async_client.get(
             "/v1/admin/config",
             headers={"Authorization": f" Bearer {VALID_API_KEY}"},
@@ -586,87 +562,49 @@ class TestAdminAuthEdgeCases:
 # =========================================================================
 
 
-@pytest.mark.usefixtures("_wire_admin")
+@pytest.mark.usefixtures("_wire_auth_unavailable", "_wire_admin")
 class TestAdminAuthNotConfigured:
-    """When API key config is None or disabled, admin endpoints return 403."""
+    """ADR-0001 SS7.3: total auth-subsystem failure (no working credential
+    mechanism at all) denies every request 503 ``auth_unavailable`` -- not
+    401 and not 403. A 401 would falsely blame the caller's credential;
+    this is an infrastructure failure, not a bad credential."""
 
-    async def test_returns_403_when_auth_not_configured(
+    async def test_returns_503_when_auth_not_configured(
         self, async_client: httpx.AsyncClient
     ) -> None:
-        auth_module._api_key_config = None
-        auth_module._resolved_keys = []
         resp = await async_client.get("/v1/admin/config")
-        assert resp.status_code == 403
+        assert resp.status_code == 503
+        assert resp.json()["detail"] == "auth_unavailable"
 
-    async def test_returns_403_when_auth_disabled(self, async_client: httpx.AsyncClient) -> None:
-        auth_module._api_key_config = APIKeyConfig(enabled=False, keys=[])
-        auth_module._resolved_keys = []
-        resp = await async_client.get("/v1/admin/config")
-        assert resp.status_code == 403
-
-    async def test_returns_403_even_with_valid_looking_key(
+    async def test_returns_503_even_with_valid_looking_key(
         self, async_client: httpx.AsyncClient
     ) -> None:
-        """Even with a valid-looking key, disabled auth means 403."""
-        auth_module._api_key_config = APIKeyConfig(enabled=False, keys=[])
-        auth_module._resolved_keys = []
+        """Even with a valid-looking credential, a totally unconfigured
+        auth subsystem still denies with 503 -- there is nothing to
+        verify the credential against."""
         resp = await async_client.get(
             "/v1/admin/config",
             headers={"Authorization": "Bearer some-key"},
         )
-        assert resp.status_code == 403
+        assert resp.status_code == 503
+        assert resp.json()["detail"] == "auth_unavailable"
 
 
 @pytest.mark.usefixtures("_wire_auth_no_keys", "_wire_admin")
 class TestAdminAuthEnabledNoKeys:
-    """When auth is enabled but no keys are resolved, admin returns 403."""
+    """When no service tokens are configured, the auth subsystem has no
+    working mechanism -- also a 503 ``auth_unavailable`` (ADR-0001 SS7.3),
+    not a bespoke 403."""
 
-    async def test_returns_403_when_no_keys_resolved(self, async_client: httpx.AsyncClient) -> None:
+    async def test_returns_503_when_no_tokens_resolved(
+        self, async_client: httpx.AsyncClient
+    ) -> None:
         resp = await async_client.get(
             "/v1/admin/config",
             headers={"Authorization": f"Bearer {VALID_API_KEY}"},
         )
-        assert resp.status_code == 403
-
-
-# =========================================================================
-# 7. Key validation unit tests
-# =========================================================================
-
-
-class TestKeyValidation:
-    """Unit tests for the internal key validation helpers."""
-
-    def test_validate_key_matches_correct_key(self) -> None:
-        auth_module._resolved_keys = ["correct-key"]
-        assert auth_module._validate_key("correct-key") is True
-        auth_module._resolved_keys = []
-
-    def test_validate_key_rejects_wrong_key(self) -> None:
-        auth_module._resolved_keys = ["correct-key"]
-        assert auth_module._validate_key("wrong-key") is False
-        auth_module._resolved_keys = []
-
-    def test_validate_key_empty_key_list(self) -> None:
-        auth_module._resolved_keys = []
-        assert auth_module._validate_key("any-key") is False
-
-    def test_validate_key_multiple_keys(self) -> None:
-        auth_module._resolved_keys = ["key-one", "key-two", "key-three"]
-        assert auth_module._validate_key("key-two") is True
-        assert auth_module._validate_key("key-four") is False
-        auth_module._resolved_keys = []
-
-    def test_extract_token_prefers_bearer(self) -> None:
-        bearer = MagicMock()
-        bearer.credentials = "bearer-token"
-        assert auth_module._extract_token(bearer, "header-token") == "bearer-token"
-
-    def test_extract_token_falls_back_to_api_key(self) -> None:
-        assert auth_module._extract_token(None, "header-token") == "header-token"
-
-    def test_extract_token_returns_none_when_empty(self) -> None:
-        assert auth_module._extract_token(None, None) is None
+        assert resp.status_code == 503
+        assert resp.json()["detail"] == "auth_unavailable"
 
 
 # =========================================================================

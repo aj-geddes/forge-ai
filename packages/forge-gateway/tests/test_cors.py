@@ -47,8 +47,10 @@ class TestCORSPreflightMatching:
     def test_preflight_with_wildcard_origin_returns_200(self) -> None:
         """OPTIONS request with any origin returns 200 when allowed_origins=['*'].
 
-        When allow_credentials is True, Starlette reflects the requesting origin
-        instead of returning the literal '*' — this is correct per the CORS spec.
+        ADR-0001 SS4.2: a wildcard origin must never be combined with
+        credentialed CORS. When the gateway is configured with '*' the
+        middleware disables allow_credentials, so Starlette returns the
+        literal '*' rather than reflecting the requesting origin.
         """
         client = _create_test_client(["*"])
         response = client.options(
@@ -59,7 +61,8 @@ class TestCORSPreflightMatching:
             },
         )
         assert response.status_code == 200
-        assert response.headers["access-control-allow-origin"] == "https://example.com"
+        assert response.headers["access-control-allow-origin"] == "*"
+        assert "access-control-allow-credentials" not in response.headers
 
     def test_preflight_with_specific_matching_origin(self) -> None:
         """OPTIONS request with a configured origin returns that origin in the header."""
@@ -130,8 +133,9 @@ class TestCORSDefaultConfig:
     def test_default_config_uses_wildcard(self) -> None:
         """When config cannot be loaded, CORS defaults to wildcard '*'.
 
-        With allow_credentials=True, Starlette reflects the requesting origin
-        rather than returning literal '*'.  We verify any origin is accepted.
+        ADR-0001 SS4.2: wildcard origins are never combined with credentials
+        (see :func:`forge_gateway.app.create_app`), so any origin is
+        accepted but the literal '*' is returned, not a reflected origin.
         """
         with patch(
             "forge_config.load_config",
@@ -147,7 +151,7 @@ class TestCORSDefaultConfig:
             },
         )
         assert response.status_code == 200
-        assert response.headers["access-control-allow-origin"] == "https://anything.example.com"
+        assert response.headers["access-control-allow-origin"] == "*"
 
     def test_default_config_allows_arbitrary_origin(self) -> None:
         """Wildcard default means any origin is accepted for regular requests.
@@ -275,18 +279,16 @@ class TestCORSCredentials:
         assert response.headers["access-control-allow-credentials"] == "true"
 
     def test_credentials_header_with_wildcard(self) -> None:
-        """Wildcard origin still has allow_credentials=True in middleware config.
-
-        Note: per CORS spec, when allow_credentials is True and origins is ['*'],
-        Starlette will reflect the requesting origin rather than sending '*'.
-        """
+        """ADR-0001 SS4.2: a wildcard origin must never be combined with
+        credentialed CORS -- allow_credentials is disabled whenever '*' is
+        configured, so no Allow-Credentials header is sent at all."""
         client = _create_test_client(["*"])
         response = client.get(
             "/health/live",
             headers={"Origin": "https://any.example.com"},
         )
-        # With allow_credentials=True, the middleware must respond
-        assert "access-control-allow-origin" in response.headers
+        assert response.headers["access-control-allow-origin"] == "*"
+        assert "access-control-allow-credentials" not in response.headers
 
 
 # ---------------------------------------------------------------------------

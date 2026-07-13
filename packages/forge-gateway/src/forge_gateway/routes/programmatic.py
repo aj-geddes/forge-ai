@@ -9,17 +9,17 @@ from fastapi import APIRouter, Depends, HTTPException
 from forge_config.schema import AgentDef, ForgeConfig
 from pydantic import BaseModel
 
+from forge_gateway import security
 from forge_gateway.models import ErrorResponse, InvokeRequest, InvokeResponse
 from forge_gateway.routes.persona import resolve_persona
 from forge_gateway.schema import json_schema_to_model
-from forge_gateway.security import security_dependency
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(
     prefix="/v1/agent",
     tags=["programmatic"],
-    dependencies=[Depends(security_dependency)],
+    dependencies=[Depends(security.require_permission("agent:invoke"))],
 )
 
 # Set by app lifespan

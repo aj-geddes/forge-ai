@@ -3,7 +3,9 @@
 Provides endpoints for config management, tool inspection, session
 management, and peer status — all consumed by the forge-ui frontend.
 
-All endpoints require admin API key authentication.
+Read endpoints require the ``config:read`` permission; mutating endpoints
+require ``config:write`` (ADR-0001 SS6.1). The static admin API key is
+retired -- see ``forge_gateway.security``.
 """
 
 from __future__ import annotations
@@ -18,7 +20,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from forge_config.schema import ForgeConfig
 from pydantic import ValidationError
 
-from forge_gateway.auth import require_admin_key, validate_peer_endpoint
+from forge_gateway import security
+from forge_gateway.auth import validate_peer_endpoint
 from forge_gateway.models import (
     AdminConfigResponse,
     AdminConfigUpdateRequest,
@@ -37,8 +40,10 @@ logger = logging.getLogger("forge.gateway.admin")
 router = APIRouter(
     prefix="/v1/admin",
     tags=["admin"],
-    dependencies=[Depends(require_admin_key)],
 )
+
+_read = Depends(security.require_permission("config:read"))
+_write = Depends(security.require_permission("config:write"))
 
 # Module-level state set from app lifespan
 _config: ForgeConfig | None = None
@@ -72,6 +77,7 @@ def set_state(
     "/config",
     response_model=AdminConfigResponse,
     responses={500: {"model": ErrorResponse}},
+    dependencies=[_read],
 )
 async def get_config() -> AdminConfigResponse:
     """Return the current resolved config with secrets redacted."""
@@ -89,6 +95,7 @@ async def get_config() -> AdminConfigResponse:
     "/config",
     response_model=AdminConfigUpdateResponse,
     responses={400: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
+    dependencies=[_write],
 )
 async def update_config(request: AdminConfigUpdateRequest) -> AdminConfigUpdateResponse:
     """Validate, apply in-memory, rebuild tools, and best-effort persist to disk."""
@@ -109,10 +116,14 @@ async def update_config(request: AdminConfigUpdateRequest) -> AdminConfigUpdateR
     # Apply config in-memory immediately
     _config = new_config
 
-    # Update API key config so auth picks up changes
-    from forge_gateway.auth import set_api_key_config
+    # Re-wire the auth subsystem so updated bindings/service tokens/OIDC
+    # settings take effect immediately (ADR-0001).
+    try:
+        from forge_gateway.app import _schedule_auth_reinit
 
-    set_api_key_config(new_config.security.api_keys)
+        _schedule_auth_reinit(new_config)
+    except Exception:
+        logger.exception("Failed to schedule auth subsystem reinit after config update")
 
     # Hot-reload: rebuild tool surface if agent is available
     reloaded = False
@@ -153,7 +164,7 @@ async def update_config(request: AdminConfigUpdateRequest) -> AdminConfigUpdateR
     )
 
 
-@router.get("/config/schema")
+@router.get("/config/schema", dependencies=[_read])
 async def get_config_schema() -> dict[str, Any]:
     """Return JSON Schema for the ForgeConfig model."""
     schema: dict[str, Any] = ForgeConfig.model_json_schema()
@@ -166,6 +177,7 @@ async def get_config_schema() -> dict[str, Any]:
 @router.get(
     "/tools",
     response_model=list[AdminToolInfo],
+    dependencies=[_read],
 )
 async def list_tools() -> list[AdminToolInfo]:
     """List all registered tools with metadata."""
@@ -192,6 +204,7 @@ async def list_tools() -> list[AdminToolInfo]:
     "/tools/preview",
     response_model=AdminToolPreviewResponse,
     responses={400: {"model": ErrorResponse}},
+    dependencies=[_read],
 )
 async def preview_tools(request: AdminToolPreviewRequest) -> AdminToolPreviewResponse:
     """Dry-run: parse an OpenAPI spec and return the tool list without registering."""
@@ -224,6 +237,7 @@ async def preview_tools(request: AdminToolPreviewRequest) -> AdminToolPreviewRes
 @router.get(
     "/sessions",
     response_model=list[AdminSessionResponse],
+    dependencies=[_read],
 )
 async def list_sessions() -> list[AdminSessionResponse]:
     """List active agent sessions."""
@@ -251,6 +265,7 @@ async def list_sessions() -> list[AdminSessionResponse]:
 @router.delete(
     "/sessions/{session_id}",
     responses={404: {"model": ErrorResponse}},
+    dependencies=[_write],
 )
 async def delete_session(session_id: str) -> dict[str, str]:
     """Terminate a session."""
@@ -275,6 +290,7 @@ async def delete_session(session_id: str) -> dict[str, str]:
 @router.get(
     "/peers",
     response_model=list[AdminPeerResponse],
+    dependencies=[_read],
 )
 async def list_peers() -> list[AdminPeerResponse]:
     """List peers with connection status."""
@@ -296,6 +312,7 @@ async def list_peers() -> list[AdminPeerResponse]:
 @router.post(
     "/peers/{name}/ping",
     responses={404: {"model": ErrorResponse}, 400: {"model": ErrorResponse}},
+    dependencies=[_read],
 )
 async def ping_peer(name: str) -> dict[str, Any]:
     """Health-check a specific peer.

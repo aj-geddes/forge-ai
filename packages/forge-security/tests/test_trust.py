@@ -1,6 +1,6 @@
 """Tests for forge_security.trust."""
 
-from forge_config.schema import SecurityConfig
+from forge_config.schema import AuthMode, OIDCConfig, SecurityAuthConfig, SecurityConfig
 from forge_security.rate_limit import SlidingWindowRateLimiter
 from forge_security.trust import TrustPolicyEnforcer
 
@@ -9,7 +9,17 @@ def _make_config(
     allowed_origins: list[str] | None = None,
     rate_limit_rpm: int = 60,
 ) -> SecurityConfig:
+    """Build a SecurityConfig for pure origin/rate-limit matching tests.
+
+    OIDC is disabled and mode is dev_insecure here because
+    TrustPolicyEnforcer's origin-matching logic is independent of the auth
+    mechanism, and SecurityConfig otherwise requires a working enforcement
+    mechanism (ADR-0001 SS8.4 #1) and rejects a wildcard origin once OIDC
+    (and therefore a credentialed session cookie) is enabled (SS8.4 #4).
+    """
     return SecurityConfig(
+        auth=SecurityAuthConfig(mode=AuthMode.DEV_INSECURE),
+        oidc=OIDCConfig(enabled=False),
         allowed_origins=allowed_origins if allowed_origins is not None else ["*"],
         rate_limit_rpm=rate_limit_rpm,
     )

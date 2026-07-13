@@ -213,18 +213,18 @@ class _MCPMountApp:
 
     Dispatches every HTTP request to whichever FastMCP ASGI app is
     currently active (see :func:`set_active_asgi_app`), and enforces the
-    same SecurityGate authentication used by the programmatic (``/v1``)
-    routes. A raw ``Mount`` bypasses FastAPI's routing/``Depends`` system
-    entirely, so that auth check has to happen here rather than via a
-    router dependency.
+    same bypass-free ``tools:invoke`` authorization used by the
+    programmatic (``/v1``) routes (ADR-0001). A raw ``Mount`` bypasses
+    FastAPI's routing/``Depends`` system entirely, so that auth check has
+    to happen here rather than via a router dependency.
     """
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] == "http":
-            from forge_gateway.security import enforce_asgi_security
+            from forge_gateway.security import enforce_mcp_security
 
             request = Request(scope, receive=receive)
-            await enforce_asgi_security(request)
+            await enforce_mcp_security(request)
 
         current = _active_asgi_app
         if current is None:

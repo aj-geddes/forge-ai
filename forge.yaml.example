@@ -95,22 +95,58 @@ tools:
           condition: "contact.city is not None"
 
 security:
-  agentweave:
+  # Authentication is enforced. This is also the schema default: deleting this
+  # block does NOT disable auth, it leaves it enforcing.
+  auth:
+    mode: enforce
+
+  # OIDC (tested against Dex). The gateway is the OIDC client and runs the
+  # authorization-code flow with PKCE server-side, keeping tokens out of the
+  # browser behind an httpOnly session cookie. With a public IdP client there is
+  # no client_secret to configure.
+  oidc:
     enabled: true
-    trust_domain: forge.local
-    spiffe_endpoint: "unix:///run/spire/sockets/agent.sock"
-    authz_provider: opa
-    opa_endpoint: "http://localhost:8181"
-    identity_secret: "${AGENTWEAVE_IDENTITY_SECRET}"
-    trust_policy: strict
-  api_keys:
+    issuer: "https://dex.example.com/dex"
+    client_id: "forge-ai"
+    jwks_uri: "https://dex.example.com/dex/keys"
+    redirect_uri: "https://forge.example.com/auth/callback"
+    scopes: ["openid", "email", "profile", "groups"]
+    allowed_algorithms: ["RS256"]
+    session:
+      encryption_key:
+        source: env
+        name: FORGE_SESSION_KEY
+      secure: true
+      same_site: lax
+
+  # Machine clients (MCP, CI, peers) cannot do an interactive OIDC flow. Only the
+  # SHA-256 digest of the token is stored, so this is safe to commit; the token
+  # itself lives in your secret store.
+  service_tokens:
     enabled: false
-    keys:
-      - source: env
-        name: FORGE_API_KEY
+    tokens:
+      - id: ci
+        description: "CI deployer"
+        secret_sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+        roles: ["admin"]
+
+  # Deny by default: a caller with no matching binding gets 403, not access.
+  authorization:
+    default_role: null
+    metrics_public: true
+    bindings:
+      - role: admin
+        emails: ["you@example.com"]
+      # - role: user
+      #   groups: ["your-org:platform"]
+
   rate_limit_rpm: 60
+
+  # Must list explicit origins. "*" together with the credentialed CORS required
+  # by the session cookie reflects any origin, which is a total compromise once a
+  # session exists — the config schema rejects that combination.
   allowed_origins:
-    - "*"
+    - "https://forge.example.com"
 
 agents:
   default: assistant

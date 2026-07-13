@@ -62,6 +62,8 @@ class HealthResponse(BaseModel):
     status: str
     version: str = ""
     components: dict[str, str] = Field(default_factory=dict)
+    auth_mode: str = "enforce"
+    auth_healthy: bool = True
 
 
 # --- Admin API models ---

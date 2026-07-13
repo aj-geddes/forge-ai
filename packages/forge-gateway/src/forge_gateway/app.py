@@ -2,23 +2,50 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import httpx
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from forge_config.schema import OIDCConfig, ServiceToken, SessionConfig
+from forge_security.oidc import (
+    Authorizer,
+    DiscoveryDocument,
+    JwksCache,
+    OIDCTokenVerifier,
+    OIDCVerifierConfig,
+    ServiceTokenVerifier,
+    SessionCodec,
+    fetch_discovery_document,
+    resolve_endpoints,
+)
 
-from forge_gateway.auth import set_api_key_config
+from forge_gateway import security
+from forge_gateway.middleware.csrf import CSRFMiddleware
 from forge_gateway.middleware.logging import RequestLoggingMiddleware
-from forge_gateway.routes import a2a, admin, conversational, health, mcp, metrics, programmatic
-from forge_gateway.security import set_security_gate
+from forge_gateway.routes import (
+    a2a,
+    admin,
+    conversational,
+    health,
+    mcp,
+    metrics,
+    programmatic,
+)
+from forge_gateway.routes import (
+    auth as auth_routes,
+)
 
 logger = logging.getLogger("forge.gateway")
+
+_DEV_INSECURE_LOG_INTERVAL_SECONDS = 60
 
 
 def _make_reload_callback(
@@ -28,8 +55,8 @@ def _make_reload_callback(
     """Create a config-reload callback bound to a specific config path and agent.
 
     The returned callable accepts a ``Path`` argument (provided by ConfigWatcher)
-    and reloads the config, updating admin state, API key auth, security gate,
-    tool surface, MCP server, and the A2A agent card.
+    and reloads the config, updating admin state, auth wiring, tool surface,
+    MCP server, and the A2A agent card.
 
     The agent reference is captured in the closure so that async tool rebuilds
     can be scheduled when the config file changes on disk.
@@ -47,8 +74,7 @@ def _make_reload_callback(
             admin.set_state(config=new_config, config_path=config_path)
             programmatic.set_config(new_config)
             conversational.set_config(new_config)
-            set_api_key_config(new_config.security.api_keys)
-            _init_security_gate(new_config)
+            _schedule_auth_reinit(new_config)
 
             # Schedule async tool surface + MCP rebuild
             _schedule_tool_rebuild(new_config, agent)
@@ -66,15 +92,29 @@ def _schedule_tool_rebuild(config: object, agent: object | None) -> None:
     Called from the synchronous config-change callback.  Uses
     ``asyncio.ensure_future`` to run the coroutine on the current event loop.
     """
-    import asyncio
-
     try:
-        loop = asyncio.get_running_loop()
+        asyncio.get_running_loop()
     except RuntimeError:
         logger.warning("No running event loop — skipping tool surface rebuild")
         return
 
-    loop.create_task(_rebuild_tool_surface(config, agent))
+    asyncio.ensure_future(_rebuild_tool_surface(config, agent))
+
+
+def _schedule_auth_reinit(config: object) -> None:
+    """Schedule an async re-initialization of the auth subsystem.
+
+    Called from the synchronous config-change callback -- rebuilding the
+    JWKS cache / OIDC verifier / session codec involves an (optional)
+    discovery-document fetch, so it must run on the event loop.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        logger.warning("No running event loop — skipping auth subsystem reinit")
+        return
+
+    asyncio.ensure_future(_init_auth(config))
 
 
 async def _rebuild_tool_surface(config: object, agent: object | None) -> None:
@@ -140,65 +180,186 @@ def _refresh_agent_card(config: object | None, agent: object | None = None) -> N
         logger.exception("Failed to build A2A agent card")
 
 
-def _resolve_jwt_secret(config: object) -> str | None:
-    """Resolve the JWT secret from config using the secret resolver.
+def _resolve_legacy_service_tokens(config: object) -> list[ServiceToken]:
+    """ADR-0001 SS11: translate ``security.api_keys`` (deprecated, accepted
+    for one minor release) into synthetic ``legacy-api-key`` service
+    tokens with ``admin`` role. Live config has ``api_keys.enabled: false``,
+    so nothing depends on this in production -- it exists only to protect
+    any local/undocumented use during the migration window."""
+    import hashlib
 
-    Returns ``None`` when no ``jwt_secret`` is configured, which causes
-    ``SecurityGate`` to operate in trust-as-is dev mode.
-    """
     from forge_config.schema import ForgeConfig
 
     if not isinstance(config, ForgeConfig):
-        return None
+        return []
 
-    ref = config.security.jwt_secret
-    if ref is None:
-        return None
+    api_keys = config.security.api_keys
+    if not api_keys.enabled or not api_keys.keys:
+        return []
 
-    try:
-        from forge_config import CompositeSecretResolver
+    from forge_config import CompositeSecretResolver
 
-        resolver = CompositeSecretResolver()
-        return resolver.resolve(ref)
-    except Exception:
-        logger.warning("Could not resolve jwt_secret — JWT verification disabled")
-        return None
+    resolver = CompositeSecretResolver()
+    tokens: list[ServiceToken] = []
+    for i, ref in enumerate(api_keys.keys):
+        try:
+            plaintext = resolver.resolve(ref)
+        except Exception:
+            logger.warning("Failed to resolve legacy api_keys secret: %s", ref.name)
+            continue
+        digest = hashlib.sha256(plaintext.encode("utf-8")).hexdigest()
+        tokens.append(ServiceToken(id=f"legacy-api-key-{i}", secret_sha256=digest, roles=["admin"]))
+    return tokens
 
 
-def _init_security_gate(config: object | None) -> None:
-    """Build and wire a ``SecurityGate`` from the loaded config.
+def _build_oidc_verifier(
+    oidc_config: OIDCConfig, http_client: httpx.AsyncClient
+) -> OIDCTokenVerifier:
+    jwks_cache = JwksCache(
+        http_client=http_client,
+        jwks_uri=oidc_config.jwks_uri,
+        cache_ttl_seconds=oidc_config.jwks_cache_ttl_seconds,
+        min_refresh_seconds=oidc_config.jwks_min_refresh_seconds,
+        stale_grace_seconds=oidc_config.jwks_stale_grace_seconds,
+    )
+    verifier_config = OIDCVerifierConfig(
+        issuer=oidc_config.issuer,
+        audience=oidc_config.audience or oidc_config.client_id,
+        client_id=oidc_config.client_id,
+        allowed_algorithms=list(oidc_config.allowed_algorithms),
+        clock_skew_seconds=oidc_config.clock_skew_seconds,
+    )
+    return OIDCTokenVerifier(jwks_cache=jwks_cache, config=verifier_config)
 
-    When *config* is ``None`` or its ``security.agentweave.enabled`` flag is
-    ``False``, the gate is set to ``None`` which activates development mode
-    (unauthenticated access with a logged warning).
+
+def _build_session_codec(session_config: SessionConfig) -> tuple[SessionCodec, bytes]:
+    from forge_config import CompositeSecretResolver
+
+    if session_config.encryption_key is None:
+        msg = "security.oidc.session.encryption_key is not configured"
+        raise RuntimeError(msg)
+
+    resolver = CompositeSecretResolver()
+    key = resolver.resolve(session_config.encryption_key).encode("utf-8")
+    previous_key = None
+    if session_config.previous_encryption_key is not None:
+        previous_key = resolver.resolve(session_config.previous_encryption_key).encode("utf-8")
+
+    return (
+        SessionCodec(
+            key=key,
+            previous_key=previous_key,
+            lifetime_seconds=session_config.lifetime_seconds,
+            idle_timeout_seconds=session_config.idle_timeout_seconds,
+        ),
+        key,
+    )
+
+
+async def _init_auth(config: object | None) -> None:
+    """Build and wire the auth subsystem from the loaded config (ADR-0001).
+
+    Unlike the retired ``_init_security_gate``, there is no
+    ``except Exception: set_security_gate(None)`` fallback to an
+    unauthenticated dev mode. A subsystem that fails to initialize is
+    recorded as unhealthy; :func:`forge_gateway.security.get_principal`
+    then denies every request with ``503 auth_unavailable`` and
+    ``/health/ready`` reports NOT READY, so a broken pod never takes
+    traffic.
     """
     from forge_config.schema import ForgeConfig
 
     if config is None or not isinstance(config, ForgeConfig):
-        set_security_gate(None)
+        security.reset_auth()
+        health.set_auth_healthy(False)
         return
 
-    if not config.security.agentweave.enabled:
-        logger.info("AgentWeave security disabled in config — development mode active")
-        set_security_gate(None)
-        return
+    sec_config = config.security
+    dev_insecure = security.is_dev_insecure_active(sec_config)
+
+    oidc_verifier: OIDCTokenVerifier | None = None
+    session_codec = None
+    http_client: httpx.AsyncClient | None = None
+    endpoints: DiscoveryDocument | None = None
+    tx_key: bytes | None = None
+
+    if sec_config.oidc.enabled:
+        http_client = httpx.AsyncClient()
+        discovery_doc = None
+        if sec_config.oidc.discovery:
+            try:
+                discovery_doc = await fetch_discovery_document(http_client, sec_config.oidc.issuer)
+            except Exception:
+                logger.warning(
+                    "OIDC discovery failed; relying on explicit endpoint config", exc_info=True
+                )
+        try:
+            endpoints = resolve_endpoints(sec_config.oidc, discovery_doc)
+        except Exception:
+            logger.exception("Failed to resolve OIDC endpoints")
+            endpoints = None
+
+        try:
+            oidc_verifier = _build_oidc_verifier(sec_config.oidc, http_client)
+        except Exception:
+            logger.exception("Failed to initialize OIDC verifier")
+
+        try:
+            session_codec, tx_key = _build_session_codec(sec_config.oidc.session)
+        except Exception:
+            logger.exception("Failed to initialize session codec")
 
     try:
-        from forge_security import SecurityGate
-
-        jwt_secret = _resolve_jwt_secret(config)
-        gate = SecurityGate.from_config(
-            config.security,
-            jwt_secret=jwt_secret,
-        )
-        set_security_gate(gate)
-        logger.info(
-            "SecurityGate initialized for trust domain '%s'",
-            config.security.agentweave.trust_domain,
-        )
+        all_tokens = list(sec_config.service_tokens.tokens) + _resolve_legacy_service_tokens(config)
     except Exception:
-        logger.exception("Failed to initialize SecurityGate — falling back to development mode")
-        set_security_gate(None)
+        logger.exception("Failed to resolve configured service tokens")
+        all_tokens = []
+    service_token_verifier = ServiceTokenVerifier(all_tokens)
+
+    try:
+        authorizer = Authorizer(sec_config.authorization)
+    except Exception:
+        logger.exception("Failed to build authorizer from config")
+        from forge_config.schema import AuthorizationConfig
+
+        authorizer = Authorizer(AuthorizationConfig())
+
+    security.configure_auth(
+        session_codec=session_codec,
+        service_token_verifier=service_token_verifier,
+        oidc_verifier=oidc_verifier,
+        authorizer=authorizer,
+        cookie_name=sec_config.oidc.session.cookie_name,
+        dev_insecure=dev_insecure,
+        metrics_public=sec_config.authorization.metrics_public,
+        http_client=http_client,
+        oidc_config=sec_config.oidc,
+        endpoints=endpoints,
+        tx_key=tx_key,
+    )
+    health.set_auth_mode(sec_config.auth.mode.value)
+    health.set_auth_healthy(security.is_auth_healthy())
+    if not security.is_auth_healthy():
+        logger.critical(
+            "Auth subsystem has no working credential mechanism (mode=enforce, no OIDC, "
+            "no service tokens) — marking the gateway NOT READY."
+        )
+
+
+async def _dev_insecure_heartbeat() -> None:
+    """ADR-0001 SS7.2: log CRITICAL every 60s while dev_insecure is active,
+    so it is impossible to be in this mode and not know it."""
+    try:
+        while True:
+            await asyncio.sleep(_DEV_INSECURE_LOG_INTERVAL_SECONDS)
+            if not security.is_dev_insecure():
+                return
+            logger.critical(
+                "FORGE IS STILL RUNNING IN dev_insecure MODE — every request is "
+                "authenticated with admin privileges."
+            )
+    except asyncio.CancelledError:
+        pass
 
 
 async def _init_mcp_server(agent: object, config: object) -> None:
@@ -243,6 +404,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     health.set_started(True)
 
     watcher = None
+    dev_insecure_task: asyncio.Task[None] | None = None
 
     try:
         # Try to initialize the agent from config
@@ -290,11 +452,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         except Exception:
             logger.warning("No config loaded, running with defaults")
 
-        # Wire admin state, API key auth, and SecurityGate
+        # Wire admin state and the auth subsystem
         admin.set_state(config=config, config_path=config_path, agent=agent)
-        if config is not None:
-            set_api_key_config(config.security.api_keys)
-        _init_security_gate(config)
+        await _init_auth(config)
+
+        if security.is_dev_insecure():
+            dev_insecure_task = asyncio.ensure_future(_dev_insecure_heartbeat())
 
         # Start config file watcher for hot-reload
         if config is not None and Path(config_path).exists():
@@ -321,10 +484,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 watcher.stop()
             except Exception:
                 logger.exception("Error stopping config watcher")
+        if dev_insecure_task is not None:
+            dev_insecure_task.cancel()
         try:
             await mcp.shutdown_active_asgi_app()
         except Exception:
             logger.exception("Error stopping MCP server")
+        try:
+            await security.shutdown_auth()
+        except Exception:
+            logger.exception("Error shutting down auth subsystem")
         health.set_ready(False)
         health.set_started(False)
         health.reset_components()
@@ -334,7 +503,10 @@ def _resolve_cors_origins() -> list[str]:
     """Read ``allowed_origins`` from the config file for CORS setup.
 
     Falls back to ``["*"]`` with a logged warning when the config cannot be
-    loaded or no origins are explicitly configured.
+    loaded or no origins are explicitly configured. A real, successfully
+    loaded config can never carry ``"*"`` alongside OIDC (rejected by
+    ``SecurityConfig``'s validator at load time) -- see :func:`create_app`
+    for the additional defence-in-depth applied to whatever this returns.
     """
     config_path = os.environ.get("FORGE_CONFIG_PATH", "forge.yaml")
     try:
@@ -435,17 +607,33 @@ def create_app() -> FastAPI:
 
     # Middleware — CORS must be added before startup
     origins = _resolve_cors_origins()
+    # ADR-0001 SS4.2 hard prerequisite: CORSMiddleware must never be
+    # configured with allow_origins=['*'] while allow_credentials=True --
+    # that combination reflects any origin, which is a total compromise
+    # once a session cookie exists. A real config can never reach this
+    # function with "*" while OIDC is enabled (SecurityConfig rejects it
+    # at load time); this is the defence-in-depth for the "no config file
+    # at all" dev fallback above.
+    allow_credentials = "*" not in origins
     app.add_middleware(
         CORSMiddleware,
         allow_origins=origins,
-        allow_credentials=True,
+        allow_credentials=allow_credentials,
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    app.add_middleware(
+        CSRFMiddleware,
+        session_cookie_name=_resolve_session_cookie_name(),
+        csrf_cookie_name=_resolve_csrf_cookie_name(),
+        allowed_origins=origins,
+    )
+    app.add_middleware(security.DevInsecureHeaderMiddleware)
     app.add_middleware(RequestLoggingMiddleware)
 
     # API Routes
     app.include_router(health.router)
+    app.include_router(auth_routes.router)
     app.include_router(programmatic.router)
     app.include_router(conversational.router)
     app.include_router(a2a.router)
@@ -468,7 +656,7 @@ def create_app() -> FastAPI:
         spa_index = static_dir / "index.html"
 
         # Known SPA client-side routes (React Router paths)
-        spa_routes = {"", "config", "tools", "chat", "peers", "security", "guide"}
+        spa_routes = {"", "config", "tools", "chat", "peers", "security", "guide", "login"}
 
         @app.get("/{path:path}", response_model=None)
         async def spa_fallback(request: Request, path: str) -> FileResponse | JSONResponse:
@@ -497,3 +685,25 @@ def create_app() -> FastAPI:
         )
 
     return app
+
+
+def _resolve_session_cookie_name() -> str:
+    config_path = os.environ.get("FORGE_CONFIG_PATH", "forge.yaml")
+    try:
+        from forge_config import load_config
+
+        config = load_config(config_path)
+        return config.security.oidc.session.cookie_name
+    except Exception:
+        return "forge_session"
+
+
+def _resolve_csrf_cookie_name() -> str:
+    config_path = os.environ.get("FORGE_CONFIG_PATH", "forge.yaml")
+    try:
+        from forge_config import load_config
+
+        config = load_config(config_path)
+        return config.security.oidc.session.csrf_cookie_name
+    except Exception:
+        return "forge_csrf"

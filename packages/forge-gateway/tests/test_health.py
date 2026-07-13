@@ -93,9 +93,7 @@ class TestHealthEndpoints:
 
         assert response.json()["version"] == "1.2.3"
 
-    def test_readiness_agent_unavailable_does_not_block_readiness(
-        self, client: TestClient
-    ) -> None:
+    def test_readiness_agent_unavailable_does_not_block_readiness(self, client: TestClient) -> None:
         """Gateway-only mode (forge-agent not installed) is a valid ready state."""
         health.set_ready(True)
         health.set_component_status("agent", "unavailable")

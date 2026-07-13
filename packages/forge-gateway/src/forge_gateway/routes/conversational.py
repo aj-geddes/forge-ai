@@ -12,16 +12,16 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from forge_config.schema import AgentDef, ForgeConfig
 
+from forge_gateway import security
 from forge_gateway.models import ConversationRequest, ConversationResponse, ErrorResponse
 from forge_gateway.routes.persona import resolve_persona
-from forge_gateway.security import security_dependency
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(
     prefix="/v1/chat",
     tags=["conversational"],
-    dependencies=[Depends(security_dependency)],
+    dependencies=[Depends(security.require_permission("agent:invoke"))],
 )
 
 _forge_agent: Any = None
