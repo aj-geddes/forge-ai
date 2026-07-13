@@ -1,5 +1,11 @@
 import { create } from "zustand";
+import { createJSONStorage, persist } from "zustand/middleware";
 import type { ToolCallRecord } from "@/api/chat";
+
+/** localStorage key for the persisted chat store. Bump `CHAT_STORE_VERSION`
+ * (and add a `migrate` function) if the persisted shape ever changes. */
+const CHAT_STORE_KEY = "forge-chat";
+const CHAT_STORE_VERSION = 1;
 
 export interface Message {
   id: string;
@@ -21,6 +27,11 @@ interface ChatState {
   isLoading: boolean;
   createSession: () => string;
   setActiveSession: (id: string) => void;
+  /** Resume a session the server knows about but that isn't in local state
+   * (e.g. after a browser refresh wiped out non-persisted sessions, or on a
+   * new device). Creates an empty local shell if needed and makes it active;
+   * a no-op on the existing session's messages if it's already local. */
+  resumeSession: (id: string) => void;
   addMessage: (sessionId: string, message: Message) => void;
   appendMessageContent: (sessionId: string, messageId: string, delta: string) => void;
   addToolCallToMessage: (
@@ -51,46 +62,71 @@ function updateMessage(
   );
 }
 
-export const useChatStore = create<ChatState>((set) => ({
-  sessions: [],
-  activeSessionId: null,
-  isLoading: false,
+export const useChatStore = create<ChatState>()(
+  persist(
+    (set) => ({
+      sessions: [],
+      activeSessionId: null,
+      isLoading: false,
 
-  createSession: () => {
-    const id = generateId();
-    set((state) => ({
-      sessions: [...state.sessions, { id, messages: [] }],
-      activeSessionId: id,
-    }));
-    return id;
-  },
+      createSession: () => {
+        const id = generateId();
+        set((state) => ({
+          sessions: [...state.sessions, { id, messages: [] }],
+          activeSessionId: id,
+        }));
+        return id;
+      },
 
-  setActiveSession: (id: string) => set({ activeSessionId: id }),
+      setActiveSession: (id: string) => set({ activeSessionId: id }),
 
-  addMessage: (sessionId: string, message: Message) =>
-    set((state) => ({
-      sessions: state.sessions.map((s) =>
-        s.id === sessionId
-          ? { ...s, messages: [...s.messages, message] }
-          : s,
-      ),
-    })),
+      resumeSession: (id: string) =>
+        set((state) => {
+          if (state.sessions.some((s) => s.id === id)) {
+            return { activeSessionId: id };
+          }
+          return {
+            sessions: [...state.sessions, { id, messages: [] }],
+            activeSessionId: id,
+          };
+        }),
 
-  appendMessageContent: (sessionId: string, messageId: string, delta: string) =>
-    set((state) => ({
-      sessions: updateMessage(state.sessions, sessionId, messageId, (m) => ({
-        ...m,
-        content: m.content + delta,
-      })),
-    })),
+      addMessage: (sessionId: string, message: Message) =>
+        set((state) => ({
+          sessions: state.sessions.map((s) =>
+            s.id === sessionId
+              ? { ...s, messages: [...s.messages, message] }
+              : s,
+          ),
+        })),
 
-  addToolCallToMessage: (sessionId: string, messageId: string, toolCall: ToolCallRecord) =>
-    set((state) => ({
-      sessions: updateMessage(state.sessions, sessionId, messageId, (m) => ({
-        ...m,
-        toolCalls: [...(m.toolCalls ?? []), toolCall],
-      })),
-    })),
+      appendMessageContent: (sessionId: string, messageId: string, delta: string) =>
+        set((state) => ({
+          sessions: updateMessage(state.sessions, sessionId, messageId, (m) => ({
+            ...m,
+            content: m.content + delta,
+          })),
+        })),
 
-  setLoading: (loading: boolean) => set({ isLoading: loading }),
-}));
+      addToolCallToMessage: (sessionId: string, messageId: string, toolCall: ToolCallRecord) =>
+        set((state) => ({
+          sessions: updateMessage(state.sessions, sessionId, messageId, (m) => ({
+            ...m,
+            toolCalls: [...(m.toolCalls ?? []), toolCall],
+          })),
+        })),
+
+      setLoading: (loading: boolean) => set({ isLoading: loading }),
+    }),
+    {
+      name: CHAT_STORE_KEY,
+      version: CHAT_STORE_VERSION,
+      storage: createJSONStorage(() => localStorage),
+      // Only persist conversation data, not transient UI/network state.
+      partialize: (state) => ({
+        sessions: state.sessions,
+        activeSessionId: state.activeSessionId,
+      }),
+    },
+  ),
+);

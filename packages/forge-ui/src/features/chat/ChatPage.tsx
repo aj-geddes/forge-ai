@@ -84,8 +84,17 @@ function HelpText({ children }: { children: React.ReactNode }) {
   );
 }
 
-function MessageBubble({ message }: { message: Message }) {
+function MessageBubble({
+  message,
+  isLoading,
+}: {
+  message: Message;
+  isLoading: boolean;
+}) {
   const isUser = message.role === "user";
+  // A streamed assistant reply that finished (loading ended) with no chunks
+  // ever arriving would otherwise render as a confusing blank bubble.
+  const isEmptyFinishedReply = !isUser && message.content === "" && !isLoading;
 
   return (
     <div
@@ -118,7 +127,14 @@ function MessageBubble({ message }: { message: Message }) {
               : "bg-muted text-foreground",
           )}
         >
-          <p className="whitespace-pre-wrap">{message.content}</p>
+          <p
+            className={cn(
+              "whitespace-pre-wrap",
+              isEmptyFinishedReply && "italic text-muted-foreground",
+            )}
+          >
+            {isEmptyFinishedReply ? "(no response)" : message.content}
+          </p>
         </div>
         {message.toolCalls && message.toolCalls.length > 0 && (
           <ToolCallDetails toolCalls={message.toolCalls} />
@@ -132,7 +148,7 @@ function MessageBubble({ message }: { message: Message }) {
 }
 
 function SessionSidebar() {
-  const { sessions, activeSessionId, createSession, setActiveSession } =
+  const { sessions, activeSessionId, createSession, setActiveSession, resumeSession } =
     useChatStore();
   const { data: serverSessions } = useSessions();
   const deleteSession = useDeleteSession();
@@ -179,10 +195,16 @@ function SessionSidebar() {
             return (
               <div
                 key={ss.session_id}
-                className="group flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-sm text-muted-foreground"
+                className="group flex w-full items-center gap-1 rounded-md text-left text-sm text-muted-foreground"
               >
-                <MessageSquare className="h-3.5 w-3.5 shrink-0" />
-                <span className="min-w-0 flex-1 truncate">{ss.session_id.slice(0, 20)}...</span>
+                <button
+                  type="button"
+                  onClick={() => resumeSession(ss.session_id)}
+                  className="flex min-w-0 flex-1 items-center gap-2 rounded-md px-3 py-2 text-left text-sm transition-colors hover:bg-accent hover:text-accent-foreground"
+                >
+                  <MessageSquare className="h-3.5 w-3.5 shrink-0" />
+                  <span className="min-w-0 flex-1 truncate">{ss.session_id.slice(0, 20)}...</span>
+                </button>
                 <button
                   type="button"
                   onClick={(e) => {
@@ -369,7 +391,7 @@ function ChatArea() {
             </div>
           )}
           {activeSession.messages.map((msg) => (
-            <MessageBubble key={msg.id} message={msg} />
+            <MessageBubble key={msg.id} message={msg} isLoading={isLoading} />
           ))}
           {isLoading && (
             <div className="flex gap-3">

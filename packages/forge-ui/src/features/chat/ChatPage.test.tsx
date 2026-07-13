@@ -151,4 +151,93 @@ describe("ChatPage", () => {
     const body = JSON.parse(init.body as string) as Record<string, unknown>;
     expect(body.stream).toBe(true);
   });
+
+  it("clicking a server-only session resumes it locally and makes it the active, clickable session", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((url: string) => {
+        if (url.includes("/v1/admin/sessions")) {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: async () => [
+              { session_id: "server-sess-abc123", message_count: 3 },
+            ],
+          });
+        }
+        return Promise.resolve({ ok: false, status: 404 });
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderChatPage();
+
+    const serverSessionButton = await screen.findByRole("button", {
+      name: /server-sess-abc123/i,
+    });
+    await user.click(serverSessionButton);
+
+    await waitFor(() => {
+      const state = useChatStore.getState();
+      expect(state.activeSessionId).toBe("server-sess-abc123");
+      expect(state.sessions).toEqual([
+        { id: "server-sess-abc123", messages: [] },
+      ]);
+    });
+
+    expect(screen.queryByText(/no session selected/i)).not.toBeInTheDocument();
+  });
+
+  it("shows a (no response) placeholder for an assistant message that finished with empty content", async () => {
+    stubFetchForSessionsAndChat([]);
+
+    useChatStore.setState({
+      sessions: [
+        {
+          id: "session-empty",
+          messages: [
+            { id: "msg-1", role: "user", content: "Hi", timestamp: 1 },
+            { id: "msg-2", role: "assistant", content: "", timestamp: 2 },
+          ],
+        },
+      ],
+      activeSessionId: "session-empty",
+      isLoading: false,
+    });
+
+    renderChatPage();
+
+    expect(await screen.findByText(/\(no response\)/i)).toBeInTheDocument();
+
+    useChatStore.setState({
+      sessions: [
+        {
+          id: "session-empty",
+          messages: [
+            { id: "msg-1", role: "user", content: "Hi", timestamp: 1 },
+            { id: "msg-2", role: "assistant", content: "", timestamp: 2 },
+          ],
+        },
+        {
+          id: "session-full",
+          messages: [
+            { id: "msg-3", role: "user", content: "Hi", timestamp: 3 },
+            {
+              id: "msg-4",
+              role: "assistant",
+              content: "Actual reply",
+              timestamp: 4,
+            },
+          ],
+        },
+      ],
+      activeSessionId: "session-full",
+      isLoading: false,
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText("Actual reply")).toBeInTheDocument();
+    });
+    expect(screen.queryByText(/\(no response\)/i)).not.toBeInTheDocument();
+  });
 });
