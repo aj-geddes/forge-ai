@@ -11,8 +11,9 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any
 
-from forge_config.schema import AgentDef, ForgeConfig
+from forge_config.schema import AgentDef, ForgeConfig, SecretSource
 from forge_config.secret_resolver import CompositeSecretResolver, SecretResolver
+from forge_security.secrets import K8sSecretResolver
 from pydantic import BaseModel
 from pydantic_ai import Agent as PydanticAIAgent
 from pydantic_ai.messages import ModelMessage, ModelResponse, ToolCallPart
@@ -61,6 +62,34 @@ def _extract_model_name(messages: list[ModelMessage]) -> str | None:
     return None
 
 
+def build_default_secret_resolver() -> SecretResolver:
+    """Build the default runtime SecretResolver for a ``ForgeAgent``.
+
+    Registers both secret-ref sources documented for ``forge.yaml``
+    (docs/user/configuration.md#secret-references):
+
+    - ``env`` -- ``forge_config``'s ``EnvSecretResolver`` (the
+      ``CompositeSecretResolver`` built-in default).
+    - ``k8s_secret`` -- ``forge_security``'s ``K8sSecretResolver``, which
+      reads Kubernetes volume-mounted secret files
+      (``<base_path>/<name>/<key>``).
+
+    Registering the ``K8sSecretResolver`` is unconditional but
+    side-effect-free at construction time: it only touches the
+    filesystem when a ``k8s_secret`` ref is actually resolved. Outside a
+    cluster (no service account / no mounted volume) it degrades
+    gracefully -- resolving a ``k8s_secret`` ref raises a descriptive
+    ``SecretResolutionError`` instead of crashing, and env-only configs
+    are completely unaffected since they never reach this resolver.
+
+    Returns:
+        A ``CompositeSecretResolver`` with both sources registered.
+    """
+    resolver = CompositeSecretResolver()
+    resolver.register(SecretSource.K8S_SECRET, K8sSecretResolver())
+    return resolver
+
+
 def _build_usage_limits(max_turns: int | None) -> UsageLimits | None:
     """Convert a max_turns integer into PydanticAI ``UsageLimits``.
 
@@ -103,7 +132,7 @@ class ForgeAgent:
     ) -> None:
         self._config = config
         self._llm_router = LLMRouter(config.llm)
-        self._secret_resolver: SecretResolver = secret_resolver or CompositeSecretResolver()
+        self._secret_resolver: SecretResolver = secret_resolver or build_default_secret_resolver()
         self._registry = ToolSurfaceRegistry(secret_resolver=self._secret_resolver)
         self._context = ConversationContext()
         self._model_override = model_override

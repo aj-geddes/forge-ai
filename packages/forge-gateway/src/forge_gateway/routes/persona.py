@@ -17,28 +17,48 @@ def resolve_persona(
 ) -> AgentDef | None:
     """Resolve an agent persona name to its AgentDef from config.
 
-    Returns None when no persona is specified (or the name is empty),
-    indicating the default agent behaviour should be used.
+    When ``agent_name`` is not given (None/empty), the configured
+    ``config.agents.default`` persona is applied instead, if it names an
+    entry that actually exists in ``config.agents.agents``. This is an
+    implicit fallback (not a user request), so an unset or unmatched
+    default (e.g. the schema default ``"assistant"`` with no such
+    persona defined) silently resolves to the base agent -- it never
+    raises 404.
 
     Args:
         agent_name: The persona name from the request, or None/empty.
         config: The loaded ForgeConfig, or None if not yet loaded.
 
     Returns:
-        The matching AgentDef, or None for default behaviour.
+        The matching AgentDef, or None for base-agent behaviour.
 
     Raises:
-        HTTPException: 404 when a non-empty name does not match any
-            configured persona or when config is not loaded.
+        HTTPException: 404 when a non-empty, explicitly requested name
+            does not match any configured persona or when config is not
+            loaded.
     """
     if not agent_name:
-        return None
+        return _find_persona(config, _default_persona_name(config))
 
     if config is None:
         raise HTTPException(status_code=404, detail="Unknown agent persona")
 
-    for agent_def in config.agents.agents:
-        if agent_def.name == agent_name:
-            return agent_def
+    persona = _find_persona(config, agent_name)
+    if persona is None:
+        raise HTTPException(status_code=404, detail="Unknown agent persona")
+    return persona
 
-    raise HTTPException(status_code=404, detail="Unknown agent persona")
+
+def _default_persona_name(config: ForgeConfig | None) -> str | None:
+    """The configured default persona name, or None if config is missing."""
+    return config.agents.default if config is not None else None
+
+
+def _find_persona(config: ForgeConfig | None, name: str | None) -> AgentDef | None:
+    """Look up *name* in ``config.agents.agents``, or None if unmatched."""
+    if config is None or not name:
+        return None
+    for agent_def in config.agents.agents:
+        if agent_def.name == name:
+            return agent_def
+    return None

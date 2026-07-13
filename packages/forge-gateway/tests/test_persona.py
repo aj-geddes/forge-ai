@@ -15,6 +15,7 @@ from fastapi import FastAPI, HTTPException
 from forge_agent.agent.core import ForgeRunResult
 from forge_config.schema import AgentDef, AgentsConfig, ForgeConfig
 from forge_gateway.routes import conversational, programmatic
+from forge_gateway.routes.persona import resolve_persona
 from starlette.testclient import TestClient
 
 # ---------------------------------------------------------------------------
@@ -308,6 +309,211 @@ class TestEmptyStringAgent:
         call_kwargs = mock_agent.run_conversational.call_args.kwargs
         assert call_kwargs["system_prompt_override"] is None
         assert call_kwargs["model_name_override"] is None
+
+
+# ===========================================================================
+# 4b. config.agents.default -> applied when no agent is requested (WS-6)
+# ===========================================================================
+
+
+@pytest.fixture()
+def config_with_matching_default() -> ForgeConfig:
+    """ForgeConfig where ``agents.default`` names a real, matching persona."""
+    return _make_config(CODER, WRITER, MINIMAL, default="writer")
+
+
+@pytest.fixture()
+def default_invoke_client(
+    mock_agent: AsyncMock, config_with_matching_default: ForgeConfig
+) -> Iterator[TestClient]:
+    app = FastAPI()
+    app.include_router(programmatic.router)
+    programmatic.set_agent(mock_agent)
+    programmatic.set_config(config_with_matching_default)
+    yield TestClient(app)
+    programmatic.set_agent(None)
+    programmatic.set_config(None)
+
+
+@pytest.fixture()
+def default_chat_client(
+    mock_agent: AsyncMock, config_with_matching_default: ForgeConfig
+) -> Iterator[TestClient]:
+    app = FastAPI()
+    app.include_router(conversational.router)
+    conversational.set_agent(mock_agent)
+    conversational.set_config(config_with_matching_default)
+    yield TestClient(app)
+    conversational.set_agent(None)
+    conversational.set_config(None)
+
+
+class TestConfiguredDefaultPersona:
+    """A request with NO agent specified uses ``config.agents.default``'s
+    persona (system_prompt/model/tools) when it names a configured persona,
+    and falls back to the base agent when the default is unset/unmatched
+    ("null" in the documented sense of "no default persona resolves").
+    """
+
+    def test_invoke_no_agent_uses_configured_default_persona_when_set(
+        self, default_invoke_client: TestClient, mock_agent: AsyncMock
+    ) -> None:
+        """agents.default="writer" applies the writer persona with no agent field."""
+        response = default_invoke_client.post(
+            "/v1/agent/invoke",
+            json={"intent": "test"},
+        )
+        assert response.status_code == 200
+
+        call_kwargs = mock_agent.run_structured.call_args.kwargs
+        assert call_kwargs["system_prompt_override"] == "You are a creative writing assistant."
+        assert call_kwargs["model_name_override"] == "claude-3-opus-20240229"
+        assert call_kwargs["max_turns_override"] == 15
+
+    def test_chat_no_agent_uses_configured_default_persona_when_set(
+        self, default_chat_client: TestClient, mock_agent: AsyncMock
+    ) -> None:
+        """agents.default="writer" applies the writer persona with no agent field."""
+        response = default_chat_client.post(
+            "/v1/chat/completions",
+            json={"message": "Hi"},
+        )
+        assert response.status_code == 200
+
+        call_kwargs = mock_agent.run_conversational.call_args.kwargs
+        assert call_kwargs["system_prompt_override"] == "You are a creative writing assistant."
+        assert call_kwargs["model_name_override"] == "claude-3-opus-20240229"
+        assert call_kwargs["max_turns_override"] == 15
+
+    def test_invoke_no_agent_default_persona_forwards_tools_filter(
+        self, mock_agent: AsyncMock
+    ) -> None:
+        """The default persona's tools list is forwarded as tool_names_filter."""
+        app = FastAPI()
+        app.include_router(programmatic.router)
+        programmatic.set_agent(mock_agent)
+        programmatic.set_config(_make_config(SEARCHER, default="searcher"))
+        tc = TestClient(app)
+
+        response = tc.post("/v1/agent/invoke", json={"intent": "find info"})
+        assert response.status_code == 200
+
+        call_kwargs = mock_agent.run_structured.call_args.kwargs
+        assert call_kwargs["tool_names_filter"] == ["search"]
+
+        programmatic.set_agent(None)
+        programmatic.set_config(None)
+
+    def test_invoke_null_agent_field_also_uses_configured_default(
+        self, default_invoke_client: TestClient, mock_agent: AsyncMock
+    ) -> None:
+        """Explicitly passing agent=null behaves the same as omitting it."""
+        response = default_invoke_client.post(
+            "/v1/agent/invoke",
+            json={"intent": "test", "agent": None},
+        )
+        assert response.status_code == 200
+
+        call_kwargs = mock_agent.run_structured.call_args.kwargs
+        assert call_kwargs["system_prompt_override"] == "You are a creative writing assistant."
+
+    def test_invoke_explicit_agent_overrides_configured_default(
+        self, default_invoke_client: TestClient, mock_agent: AsyncMock
+    ) -> None:
+        """An explicitly requested persona wins over the configured default."""
+        response = default_invoke_client.post(
+            "/v1/agent/invoke",
+            json={"intent": "test", "agent": "coder"},
+        )
+        assert response.status_code == 200
+
+        call_kwargs = mock_agent.run_structured.call_args.kwargs
+        assert call_kwargs["system_prompt_override"] == "You are a coding expert."
+        assert call_kwargs["model_name_override"] == "gpt-4o"
+
+    def test_invoke_no_agent_uses_base_agent_when_default_is_unmatched(
+        self, invoke_client: TestClient, mock_agent: AsyncMock
+    ) -> None:
+        """agents.default="assistant" (the schema default) with no matching
+        AgentDef in agents.agents resolves to the base agent -- i.e. behaves
+        as if no default persona were configured ("null" in the documented
+        sense)."""
+        response = invoke_client.post(
+            "/v1/agent/invoke",
+            json={"intent": "test"},
+        )
+        assert response.status_code == 200
+
+        call_kwargs = mock_agent.run_structured.call_args.kwargs
+        assert call_kwargs["system_prompt_override"] is None
+        assert call_kwargs["model_name_override"] is None
+
+    def test_chat_no_agent_uses_base_agent_when_default_is_unmatched(
+        self, chat_client: TestClient, mock_agent: AsyncMock
+    ) -> None:
+        """Same as above, via the conversational route."""
+        response = chat_client.post(
+            "/v1/chat/completions",
+            json={"message": "Hi"},
+        )
+        assert response.status_code == 200
+
+        call_kwargs = mock_agent.run_conversational.call_args.kwargs
+        assert call_kwargs["system_prompt_override"] is None
+        assert call_kwargs["model_name_override"] is None
+
+    def test_invoke_no_agent_uses_base_agent_when_default_is_empty_string(
+        self, mock_agent: AsyncMock
+    ) -> None:
+        """agents.default="" (explicitly unset) resolves to the base agent."""
+        app = FastAPI()
+        app.include_router(programmatic.router)
+        programmatic.set_agent(mock_agent)
+        programmatic.set_config(_make_config(CODER, WRITER, default=""))
+        tc = TestClient(app)
+
+        response = tc.post("/v1/agent/invoke", json={"intent": "test"})
+        assert response.status_code == 200
+
+        call_kwargs = mock_agent.run_structured.call_args.kwargs
+        assert call_kwargs["system_prompt_override"] is None
+        assert call_kwargs["model_name_override"] is None
+
+        programmatic.set_agent(None)
+        programmatic.set_config(None)
+
+
+class TestResolvePersonaDefaultUnit:
+    """Direct unit tests for ``resolve_persona``'s default-persona fallback."""
+
+    def test_resolve_persona_none_returns_default_when_it_matches(self) -> None:
+        config = _make_config(CODER, WRITER, default="coder")
+        persona = resolve_persona(None, config)
+        assert persona is not None
+        assert persona.name == "coder"
+
+    def test_resolve_persona_empty_string_returns_default_when_it_matches(self) -> None:
+        config = _make_config(CODER, WRITER, default="writer")
+        persona = resolve_persona("", config)
+        assert persona is not None
+        assert persona.name == "writer"
+
+    def test_resolve_persona_returns_none_when_default_unmatched(self) -> None:
+        config = _make_config(CODER, WRITER, default="ghost")
+        assert resolve_persona(None, config) is None
+
+    def test_resolve_persona_returns_none_when_default_empty(self) -> None:
+        config = _make_config(CODER, WRITER, default="")
+        assert resolve_persona(None, config) is None
+
+    def test_resolve_persona_returns_none_when_config_is_none(self) -> None:
+        assert resolve_persona(None, None) is None
+
+    def test_resolve_persona_explicit_name_takes_priority_over_default(self) -> None:
+        config = _make_config(CODER, WRITER, default="writer")
+        persona = resolve_persona("coder", config)
+        assert persona is not None
+        assert persona.name == "coder"
 
 
 # ===========================================================================

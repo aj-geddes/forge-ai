@@ -86,6 +86,22 @@ def _build_api_key_auth_config(env_var_name: str) -> AuthConfig:
     )
 
 
+def _make_k8s_secret_api_key_manual_tool(secret_name: str, secret_key: str) -> ManualTool:
+    """Create a ManualTool whose API call requires api_key auth from a k8s_secret."""
+    return ManualTool(
+        name="get_weather",
+        description="Get current weather for a location",
+        api=ManualToolAPI(
+            url="https://api.weatherapi.com/v1/current.json",
+            method=HTTPMethod.GET,
+            auth=AuthConfig(
+                type=AuthType.API_KEY,
+                token=SecretRef(source=SecretSource.K8S_SECRET, name=secret_name, key=secret_key),
+            ),
+        ),
+    )
+
+
 class TestForgeAgentInitialization:
     """Tests for ForgeAgent initialization."""
 
@@ -185,6 +201,141 @@ class TestForgeAgentSecretResolverWiring:
         await agent.initialize()
 
         assert agent.registry.tool_count == 1
+
+
+class TestForgeAgentK8sSecretResolverWiring:
+    """Tests that the default SecretResolver also resolves ``k8s_secret``
+    refs (WS-6): a working ``K8sSecretResolver`` (forge_security) exists
+    but was never registered into the resolver ForgeAgent builds by
+    default, so a spec-compliant ``{source: k8s_secret, ...}`` ref always
+    failed with "No resolver registered for source". These tests assert
+    the registration exists and that env-only configs are unaffected.
+    """
+
+    @pytest.mark.anyio
+    async def test_initialize_resolves_k8s_secret_via_default_resolver(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A manual tool with a k8s_secret auth ref builds with no resolver
+        passed explicitly, using a fake K8sSecretResolver in place of real
+        filesystem/volume access (mocks the k8s secret fetch)."""
+        import forge_agent.agent.core as core_module
+
+        class FakeK8sSecretResolver:
+            """Stand-in for forge_security.secrets.K8sSecretResolver."""
+
+            def resolve(self, ref: SecretRef) -> str:
+                assert ref.source == SecretSource.K8S_SECRET
+                return f"k8s-value:{ref.name}/{ref.key}"
+
+        monkeypatch.setattr(core_module, "K8sSecretResolver", FakeK8sSecretResolver)
+
+        config = _make_config(
+            manual_tools=[_make_k8s_secret_api_key_manual_tool("forge-secrets", "weather-api-key")],
+        )
+        agent = ForgeAgent(config, model_override=TestModel())
+
+        await agent.initialize()
+
+        assert agent.registry.tool_count == 1
+
+    @pytest.mark.anyio
+    async def test_env_only_config_still_resolves_as_before_no_regression(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Registering a k8s_secret resolver alongside env must not change
+        env-sourced resolution: a config using only ``source: env`` refs
+        resolves exactly as it did before the k8s_secret wiring fix."""
+        monkeypatch.setenv("WEATHER_API_KEY", "shh-its-a-secret")
+        config = _make_config(
+            manual_tools=[_make_api_key_manual_tool("WEATHER_API_KEY")],
+        )
+        agent = ForgeAgent(config, model_override=TestModel())
+
+        await agent.initialize()
+
+        assert agent.registry.tool_count == 1
+
+    @pytest.mark.anyio
+    async def test_k8s_secret_resolution_degrades_gracefully_without_k8s_environment(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Outside a cluster (no service account / mounted volume), the real
+        K8sSecretResolver is registered but simply fails to find the secret
+        file -- a clear SecretResolutionError, not a crash and not the old
+        "No resolver registered for source" error. Env resolution for other
+        tools in the same run is completely unaffected."""
+        monkeypatch.delenv("MISSING_K8S_SECRET_DIR_MARKER", raising=False)
+        config = _make_config(
+            manual_tools=[
+                _make_k8s_secret_api_key_manual_tool(
+                    "definitely-not-a-real-secret", "definitely-not-a-real-key"
+                )
+            ],
+        )
+        agent = ForgeAgent(config, model_override=TestModel())
+
+        with pytest.raises(SecretResolutionError) as exc_info:
+            await agent.initialize()
+
+        # Must be the K8sSecretResolver's own graceful error (file not
+        # found), never the CompositeSecretResolver's "no resolver
+        # registered" error that indicated the bug.
+        assert "No resolver registered" not in str(exc_info.value)
+
+    @pytest.mark.anyio
+    async def test_explicit_secret_resolver_still_overrides_default_for_k8s(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An explicit ``secret_resolver`` kwarg is honored for k8s_secret
+        refs too, same as for env refs."""
+        fake_resolver = FakeSecretResolver({"forge-secrets": "vault-value"})
+        config = _make_config(
+            manual_tools=[_make_k8s_secret_api_key_manual_tool("forge-secrets", "vault-secret")],
+        )
+        agent = ForgeAgent(
+            config,
+            model_override=TestModel(),
+            secret_resolver=fake_resolver,
+        )
+
+        await agent.initialize()
+
+        assert agent.registry.tool_count == 1
+
+
+class TestBuildDefaultSecretResolver:
+    """Direct unit tests for ``build_default_secret_resolver``."""
+
+    def test_resolves_env_secret(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from forge_agent.agent.core import build_default_secret_resolver
+
+        monkeypatch.setenv("SOME_ENV_SECRET", "value-123")
+        resolver = build_default_secret_resolver()
+
+        value = resolver.resolve(SecretRef(source=SecretSource.ENV, name="SOME_ENV_SECRET"))
+
+        assert value == "value-123"
+
+    def test_k8s_secret_source_is_registered_not_unregistered(self) -> None:
+        """Resolving a k8s_secret ref must reach the K8sSecretResolver (and
+        fail with its own file-not-found error) rather than the composite
+        resolver's "no resolver registered for source" error -- this is
+        the exact bug WS-6 fixes."""
+        from forge_agent.agent.core import build_default_secret_resolver
+
+        resolver = build_default_secret_resolver()
+
+        with pytest.raises(SecretResolutionError) as exc_info:
+            resolver.resolve(
+                SecretRef(
+                    source=SecretSource.K8S_SECRET,
+                    name="definitely-not-a-real-secret",
+                    key="definitely-not-a-real-key",
+                )
+            )
+
+        assert "No resolver registered" not in str(exc_info.value)
 
 
 class TestForgeAgentConversational:

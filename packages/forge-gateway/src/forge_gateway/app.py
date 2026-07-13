@@ -213,9 +213,9 @@ def _resolve_legacy_service_tokens(config: object) -> list[ServiceToken]:
     if not api_keys.enabled or not api_keys.keys:
         return []
 
-    from forge_config import CompositeSecretResolver
+    from forge_agent.agent.core import build_default_secret_resolver
 
-    resolver = CompositeSecretResolver()
+    resolver = build_default_secret_resolver()
     tokens: list[ServiceToken] = []
     for i, ref in enumerate(api_keys.keys):
         try:
@@ -326,13 +326,13 @@ def _build_oidc_verifier(
 
 
 def _build_session_codec(session_config: SessionConfig) -> tuple[SessionCodec, bytes]:
-    from forge_config import CompositeSecretResolver
+    from forge_agent.agent.core import build_default_secret_resolver
 
     if session_config.encryption_key is None:
         msg = "security.oidc.session.encryption_key is not configured"
         raise RuntimeError(msg)
 
-    resolver = CompositeSecretResolver()
+    resolver = build_default_secret_resolver()
     key = resolver.resolve(session_config.encryption_key).encode("utf-8")
     previous_key = None
     if session_config.previous_encryption_key is not None:
