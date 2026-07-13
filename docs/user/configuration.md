@@ -247,56 +247,113 @@ tools:
 
 ## security
 
-Security, authentication, and access control settings.
+Security, authentication, and access control settings. Forge AI enforces authentication by default -- an entirely absent `security:` block still requires a valid Dex OIDC session or service token; see the [Security]({{ site.baseurl }}/technical/security/) page for the full model.
 
-### security.agentweave
+### security.auth
 
-AgentWeave integration for agent-to-agent security.
+Declares the enforcement posture.
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `enabled` | boolean | `true` | Whether AgentWeave is active. When `false`, the gateway runs in development mode without identity verification. |
+| `mode` | string | `"enforce"` | `"enforce"` (default -- authentication is always required) or `"dev_insecure"` (local development only; also requires the `FORGE_DEV_INSECURE=1` environment variable to actually engage). |
+
+### security.oidc
+
+Dex OIDC settings for the human (browser) login flow.
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `enabled` | boolean | `true` | Whether the OIDC login flow is active. |
+| `issuer` | string | `"https://dex.hvslocal/dex"` | The Dex issuer URL. Must be `https://` outside `dev_insecure` mode. |
+| `client_id` | string | `"forge-ai"` | The registered Dex client id (a public client secured by PKCE -- no `client_secret` is required). |
+| `redirect_uri` | string | `"https://forgeai.hvslocal/auth/callback"` | The callback URL registered with Dex. |
+| `scopes` | list | `["openid", "email", "profile", "groups"]` | OIDC scopes requested. |
+| `session.cookie_name` | string | `"forge_session"` | Name of the encrypted BFF session cookie. |
+| `session.secure` | boolean | `true` | Whether the session cookie requires HTTPS. Must be `true` outside `dev_insecure` mode. |
+
+### security.service_tokens
+
+Machine-client credentials (MCP, A2A peers, CI) and the self-service user-token feature.
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `enabled` | boolean | `false` | Whether static service tokens are active. |
+| `tokens` | list | `[]` | Statically configured tokens: each entry has an `id`, a `secret_sha256` digest (never the raw token), and `roles`. |
+| `user_tokens.enabled` | boolean | `false` | Whether logged-in users may self-mint their own `forge_sk_...` tokens via `POST /v1/auth/tokens`. |
+| `user_tokens.default_ttl_seconds` / `max_ttl_seconds` | integer | `2592000` / `7776000` | TTL bounds (30/90 days) for self-minted tokens. |
+
+### security.authorization
+
+Claims-to-role and role-to-permission bindings. Deny by default.
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `default_role` | string \| null | `null` | Role granted to any principal matching no explicit binding. Leave `null` to deny by default. |
+| `metrics_public` | boolean | `true` | Whether `GET /metrics` is unauthenticated. When `false`, it requires the `metrics:read` permission. |
+| `roles` | mapping | `{viewer, user, admin}` | Role name -> list of permissions (`config:read`, `config:write`, `agent:invoke`, `tools:invoke`, `agent:peer`, `metrics:read`, or `*` for all). |
+| `bindings` | list | `[]` | Each entry maps a `role` to matching `groups`, `emails`, or `subs` claims from the OIDC token. |
+
+### security.agentweave
+
+AgentWeave **workload-plane** settings -- SPIFFE mTLS + OPA authorization for east-west, agent-to-agent traffic on a dedicated listener. This is physically separate from the human OIDC login flow above and has no effect on it; there is no config key that disables authentication on the main gateway port.
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `enabled` | boolean | `false` | Whether the workload plane is active. When `false` (the default), no `:8443` listener starts and this block has no runtime effect. |
 | `trust_domain` | string | `"forge.local"` | The SPIFFE trust domain for this agent's identity. |
 | `spiffe_endpoint` | string | `"unix:///run/spire/sockets/agent.sock"` | SPIRE agent socket path for SPIFFE identity. |
 | `authz_provider` | string | `"opa"` | Authorization policy engine. Currently supports `opa`. |
 | `opa_endpoint` | string | `"http://localhost:8181"` | URL of the OPA (Open Policy Agent) server. |
 | `identity_secret` | string | `null` | Secret used for identity operations. Can use `${ENV_VAR}` syntax for environment variable substitution. |
 | `trust_policy` | string | `"strict"` | Trust policy: `strict` (deny by default) or `permissive` (allow by default). |
+| `workload_listener_port` | integer | `8443` | Port for the mTLS ("a2a-mtls") listener. |
 
-### security.api_keys
+### security.api_keys (deprecated)
 
-API key authentication for the gateway admin API.
+**Deprecated (ADR-0001).** Accepted for one minor release only, for migration purposes: a configured key is translated internally into a synthetic `legacy-api-key` admin service token, and constructing this block with a key configured emits a `DeprecationWarning`. Do not use for new deployments -- configure `security.service_tokens` instead.
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `enabled` | boolean | `false` | Whether API key authentication is enforced. When `false`, the admin API returns 403 for all requests. |
-| `keys` | list | `[]` | List of secret references pointing to API key values. Each entry has `source` (`env` or `k8s_secret`) and `name`. |
+| `enabled` | boolean | `false` | Deprecated. |
+| `keys` | list | `[]` | Deprecated. Each entry has `source` (`env` or `k8s_secret`) and `name`. |
 
 ### Other security options
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `jwt_secret` | secret ref | `null` | Secret reference for JWT verification. When set, the SecurityGate verifies JWT tokens. When `null`, JWT verification is disabled. |
-| `rate_limit_rpm` | integer | `60` | Maximum requests per minute. Applies to all API endpoints. |
-| `allowed_origins` | list | `["*"]` | CORS allowed origins. Use `["*"]` for development or specific domains for production. |
+| `rate_limit_rpm` | integer | `60` | Maximum requests per minute, per authenticated identity. `0`/unset disables rate limiting. |
+| `allowed_origins` | list | `["https://forgeai.hvslocal"]` | CORS allowed origins. A wildcard `"*"` is rejected at config-load time whenever `security.oidc.enabled` is `true` (credentialed CORS + a wildcard origin would be a total compromise). |
+
+> **`security.jwt_secret` has been removed** (ADR-0001), not merely deprecated: loading a config that still sets it is a hard validation error. It was a symmetric HS256 secret that could not validate Dex's RS256 tokens. Migrate to `security.oidc` (humans) or `security.service_tokens` (machine clients).
 
 **Example:**
 
 ```yaml
 security:
-  agentweave:
+  auth:
+    mode: enforce
+  oidc:
     enabled: true
+    issuer: "https://dex.example.com/dex"
+    client_id: forge-ai
+  service_tokens:
+    enabled: true
+    tokens:
+      - id: ci-runner
+        secret_sha256: "b1946ac92492d2347c6235b4d2611184..."
+        roles: [user]
+  authorization:
+    default_role: null
+    bindings:
+      - role: admin
+        groups: ["forge-admins"]
+  agentweave:
+    enabled: false
     trust_domain: forge.local
     spiffe_endpoint: "unix:///run/spire/sockets/agent.sock"
     authz_provider: opa
     opa_endpoint: "http://localhost:8181"
-    identity_secret: "${AGENTWEAVE_IDENTITY_SECRET}"
     trust_policy: strict
-  api_keys:
-    enabled: true
-    keys:
-      - source: env
-        name: FORGE_API_KEY
   rate_limit_rpm: 60
   allowed_origins:
     - "https://forge.example.com"

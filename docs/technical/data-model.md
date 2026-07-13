@@ -74,11 +74,21 @@ All fields have defaults, so an empty `forge.yaml` file is valid and produces a 
       <div style="font-weight: 600; color: #312e81; font-size: 0.85rem; margin-bottom: 0.25rem;">SecurityConfig</div>
       <div style="font-size: 0.75rem; color: #64748b;">field: <code>security</code> (1:1)</div>
       <div style="margin-top: 0.375rem; padding-left: 0.5rem; border-left: 2px solid #c7d2fe; display: flex; flex-direction: column; gap: 0.25rem;">
-        <div style="font-size: 0.75rem; color: #4338ca;">AgentWeaveConfig <span style="color: #94a3b8;">(1:1)</span></div>
-        <div style="font-size: 0.75rem; color: #4338ca;">APIKeyConfig <span style="color: #94a3b8;">(1:1)</span>
+        <div style="font-size: 0.75rem; color: #4338ca;">SecurityAuthConfig <span style="color: #94a3b8;">(1:1, auth)</span></div>
+        <div style="font-size: 0.75rem; color: #4338ca;">OIDCConfig <span style="color: #94a3b8;">(1:1, oidc)</span>
+          <span style="color: #64748b; display: block; padding-left: 0.5rem;">&#8627; SessionConfig (1:1)</span>
+        </div>
+        <div style="font-size: 0.75rem; color: #4338ca;">ServiceTokenConfig <span style="color: #94a3b8;">(1:1, service_tokens)</span>
+          <span style="color: #64748b; display: block; padding-left: 0.5rem;">&#8627; ServiceToken[] (0:N)</span>
+          <span style="color: #64748b; display: block; padding-left: 0.5rem;">&#8627; UserTokenConfig (1:1)</span>
+        </div>
+        <div style="font-size: 0.75rem; color: #4338ca;">AuthorizationConfig <span style="color: #94a3b8;">(1:1, authorization)</span>
+          <span style="color: #64748b; display: block; padding-left: 0.5rem;">&#8627; RoleBinding[] (0:N)</span>
+        </div>
+        <div style="font-size: 0.75rem; color: #4338ca;">AgentWeaveConfig <span style="color: #94a3b8;">(1:1, agentweave -- workload plane, deprecated-inert for human auth)</span></div>
+        <div style="font-size: 0.75rem; color: #4338ca;">APIKeyConfig <span style="color: #94a3b8;">(1:1, api_keys -- deprecated, inert)</span>
           <span style="color: #64748b; display: block; padding-left: 0.5rem;">&#8627; SecretRef[] (0:N)</span>
         </div>
-        <div style="font-size: 0.75rem; color: #4338ca;">SecretRef? <span style="color: #94a3b8;">(0:1, jwt_secret)</span></div>
       </div>
     </div>
 
@@ -228,34 +238,76 @@ Either `url` or both `base_url` and `endpoint` must be provided.
 
 ### Security Configuration
 
+Rooted at `SecurityConfig` (ADR-0001: Dex OIDC for the human plane; ADR-0004: AgentWeave for the separate workload plane). `security.jwt_secret` is **not** a field on this model -- a `model_validator(mode="before")` raises a hard `ValueError` if a loaded config still sets it (it was an HS256 shared secret, removed rather than deprecated).
+
 **`SecurityConfig`**
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `agentweave` | `AgentWeaveConfig` | (defaults) | AgentWeave integration |
-| `api_keys` | `APIKeyConfig` | (defaults) | Admin API key auth |
-| `jwt_secret` | `SecretRef \| None` | `None` | Secret for JWT verification |
-| `rate_limit_rpm` | `int` | `60` | Requests per minute per caller |
-| `allowed_origins` | `list[str]` | `["*"]` | CORS allowed origins |
+| `auth` | `SecurityAuthConfig` | (defaults) | Declared enforcement mode (`enforce` / `dev_insecure`) |
+| `oidc` | `OIDCConfig` | (defaults, points at the live Dex instance) | Dex OIDC settings for browser login |
+| `service_tokens` | `ServiceTokenConfig` | (defaults) | Static + self-service machine-client tokens |
+| `authorization` | `AuthorizationConfig` | (defaults) | Claims -> roles -> permissions bindings |
+| `rate_limit_rpm` | `int` | `60` | Requests per minute per authenticated identity |
+| `allowed_origins` | `list[str]` | `["https://forgeai.hvslocal"]` | CORS allowed origins. A `"*"` entry is rejected at validation time when `oidc.enabled` is `True`. |
+| `agentweave` | `AgentWeaveConfig` | (defaults) | **Deprecated / inert for human auth** -- workload-plane (SPIFFE + OPA) settings only, kept so old configs still parse |
+| `api_keys` | `APIKeyConfig` | (defaults) | **Deprecated / inert** -- kept so old configs still parse; translated into a synthetic service token for one minor release |
 
-**`AgentWeaveConfig`**
+**`SecurityAuthConfig`**
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `enabled` | `bool` | `True` | Enable AgentWeave security |
+| `mode` | `AuthMode` | `enforce` | One of: `enforce`, `dev_insecure` (also requires the `FORGE_DEV_INSECURE=1` environment variable to actually engage) |
+
+**`OIDCConfig`**
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | `bool` | `True` | Enable the Dex OIDC login flow |
+| `issuer` | `str` | `"https://dex.hvslocal/dex"` | Dex issuer URL (must be `https://` outside `dev_insecure` mode) |
+| `client_id` | `str` | `"forge-ai"` | Registered Dex client id (public client, PKCE) |
+| `client_secret` | `SecretRef \| None` | `None` | Unused by the public client; present for future confidential-client support |
+| `redirect_uri` | `str` | `"https://forgeai.hvslocal/auth/callback"` | OIDC callback URL |
+| `scopes` | `list[str]` | `["openid", "email", "profile", "groups"]` | Requested OIDC scopes |
+| `allowed_algorithms` | `list[str]` | `["RS256"]` | Accepted JWS signing algorithms |
+| `session` | `SessionConfig` | (defaults) | BFF session-cookie codec settings |
+
+**`ServiceTokenConfig`**
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | `bool` | `False` | Enable static service tokens |
+| `tokens` | `list[ServiceToken]` | `[]` | Statically configured tokens (`id`, `secret_sha256` digest, `roles`, optional `expires_at`) |
+| `user_tokens` | `UserTokenConfig` | (defaults) | Self-service user-minted token settings (ADR-0002) |
+
+**`AuthorizationConfig`**
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `default_role` | `str \| None` | `None` | Role granted to a principal matching no binding (deny by default) |
+| `metrics_public` | `bool` | `True` | Whether `GET /metrics` is unauthenticated |
+| `roles` | `dict[str, list[str]]` | `{viewer, user, admin}` | Role name -> permissions (`agent:invoke`, `tools:invoke`, `agent:peer`, `config:read`, `config:write`, `metrics:read`, or `*`) |
+| `bindings` | `list[RoleBinding]` | `[]` | Claim (`groups`/`emails`/`subs`) -> role mappings |
+
+**`AgentWeaveConfig`** (workload plane -- ADR-0004)
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | `bool` | `False` | Start the `:8443` SPIFFE mTLS + OPA workload listener. Has no effect on human/`:8000` authentication. |
 | `trust_domain` | `str` | `"forge.local"` | SPIFFE trust domain |
 | `spiffe_endpoint` | `str` | `"unix:///run/spire/sockets/agent.sock"` | SPIRE agent socket |
 | `authz_provider` | `str` | `"opa"` | Authorization provider |
 | `opa_endpoint` | `str` | `"http://localhost:8181"` | OPA endpoint |
 | `identity_secret` | `str \| None` | `None` | Identity secret override |
 | `trust_policy` | `TrustPolicy` | `strict` | One of: `strict`, `permissive` |
+| `workload_listener_port` | `int` | `8443` | Port for the mTLS listener |
 
-**`APIKeyConfig`**
+**`APIKeyConfig`** (deprecated, ADR-0001)
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `enabled` | `bool` | `False` | Enable API key authentication |
-| `keys` | `list[SecretRef]` | `[]` | List of API key secret references |
+| `enabled` | `bool` | `False` | Deprecated -- admin routes no longer check this directly |
+| `keys` | `list[SecretRef]` | `[]` | Deprecated -- list of API key secret references |
 
 ### Agents Configuration
 
@@ -332,14 +384,15 @@ tools:
             name: WEATHER_API_KEY
 
 security:
-  api_keys:
+  service_tokens:
     enabled: true
-    keys:
-      - source: env
-        name: FORGE_API_KEY
+    tokens:
+      - id: ci-runner
+        secret_sha256: "b1946ac92492d2347c6235b4d2611184..."
+        roles: [user]
   rate_limit_rpm: 60
   allowed_origins:
-    - "*"
+    - "https://forge.example.com"
 
 agents:
   default: assistant

@@ -10,24 +10,16 @@ nav_order: 10
 
 ## How do I get an API key?
 
-API keys are configured in the `security.api_keys` section of `forge.yaml`. Each key is a **secret reference** pointing to an environment variable or Kubernetes secret -- the actual key value lives outside the config file.
+Forge AI no longer uses static, admin-configured API keys for day-to-day access -- `security.api_keys` is deprecated (ADR-0001) and only kept around to translate a legacy config into a synthetic service token for one minor release.
 
-To set up API key authentication:
+There are two supported ways to get a bearer credential today:
 
-1. Set an environment variable on the server (e.g., `export FORGE_API_KEY=my-secret-key-value`).
-2. Add the reference to your config:
-   ```yaml
-   security:
-     api_keys:
-       enabled: true
-       keys:
-         - source: env
-           name: FORGE_API_KEY
-   ```
-3. Restart the gateway (or wait for hot-reload to pick up the change).
-4. Use the value from the environment variable (e.g., `my-secret-key-value`) to log in to the control plane.
+- **Self-service token (most users):** log in to the control plane through Dex (the browser login flow), then mint your own key with `POST /v1/auth/tokens`, providing a `label` and (optionally) a subset of your own roles and a TTL. The response contains the raw `forge_sk_...` token exactly once -- it is never recoverable afterward. List your active tokens with `GET /v1/auth/tokens`, and revoke one with `DELETE /v1/auth/tokens/{token_id}`. You can only mint permissions you already hold yourself (no privilege escalation), and each account is capped at a configured number of active tokens.
+- **Static service token (machine clients, e.g. CI):** your administrator adds an entry under `security.service_tokens.tokens` in `forge.yaml` (an `id`, the SHA-256 digest of the token, and a `roles` list) and gives you the raw token out-of-band. Only the digest is ever stored in config.
 
-Your administrator manages the key values. If you need access, ask them for the key.
+Either kind of token is presented the same way: `Authorization: Bearer forge_sk_...`.
+
+Ask your administrator if self-service tokens are enabled for your deployment (`security.service_tokens.user_tokens.enabled`), or if you need a static service token minted for a machine client.
 
 ---
 
@@ -74,12 +66,13 @@ Forge AI watches the `forge.yaml` file for changes using a file system watcher (
 2. The new config is loaded and validated against the Pydantic schema.
 3. If validation passes, the gateway updates:
    - Admin state and API routes
-   - API key authentication
-   - SecurityGate (AgentWeave)
+   - OIDC, session, and service-token wiring on the human plane (auth is rebuilt from the new config)
    - Tool surface (rebuilds all tools from the new config)
    - MCP server (rebuilt with updated tools)
    - A2A agent card (updated with new metadata and capabilities)
 4. If validation fails, the error is logged and the existing config remains active.
+
+The AgentWeave workload plane (the separate `:8443` SPIFFE + OPA listener, see [What is AgentWeave?](#what-is-agentweave)) is built once at startup and is **not** rebuilt by hot-reload -- changing `security.agentweave` settings requires a restart.
 
 Hot-reload happens automatically when you click **Save** in the Config Builder, because the save writes to the config file on disk, which the watcher detects.
 
@@ -126,14 +119,13 @@ At runtime, secrets are resolved by the `CompositeSecretResolver`, which reads t
 
 ## What is AgentWeave?
 
-AgentWeave is the security framework integrated into Forge AI for agent-to-agent (A2A) communication. It provides:
+AgentWeave is Forge AI's **workload plane** -- a separate security layer for east-west, agent-to-agent (A2A) traffic, distinct from the human sign-in flow. It provides:
 
-- **Identity** -- SPIFFE-based cryptographic identity so agents can prove who they are
-- **Signing** -- message signing to ensure integrity (messages are not tampered with in transit)
-- **Audit** -- logging of all agent interactions for compliance and debugging
-- **Authorization** -- policy-based access control via OPA (Open Policy Agent)
-- **Trust** -- configurable trust levels and policies for peer relationships
+- **Identity** -- SPIFFE-based cryptographic identity (via mTLS certificates) so agents can prove who they are
+- **Authorization** -- fail-closed, policy-based access control via OPA (Open Policy Agent)
+- **Audit** -- logging of all workload-plane authorization decisions for compliance and debugging
+- **Trust** -- `strict` (deny by default) or `permissive` trust policy for peer relationships
 
-AgentWeave is enabled by default in the config (`security.agentweave.enabled: true`). When disabled, the gateway runs in development mode without identity verification.
+AgentWeave is **disabled by default** (`security.agentweave.enabled: false`). When enabled, it starts a dedicated mTLS listener on a separate port (`:8443`) for A2A traffic; it does not affect how humans or machine clients authenticate to the main gateway on `:8000` -- that is handled independently by Dex OIDC and service tokens, and cannot be turned off by this setting. There is no supported way to disable authentication on `:8000` outright; see [How do I get an API key?](#how-do-i-get-an-api-key) for the human/machine credential model, or the `dev_insecure` mode described in the [Security]({{ site.baseurl }}/technical/security/) page for local development only.
 
-For more details, see the [Security]({{ site.baseurl }}/user/features/security/) page.
+For more details, see the [Security]({{ site.baseurl }}/technical/security/) page.

@@ -17,30 +17,30 @@ Interactive API documentation is auto-generated at:
 
 ## Authentication
 
-The API uses two authentication mechanisms depending on the route category:
+Every protected route -- admin, agent invocation, chat, and A2A -- resolves the caller through the same bypass-free credential resolver, `forge_security.oidc.resolve_principal`, reached via the `forge_gateway.security.get_principal` FastAPI dependency. There is no separate admin-key mechanism: `/v1/admin/*` routes use the identical resolver, gated by a permission check instead of a route-category split.
 
-### Admin Routes (`/v1/admin/*`)
+**Credential resolution** (first match wins, no fallthrough):
 
-Require an admin API key via either:
+1. A `forge_session` cookie (set by the `/auth/login` -> `/auth/callback` Dex OIDC browser login flow) -- resolves to a `kind="user"` principal.
+2. Else, `Authorization: Bearer <token>`:
+   - a token starting with `forge_sk_` -- a service token (static, or self-service-minted via `POST /v1/auth/tokens`) -- resolves to a `kind="service"` principal.
+   - a token shaped like a JWS (`header.payload.signature`) -- verified as an OIDC bearer JWT (RS256 against Dex's JWKS) -- resolves to a `kind="user"` principal.
+3. Else -- `401 missing_credentials`.
 
-| Method | Header |
-|--------|--------|
-| Bearer token | `Authorization: Bearer <key>` |
-| API key header | `X-API-Key: <key>` |
+**Authorization** is a separate step after authentication: `require_permission(<permission>)` checks the resolved principal's permissions (derived from role bindings on OIDC claims or a service token's configured `roles`) and returns `403 forbidden` if the required permission is absent.
 
-Keys are configured in `forge.yaml` under `security.api_keys` and resolved from environment variables or Kubernetes secrets. Constant-time comparison is used for validation.
+| Route group | Required permission |
+|-------------|---------------------|
+| `/v1/admin/*` (read endpoints) | `config:read` |
+| `/v1/admin/*` (write endpoints: `PUT /config`, `DELETE /sessions/{id}`, `POST /peers/{name}/ping`) | `config:write` |
+| `POST /v1/agent/invoke`, `POST /v1/chat/completions` | `agent:invoke` |
+| `POST /a2a/tasks` | `agent:peer` |
+| `/mcp` (tool invocation) | `tools:invoke` |
+| `GET /metrics` (only when `security.authorization.metrics_public: false`) | `metrics:read` |
 
-### Agent Routes (`/v1/agent/*`, `/v1/chat/*`, `/a2a/tasks`)
+In **`dev_insecure` mode** (`security.auth.mode: dev_insecure` *and* the `FORGE_DEV_INSECURE=1` environment variable -- both required), every request resolves to a synthetic `dev-anonymous` principal with every permission, and every response carries an `X-Forge-Insecure-Mode: true` header. This is for local development only.
 
-Protected by the `SecurityGate` dependency, which runs the full AgentWeave pipeline:
-
-1. **Identity extraction** -- Bearer token, `X-Caller-ID` header, or `caller_id` query parameter
-2. **Authentication** -- JWT verification (when configured)
-3. **Trust policy** -- Origin-based trust evaluation
-4. **Rate limiting** -- Per-caller sliding window (configurable RPM)
-5. **Audit logging** -- Structured event recording
-
-In **development mode** (AgentWeave disabled), all agent routes allow unauthenticated access with a synthetic `dev-anonymous` identity.
+See the [Security]({{ site.baseurl }}/technical/security/) page for the full authentication/authorization model, including service tokens and the separate AgentWeave workload plane.
 
 ## Error Response Format
 
@@ -138,13 +138,13 @@ Startup probe. Returns 200 once the application lifespan has begun.
 
 ## Admin Routes
 
-All admin routes require admin API key authentication. Prefix: `/v1/admin`.
+All admin routes require the `config:read` or `config:write` permission (see [Authentication](#authentication) above). Prefix: `/v1/admin`.
 
 ### GET /v1/admin/config
 
 Return the current resolved configuration with secrets redacted.
 
-**Authentication**: Admin API key
+**Authentication**: `config:read`
 
 **Response** `200 OK`
 
@@ -160,9 +160,15 @@ Return the current resolved configuration with secrets redacted.
     "llm": { "..." },
     "tools": { "..." },
     "security": {
-      "api_keys": {
+      "auth": { "mode": "enforce" },
+      "oidc": {
         "enabled": true,
-        "keys": [{ "source": "env", "name": "***REDACTED***" }]
+        "issuer": "https://dex.hvslocal/dex",
+        "client_id": "forge-ai"
+      },
+      "service_tokens": {
+        "enabled": true,
+        "tokens": [{ "id": "ci-runner", "secret_sha256": "b1946ac9...c68d" }]
       }
     },
     "agents": { "..." }
@@ -185,7 +191,7 @@ Return the current resolved configuration with secrets redacted.
 
 Validate and write a new configuration, triggering hot-reload.
 
-**Authentication**: Admin API key
+**Authentication**: `config:write`
 
 **Request Body**
 
@@ -225,7 +231,7 @@ Validate and write a new configuration, triggering hot-reload.
 
 Return the JSON Schema for the `ForgeConfig` Pydantic model.
 
-**Authentication**: Admin API key
+**Authentication**: `config:read`
 
 **Response** `200 OK`
 
@@ -237,7 +243,7 @@ Returns a standard JSON Schema object describing all configuration fields, types
 
 List all registered tools with metadata.
 
-**Authentication**: Admin API key
+**Authentication**: `config:read`
 
 **Response** `200 OK`
 
@@ -269,7 +275,7 @@ Returns an empty array if no agent is initialized.
 
 Dry-run: parse an OpenAPI spec and return the tool list without registering.
 
-**Authentication**: Admin API key
+**Authentication**: `config:read`
 
 **Request Body**
 
@@ -318,7 +324,7 @@ Dry-run: parse an OpenAPI spec and return the tool list without registering.
 
 List active agent sessions.
 
-**Authentication**: Admin API key
+**Authentication**: `config:read`
 
 **Response** `200 OK`
 
@@ -345,7 +351,7 @@ Returns an empty array if no agent is initialized.
 
 Terminate a specific session.
 
-**Authentication**: Admin API key
+**Authentication**: `config:write`
 
 **Path Parameters**
 
@@ -376,7 +382,7 @@ Terminate a specific session.
 
 List configured peer agents with connection status.
 
-**Authentication**: Admin API key
+**Authentication**: `config:read`
 
 **Response** `200 OK`
 
@@ -405,7 +411,7 @@ List configured peer agents with connection status.
 
 Health-check a specific peer. Includes SSRF protection that blocks private/internal IP addresses and known internal hostnames.
 
-**Authentication**: Admin API key
+**Authentication**: `config:read`
 
 **Path Parameters**
 
@@ -459,7 +465,7 @@ Structured agent invocation for automation and integrations.
 
 Invoke the agent programmatically with structured input and optional typed output.
 
-**Authentication**: SecurityGate
+**Authentication**: `agent:invoke`
 
 **Request Body**
 
@@ -541,7 +547,7 @@ Chat-style interactions with optional streaming.
 
 Send a conversational message to the agent.
 
-**Authentication**: SecurityGate
+**Authentication**: `agent:invoke`
 
 **Request Body**
 
@@ -625,7 +631,7 @@ Return the agent card for A2A discovery. No authentication required.
 
 Submit a task for the agent to execute. Used by peer Forge instances.
 
-**Authentication**: SecurityGate
+**Authentication**: `agent:peer`
 
 **Request Body**
 
@@ -683,7 +689,7 @@ Submit a task for the agent to execute. Used by peer Forge instances.
 
 Expose Prometheus metrics in text exposition format.
 
-**Authentication**: None
+**Authentication**: None by default (`security.authorization.metrics_public: true`, so Prometheus can scrape `:8000/metrics` directly). When an operator sets `metrics_public: false`, this route requires the `metrics:read` permission like any other protected route.
 
 **Response** `200 OK` (`text/plain`)
 
