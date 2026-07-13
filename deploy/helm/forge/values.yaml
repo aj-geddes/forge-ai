@@ -103,3 +103,10 @@ caBundle:
   configMapName: hvslocal-ca-bundle
   key: ca.crt
   mountPath: /etc/forge/ca
+
+# Durable storage for user-issued API-key digests (ADR-0002). Off by default.
+persistence:
+  enabled: false
+  storageClass: longhorn
+  size: 1Gi
+  mountPath: /app/data

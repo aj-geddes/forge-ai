@@ -1,3 +1,14 @@
+{{- /*
+The user-token store (ADR-0002) is a single JSON file on an RWO PersistentVolume.
+Two replicas would each hold an independent in-memory index and do last-writer-wins
+full-document overwrites, silently corrupting the store. Fail the render loudly
+rather than let a future replica/HPA bump quietly break it.
+*/ -}}
+{{- if .Values.persistence.enabled }}
+{{- if or (gt (int .Values.agent.replicaCount) 1) .Values.autoscaling.enabled }}
+{{- fail "persistence.enabled is set (RWO user-token store), which requires a single writer: set agent.replicaCount to 1 and autoscaling.enabled to false, or move the token store off the file backend before scaling out." }}
+{{- end }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -8,6 +19,12 @@ metadata:
 spec:
   {{- if not .Values.autoscaling.enabled }}
   replicas: {{ .Values.agent.replicaCount }}
+  {{- end }}
+  {{- if .Values.persistence.enabled }}
+  # RWO volume can attach to only one node/pod; Recreate stops the old pod (and
+  # detaches) before the new one starts, avoiding a multi-attach deadlock.
+  strategy:
+    type: Recreate
   {{- end }}
   selector:
     matchLabels:
@@ -76,6 +93,10 @@ spec:
               mountPath: {{ .Values.caBundle.mountPath }}
               readOnly: true
             {{- end }}
+            {{- if .Values.persistence.enabled }}
+            - name: data
+              mountPath: {{ .Values.persistence.mountPath }}
+            {{- end }}
           env:
             - name: FORGE_CONFIG_PATH
               value: /app/config/forge.yaml
@@ -104,6 +125,11 @@ spec:
         - name: ca-bundle
           configMap:
             name: {{ .Values.caBundle.configMapName }}
+        {{- end }}
+        {{- if .Values.persistence.enabled }}
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ include "forge.fullname" . }}-data
         {{- end }}
       {{- with .Values.agent.nodeSelector }}
       nodeSelector:

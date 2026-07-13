@@ -1,0 +1,22 @@
+{{- if .Values.persistence.enabled }}
+# Durable storage for user-issued API-key digests (ADR-0002). Holds only
+# sha256 digests + metadata, never raw tokens, so it is not itself a secret --
+# but it must survive pod restarts, hence a PVC rather than emptyDir.
+#
+# ReadWriteOnce: a single replica owns it. The Deployment uses strategy:
+# Recreate (see deployment.yaml) so a rolling update never has two pods trying
+# to attach the same RWO volume at once.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "forge.fullname" . }}-data
+  labels:
+    {{- include "forge.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: {{ .Values.persistence.storageClass | quote }}
+  resources:
+    requests:
+      storage: {{ .Values.persistence.size | quote }}
+{{- end }}

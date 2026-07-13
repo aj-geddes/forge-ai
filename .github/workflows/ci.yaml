@@ -82,6 +82,15 @@ jobs:
       - run: helm lint deploy/helm/forge/
       - run: helm lint deploy/helm/forge/ -f deploy/helm/forge/values.prod.yaml
       - run: helm lint deploy/helm/forge/ -f deploy/helm/forge/values.dev.yaml
+      # The RWO user-token store must never render with >1 writer. Assert the
+      # single-writer guard actually fails the render when someone scales out.
+      - name: single-writer guard fires on scale-out
+        run: |
+          if helm template forge deploy/helm/forge -f deploy/helm/forge/values-hvs-k8s.yaml --set agent.replicaCount=2 >/dev/null 2>&1; then
+            echo "::error::persistence + replicaCount=2 rendered successfully; the single-writer guard is missing or broken"
+            exit 1
+          fi
+          echo "guard correctly failed the render"
 
   docker-build:
     runs-on: ubuntu-latest
