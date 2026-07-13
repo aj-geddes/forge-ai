@@ -14,6 +14,16 @@ The token exchange is instead authenticated with the PKCE
 and no client secret. This is exactly as strong as PKCE is designed to
 be for a public client, and is the only option this client registration
 supports.
+
+``/auth/login`` and ``/auth/callback`` also carry an IP-keyed rate limit
+(:func:`forge_gateway.rate_limit.enforce_auth_flow_rate_limit`) -- a
+security-review finding: this pair is the documented abuse vector for
+hammering ``/auth/callback`` with garbage authorization codes, and no
+principal exists yet at this point in the flow to key an identity-based
+limit on. ``/auth/logout`` and ``/v1/auth/me`` are not limited here:
+``logout`` only clears local cookies (negligible cost, no upstream calls),
+and ``/v1/auth/me`` already goes through the identity-keyed limiter via
+``get_principal``.
 """
 
 from __future__ import annotations
@@ -31,11 +41,11 @@ from urllib.parse import urlencode
 
 import httpx
 from cryptography.fernet import Fernet, InvalidToken
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 from forge_security.oidc import AuthError
 
-from forge_gateway import security
+from forge_gateway import rate_limit, security
 
 logger = logging.getLogger("forge.gateway.routes.auth")
 
@@ -126,7 +136,11 @@ def _clear_cookie(response: RedirectResponse | JSONResponse, name: str, *, path:
     response.delete_cookie(name, path=path)
 
 
-@router.get("/auth/login", response_model=None)
+@router.get(
+    "/auth/login",
+    response_model=None,
+    dependencies=[Depends(rate_limit.enforce_auth_flow_rate_limit)],
+)
 async def login(request: Request) -> RedirectResponse | JSONResponse:
     """Start the authorization-code + PKCE flow: redirect to Dex."""
     oidc_config = security.get_oidc_config()
@@ -213,7 +227,11 @@ async def _exchange_code(
     return result
 
 
-@router.get("/auth/callback", response_model=None)
+@router.get(
+    "/auth/callback",
+    response_model=None,
+    dependencies=[Depends(rate_limit.enforce_auth_flow_rate_limit)],
+)
 async def callback(request: Request) -> RedirectResponse | JSONResponse:
     """Complete the authorization-code + PKCE flow: exchange the code,
     verify the ``id_token``, and mint the session cookie."""

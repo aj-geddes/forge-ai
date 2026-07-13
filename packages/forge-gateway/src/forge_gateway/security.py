@@ -33,6 +33,8 @@ from forge_security.oidc import (
     SessionCodec,
 )
 
+from forge_gateway import rate_limit
+
 logger = logging.getLogger("forge.gateway.security")
 
 _DEV_INSECURE_ENV_VAR = "FORGE_DEV_INSECURE"
@@ -98,6 +100,7 @@ def configure_auth(
     oidc_config: OIDCConfig | None = None,
     endpoints: DiscoveryDocument | None = None,
     tx_key: bytes | None = None,
+    rate_limit_rpm: int | None = None,
 ) -> None:
     """Wire the auth subsystem from the application lifespan.
 
@@ -106,6 +109,14 @@ def configure_auth(
     a working OIDC verifier, or at least one configured service token.
     When none of these hold, :func:`get_principal` denies every request
     with ``503 auth_unavailable`` rather than silently allowing traffic.
+
+    ``rate_limit_rpm`` wires ``security.rate_limit_rpm`` (see
+    :mod:`forge_gateway.rate_limit`) to the identity-keyed and IP-keyed
+    limiters. Defaults to ``None`` (disabled) so call sites that don't pass
+    it -- most tests, which wire auth via the repo-wide ``dev_insecure``
+    fixture -- are never rate limited by surprise; real config-driven
+    startup (``forge_gateway.app._init_auth``) always passes the configured
+    value explicitly.
     """
     global _state
     has_service_tokens = bool(
@@ -126,6 +137,7 @@ def configure_auth(
         endpoints=endpoints,
         tx_key=tx_key,
     )
+    rate_limit.configure_rate_limiting(rate_limit_rpm)
     if dev_insecure:
         logger.critical(
             "FORGE RUNNING IN dev_insecure MODE -- every request is authenticated as "
@@ -187,6 +199,7 @@ def reset_auth() -> None:
     """Reset all auth wiring to its unconfigured (unhealthy) state. Test-only."""
     global _state
     _state = _AuthState()
+    rate_limit.reset_rate_limiting()
 
 
 def _to_http_exception(exc: AuthError) -> HTTPException:
@@ -204,6 +217,14 @@ def _dev_principal() -> Principal:
     )
 
 
+def _rate_limit_identity(principal: Principal) -> str:
+    """The key ``enforce_principal_rate_limit`` buckets on: a service
+    token's ``token_id`` when present, otherwise the principal's ``sub``
+    (which already carries a ``svc:``/OIDC-sub/``dev-anonymous`` identity of
+    its own -- see ``forge_security.oidc.resolve_principal``)."""
+    return principal.token_id or principal.sub
+
+
 async def get_principal(request: Request) -> Principal:
     """Resolve *request* to a verified :class:`Principal`, or raise.
 
@@ -211,31 +232,42 @@ async def get_principal(request: Request) -> Principal:
     and ``Authorization`` header from the framework request and delegates
     to ``forge_security.oidc.resolve_principal``. Raises ``HTTPException``
     (never returns a fabricated identity) on any failure.
+
+    Once a principal is resolved, enforces the identity-keyed rate limit
+    (``security.rate_limit_rpm`` -- see :mod:`forge_gateway.rate_limit``)
+    before returning it, raising ``429 rate_limited`` when exceeded. This
+    is the single choke point for every protected route (``require_permission``,
+    ``enforce_mcp_security``, ``/v1/auth/me``, and ``/metrics`` when
+    ``metrics_public: false``), so wiring the limiter here covers the whole
+    authenticated surface without touching each route individually.
     """
     if _state.dev_insecure:
-        return _dev_principal()
+        principal = _dev_principal()
+    else:
+        if not _state.healthy:
+            raise HTTPException(status_code=503, detail="auth_unavailable")
 
-    if not _state.healthy:
-        raise HTTPException(status_code=503, detail="auth_unavailable")
+        assert _state.authorizer is not None  # noqa: S101 -- invariant: set whenever healthy
 
-    assert _state.authorizer is not None  # noqa: S101 -- invariant: set whenever healthy
+        from forge_security.oidc import resolve_principal
 
-    from forge_security.oidc import resolve_principal
+        session_cookie = request.cookies.get(_state.cookie_name)
+        authorization_header = request.headers.get("Authorization")
 
-    session_cookie = request.cookies.get(_state.cookie_name)
-    authorization_header = request.headers.get("Authorization")
+        try:
+            principal = await resolve_principal(
+                session_cookie=session_cookie,
+                authorization_header=authorization_header,
+                session_codec=_state.session_codec or _NULL_SESSION_CODEC,  # type: ignore[arg-type]
+                service_token_verifier=_state.service_token_verifier or ServiceTokenVerifier([]),
+                oidc_verifier=_state.oidc_verifier,
+                authorizer=_state.authorizer,
+            )
+        except AuthError as exc:
+            raise _to_http_exception(exc) from exc
 
-    try:
-        return await resolve_principal(
-            session_cookie=session_cookie,
-            authorization_header=authorization_header,
-            session_codec=_state.session_codec or _NULL_SESSION_CODEC,  # type: ignore[arg-type]
-            service_token_verifier=_state.service_token_verifier or ServiceTokenVerifier([]),
-            oidc_verifier=_state.oidc_verifier,
-            authorizer=_state.authorizer,
-        )
-    except AuthError as exc:
-        raise _to_http_exception(exc) from exc
+    await rate_limit.enforce_principal_rate_limit(_rate_limit_identity(principal))
+    return principal
 
 
 def _check_permission(principal: Principal, permission: str) -> None:

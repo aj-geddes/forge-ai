@@ -336,6 +336,7 @@ async def _init_auth(config: object | None) -> None:
         oidc_config=sec_config.oidc,
         endpoints=endpoints,
         tx_key=tx_key,
+        rate_limit_rpm=sec_config.rate_limit_rpm,
     )
     health.set_auth_mode(sec_config.auth.mode.value)
     health.set_auth_healthy(security.is_auth_healthy())
