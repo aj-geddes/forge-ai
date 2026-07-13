@@ -613,22 +613,26 @@ class TestModelSettingsWiring:
 
     @pytest.mark.anyio
     async def test_model_settings_passes_all_known_keys(self) -> None:
-        """All known keys (temperature, max_tokens, api_base) are forwarded."""
+        """All known keys (temperature, max_tokens) are forwarded.
+
+        ``api_base`` is intentionally NOT a known ModelSettings passthrough
+        key: PydanticAI's ModelSettings has no such field, so stuffing it in
+        here would be a silent no-op. Endpoint routing for sidecar/external
+        modes is instead applied via LLMRouter.resolve_model, which builds a
+        Model/Provider with the real ``base_url`` -- see test_llm.py.
+        """
         from unittest.mock import MagicMock
 
         config = _make_config()
         test_model = TestModel()
         agent = ForgeAgent(config, model_override=test_model)
 
-        # Simulate sidecar mode: router includes api_base alongside
-        # temperature and max_tokens.
         agent._llm_router = MagicMock()
         agent._llm_router.model_settings = {
             "temperature": 0.5,
             "max_tokens": 2048,
-            "api_base": "http://localhost:4000",
         }
-        agent._llm_router.model_name = "openai/gpt-4o"
+        agent._llm_router.resolve_model.return_value = "openai:gpt-4o"
         agent._llm_router.system_prompt = None
 
         with patch(
@@ -641,10 +645,9 @@ class TestModelSettingsWiring:
         call_kwargs = mock_agent_cls.call_args.kwargs
         assert "model_settings" in call_kwargs
         settings = call_kwargs["model_settings"]
-        # temperature, max_tokens, and api_base are all passthrough keys.
         assert settings["temperature"] == 0.5
         assert settings["max_tokens"] == 2048
-        assert settings["api_base"] == "http://localhost:4000"
+        assert "api_base" not in settings
 
     @pytest.mark.anyio
     async def test_model_settings_wired_through_run_conversational(

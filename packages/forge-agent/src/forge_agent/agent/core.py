@@ -147,11 +147,12 @@ class ForgeAgent:
         self._agent = self._create_agent()
 
     # Keys from LLMRouter.model_settings that should be forwarded to
-    # PydanticAI ModelSettings.  ``temperature`` and ``max_tokens`` are
-    # first-class ModelSettings fields; ``api_base`` is an extra key that
-    # PydanticAI forwards to the underlying LiteLLM provider for
-    # sidecar/external proxy modes.
-    _PASSTHROUGH_SETTINGS: frozenset[str] = frozenset({"temperature", "max_tokens", "api_base"})
+    # PydanticAI ModelSettings. ``temperature`` and ``max_tokens`` are the
+    # only first-class ModelSettings fields LLMRouter produces; endpoint
+    # routing (api_base) is applied when the Model/Provider is built in
+    # LLMRouter.resolve_model, not via ModelSettings (PydanticAI's
+    # ModelSettings has no api_base field, so putting it there is a no-op).
+    _PASSTHROUGH_SETTINGS: frozenset[str] = frozenset({"temperature", "max_tokens"})
 
     def _build_model_settings(self) -> ModelSettings | None:
         """Build a PydanticAI ``ModelSettings`` from the LLM router config.
@@ -213,7 +214,7 @@ class ForgeAgent:
         """
         model: Any = self._model_override
         if model is None:
-            model = model_name_override or self._llm_router.model_name
+            model = self._llm_router.resolve_model(model_name_override)
 
         system_prompt = system_prompt_override or self._llm_router.system_prompt or ""
         tools = self._filter_tools(self._registry.tools, tool_names_filter)
