@@ -1,5 +1,9 @@
-import { describe, it, expect } from "vitest";
-import { configToForm, formToConfig } from "./ConfigVisualEditor";
+import { describe, it, expect, afterEach } from "vitest";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { MemoryRouter } from "react-router-dom";
+import { configToForm, formToConfig, ConfigVisualEditor } from "./ConfigVisualEditor";
+import { useConfigStore } from "@/stores/configStore";
 import type { ForgeConfig } from "@/types/config";
 
 function baseConfig(): ForgeConfig {
@@ -268,6 +272,79 @@ describe("ConfigVisualEditor field mapping (contract with ForgeConfig backend sc
         tools: [],
         max_turns: 10,
       });
+    });
+  });
+});
+
+describe("ConfigVisualEditor mount dirty-state (regression: false 'Unsaved changes' on load)", () => {
+  afterEach(() => {
+    cleanup();
+    useConfigStore.setState({ original: null, draft: null, isDirty: false });
+  });
+
+  function loadedConfig(): ForgeConfig {
+    return {
+      metadata: {
+        name: "my-forge-agent",
+        version: "1.0.0",
+        description: "A test agent",
+        environment: "staging",
+      },
+      llm: {
+        default_model: "gpt-4o",
+        temperature: 0.5,
+        max_tokens: 2048,
+        litellm: { mode: "sidecar", endpoint: "http://litellm:4000" },
+      },
+      tools: { openapi_sources: [], manual_tools: [], workflows: [] },
+      security: {
+        agentweave: { enabled: true, trust_domain: "forge.local" },
+        rate_limit_rpm: 120,
+        allowed_origins: ["https://app.example.com"],
+      },
+      agents: { default: "assistant", agents: [], peers: [] },
+    };
+  }
+
+  function renderEditor() {
+    useConfigStore.getState().setOriginal(loadedConfig());
+    return render(
+      <MemoryRouter>
+        <ConfigVisualEditor />
+      </MemoryRouter>,
+    );
+  }
+
+  it("does not mark the draft dirty just from mounting/resetting the form with an unedited config", async () => {
+    renderEditor();
+
+    // Let the reset()/watch() effects settle.
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("my-forge-agent")).toBeInTheDocument();
+    });
+
+    expect(useConfigStore.getState().isDirty).toBe(false);
+  });
+
+  it("marks the draft dirty on a real field edit, and clears it again when the edit is reverted", async () => {
+    renderEditor();
+    const user = userEvent.setup();
+
+    const nameInput = await screen.findByDisplayValue("my-forge-agent");
+    expect(useConfigStore.getState().isDirty).toBe(false);
+
+    await user.clear(nameInput);
+    await user.type(nameInput, "renamed-agent");
+
+    await waitFor(() => {
+      expect(useConfigStore.getState().isDirty).toBe(true);
+    });
+
+    await user.clear(nameInput);
+    await user.type(nameInput, "my-forge-agent");
+
+    await waitFor(() => {
+      expect(useConfigStore.getState().isDirty).toBe(false);
     });
   });
 });

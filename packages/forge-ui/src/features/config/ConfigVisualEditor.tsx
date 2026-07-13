@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import {
   useForm,
   useFieldArray,
@@ -108,6 +108,18 @@ const MODEL_OPTIONS = [
 // routed model id, and the api_key env var name); any other keys on an
 // existing entry's `litellm_params` (e.g. api_base) are preserved verbatim
 // by formToConfig, keyed by array index.
+// RHF's uncontrolled <input type="number"> / <select> fields report an
+// empty string (never `undefined`) when a user hasn't touched an optional
+// field. Left un-normalized, z.coerce.number() turns "" into 0 (which then
+// fails a `.positive()` bound) and z.enum() rejects "" outright -- so the
+// *entire* form fails validation on every keystroke whenever any unrelated
+// optional numeric/enum field is unset, silently blocking every sync to the
+// config store (including real edits). Preprocess "" (and null) to
+// `undefined` so these fields behave as genuinely optional.
+function blankToUndefined(value: unknown): unknown {
+  return value === "" || value === null ? undefined : value;
+}
+
 const modelListEntrySchema = z.object({
   model_name: z.string().min(1, "Model name is required"),
   model: z.string().min(1, "Model identifier is required"),
@@ -121,21 +133,24 @@ const litellmSchema = z.object({
   // Comma-separated string in the form; mapped to the backend's
   // `fallback_models: string[]` field.
   fallback_models: z.string().optional(),
-  timeout: z.coerce.number().positive().optional(),
-  max_retries: z.coerce.number().int().nonnegative().optional(),
+  timeout: z.preprocess(blankToUndefined, z.coerce.number().positive().optional()),
+  max_retries: z.preprocess(blankToUndefined, z.coerce.number().int().nonnegative().optional()),
 });
 
 const metadataSchema = z.object({
   name: z.string().min(1, "Name is required"),
   version: z.string().min(1, "Version is required"),
   description: z.string().optional(),
-  environment: z.enum(["development", "staging", "production"]).optional(),
+  environment: z.preprocess(
+    blankToUndefined,
+    z.enum(["development", "staging", "production"]).optional(),
+  ),
 });
 
 const llmSchema = z.object({
   model: z.string().min(1, "Model is required"),
-  temperature: z.coerce.number().min(0).max(2).optional(),
-  max_tokens: z.coerce.number().int().positive().optional(),
+  temperature: z.preprocess(blankToUndefined, z.coerce.number().min(0).max(2).optional()),
+  max_tokens: z.preprocess(blankToUndefined, z.coerce.number().int().positive().optional()),
   system_prompt: z.string().optional(),
   litellm: litellmSchema.optional(),
 });
@@ -143,8 +158,8 @@ const llmSchema = z.object({
 const securitySchema = z.object({
   agentweave_enabled: z.boolean(),
   trust_domain: z.string().optional(),
-  trust_policy: z.enum(["strict", "permissive"]).optional(),
-  rate_limit_rpm: z.coerce.number().int().positive().optional(),
+  trust_policy: z.preprocess(blankToUndefined, z.enum(["strict", "permissive"]).optional()),
+  rate_limit_rpm: z.preprocess(blankToUndefined, z.coerce.number().int().positive().optional()),
   // Comma-separated string in the form; mapped to the backend's flat
   // `allowed_origins: string[]` field (not `cors_origins`).
   cors_origins: z.string().optional(),
@@ -163,7 +178,7 @@ const agentDefSchema = z.object({
   system_prompt: z.string().optional(),
   model: z.string().optional(),
   tools: z.string().optional(),
-  max_turns: z.coerce.number().int().positive().optional(),
+  max_turns: z.preprocess(blankToUndefined, z.coerce.number().int().positive().optional()),
 });
 
 const agentsSchema = z.object({
@@ -317,21 +332,34 @@ export function formToConfig(
       default_model: form.llm.model,
       temperature: form.llm.temperature,
       max_tokens: form.llm.max_tokens,
-      system_prompt: form.llm.system_prompt || null,
+      // A blank/untouched textarea or empty field-array round-trips back
+      // through configToForm/formToConfig on every store sync (including the
+      // programmatic sync that fires on mount). If we always wrote a
+      // concrete `null`/`[]` here, an untouched config would come back
+      // looking different (by JSON.stringify, which the store's dirty check
+      // uses) from the `original` it started as -- a false "Unsaved
+      // changes". Falling back to the pre-existing value when the form
+      // field is empty keeps an untouched config byte-for-byte equal to
+      // `original`, while a real edit (form field genuinely populated)
+      // still overrides it and marks the draft dirty as expected.
+      system_prompt: form.llm.system_prompt || existing.llm.system_prompt,
       litellm: form.llm.litellm
         ? {
             ...existing.llm.litellm,
             mode: form.llm.litellm.mode as LiteLLMMode,
             endpoint: form.llm.litellm.endpoint || undefined,
-            model_list: (form.llm.litellm.model_list ?? []).map((entry, index) =>
-              modelListEntryFromForm(entry, existing.llm.litellm?.model_list?.[index]),
-            ),
+            model_list:
+              form.llm.litellm.model_list && form.llm.litellm.model_list.length > 0
+                ? form.llm.litellm.model_list.map((entry, index) =>
+                    modelListEntryFromForm(entry, existing.llm.litellm?.model_list?.[index]),
+                  )
+                : existing.llm.litellm?.model_list,
             fallback_models: form.llm.litellm.fallback_models
               ? form.llm.litellm.fallback_models
                   .split(",")
                   .map((s) => s.trim())
                   .filter(Boolean)
-              : [],
+              : existing.llm.litellm?.fallback_models,
             timeout: form.llm.litellm.timeout,
             max_retries: form.llm.litellm.max_retries,
           }
@@ -596,8 +624,24 @@ export function ConfigVisualEditor() {
     mode: "onChange",
   });
 
+  // `updateDraft` (below) creates a brand-new `draft` object on every form
+  // change, including changes this component itself just wrote. Without
+  // this flag, that store write would re-trigger the "reset form when draft
+  // changes externally" effect below, which would call `reset()`, which
+  // re-fires `watch()`, which calls `updateDraft` again -- an infinite
+  // reset/watch feedback loop. Set the flag immediately before the
+  // self-inflicted store write and consume it (without resetting) in the
+  // effect that reacts to `draft` changes, so only genuinely external draft
+  // changes (initial load, the YAML editor, undo/reset) trigger a form
+  // reset.
+  const isSelfInflictedUpdate = useRef(false);
+
   // Reset form when draft changes externally (e.g., from YAML editor)
   useEffect(() => {
+    if (isSelfInflictedUpdate.current) {
+      isSelfInflictedUpdate.current = false;
+      return;
+    }
     if (draft) {
       reset(configToForm(draft));
     }
@@ -609,6 +653,7 @@ export function ConfigVisualEditor() {
       if (!draft) return;
       const parsed = formSchema.safeParse(values);
       if (parsed.success) {
+        isSelfInflictedUpdate.current = true;
         updateDraft(formToConfig(parsed.data, draft));
       }
     });

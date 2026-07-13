@@ -249,9 +249,10 @@ function AllowedOriginsCard({ origins }: { origins?: string[] }) {
         <CardDescription>CORS allowed origins</CardDescription>
         <HelpText>
           These are the web domains allowed to make browser-based requests to
-          your agent API. In development, use <code className="font-mono">*</code> to
-          allow all origins. In production, list only your actual frontend domains
-          to prevent unauthorized cross-site requests.
+          your agent API. List an explicit allowlist of your frontend domains &mdash;{" "}
+          <code className="font-mono">*</code> is rejected by validation whenever
+          credentialed sessions (OIDC) are enabled, since a wildcard origin combined
+          with credentials is a security risk.
         </HelpText>
       </CardHeader>
       <CardContent>
@@ -328,8 +329,10 @@ function ApiKeysCard({ apiKeys }: { apiKeys?: SecurityConfig["api_keys"] }) {
           </div>
         ) : (
           <p className="text-sm text-muted-foreground">
-            No API keys configured. The gateway may accept unauthenticated
-            requests depending on other security settings.
+            No legacy API keys configured. <code className="font-mono">api_keys</code> is a
+            deprecated, optional control &mdash; request authentication is enforced
+            independently via OIDC (browser sessions) and service tokens, so the gateway
+            does not accept unauthenticated requests.
           </p>
         )}
       </CardContent>
