@@ -11,6 +11,14 @@ dependencies = [
     "pyjwt[crypto]>=2.10",
     "httpx>=0.28",
     "structlog>=24.0",
+    # agentweave.testing.__init__ unconditionally imports TestCluster
+    # (agentweave/testing/cluster.py), which requires `docker` even to
+    # reach agentweave.testing.mocks (MockIdentityProvider /
+    # MockAuthorizationProvider) -- the ADR-0004-sanctioned test doubles
+    # forge_security.workload.providers.build_workload_plane(test_mode=True)
+    # depends on. Declared directly here rather than left as an implicit
+    # transitive import.
+    "docker>=7.1",
 ]
 
 [build-system]

@@ -71,6 +71,13 @@ warn_required_dynamic_aliases = true
 module = "simpleeval"
 ignore_missing_imports = true
 
+[[tool.mypy.overrides]]
+# agentweave (../agentweave, editable path dep) ships no py.typed marker;
+# treat it as untyped so forge_security.workload can import the real SDK
+# under strict mypy (ADR-0004 SS7.2).
+module = "agentweave.*"
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["packages/*/tests"]
