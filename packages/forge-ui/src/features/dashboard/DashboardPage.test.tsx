@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { DashboardPage } from "./DashboardPage";
@@ -79,5 +79,72 @@ describe("DashboardPage health + config contract", () => {
       const peerBadges = screen.getAllByText("1");
       expect(peerBadges.length).toBeGreaterThan(0);
     });
+  });
+
+  it("treats a 'ready' subsystem status as healthy (green), not as an error (red)", async () => {
+    // The live /health/ready payload reports individual components as
+    // "ready" (not just "ok"/"healthy") once they've passed readiness --
+    // e.g. {"components": {"agent": "ready"}}. The Subsystems card must
+    // classify that as a PASS. A genuinely unhealthy status must still
+    // render as an error.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((url: string) => {
+        if (url === "/health/ready") {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: async () => ({
+              status: "ready",
+              version: "1.0.0",
+              components: { agent: "ready", cache: "unhealthy" },
+            }),
+          });
+        }
+        if (url === "/v1/admin/config") {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: async () => ({
+              path: "forge.yaml",
+              config: {
+                metadata: { name: "forge", version: "0.1.0", environment: "development" },
+                llm: { default_model: "gpt-4o", litellm: { mode: "embedded" } },
+                tools: { openapi_sources: [], manual_tools: [], workflows: [] },
+                agents: { default: "assistant", agents: [], peers: [] },
+              },
+            }),
+          });
+        }
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => [],
+        });
+      }),
+    );
+
+    renderDashboard();
+
+    await waitFor(() => {
+      expect(screen.getByText("agent")).toBeInTheDocument();
+    });
+
+    const getSubsystemRow = (name: string): HTMLElement => {
+      const label = screen.getByText(name);
+      const row = label.closest("div.flex.items-center.justify-between");
+      if (!row) throw new Error(`Row for subsystem "${name}" not found`);
+      return row as HTMLElement;
+    };
+
+    const agentRow = getSubsystemRow("agent");
+    const agentBadge = within(agentRow).getByText("ready");
+    expect(agentBadge.className).not.toContain("bg-destructive");
+    expect(agentRow.querySelector("svg.text-destructive")).not.toBeInTheDocument();
+
+    const cacheRow = getSubsystemRow("cache");
+    const cacheBadge = within(cacheRow).getByText("unhealthy");
+    expect(cacheBadge.className).toContain("bg-destructive");
+    expect(cacheRow.querySelector("svg.text-destructive")).toBeInTheDocument();
   });
 });

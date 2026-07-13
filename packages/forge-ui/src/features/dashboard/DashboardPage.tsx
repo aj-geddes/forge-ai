@@ -44,6 +44,23 @@ import { cn } from "@/lib/utils";
 import type { HealthResponse } from "@/types/config";
 
 // ---------------------------------------------------------------------------
+// Health status classification
+// ---------------------------------------------------------------------------
+
+/**
+ * Backend health/readiness endpoints and subsystem components maps use several
+ * different strings to mean "healthy": "ok", "healthy", "ready", "started",
+ * and "up" (the last one used for workload sub-statuses). This whitelist must
+ * be centralized to ensure UI health classification remains consistent across
+ * SubsystemChecks, HealthCheckRow, and the top-level dashboard health indicator.
+ */
+const HEALTHY_STATUSES: Set<string> = new Set(["ok", "healthy", "ready", "started", "up"]);
+
+function isHealthyStatus(status: string | null | undefined): boolean {
+  return HEALTHY_STATUSES.has((status ?? "").toLowerCase());
+}
+
+// ---------------------------------------------------------------------------
 // Skeleton helpers
 // ---------------------------------------------------------------------------
 
@@ -193,7 +210,7 @@ function HealthCheckRow({
     retry: 1,
   });
 
-  const isOk = ["ok", "healthy", "ready", "started"].includes(data?.status ?? "");
+  const isOk = isHealthyStatus(data?.status);
 
   return (
     <div className="flex items-center justify-between rounded-lg border px-4 py-3 transition-colors hover:bg-muted/50">
@@ -509,7 +526,7 @@ function SubsystemChecks() {
   return (
     <div className="space-y-2">
       {Object.entries(health.components).map(([name, status]) => {
-        const isOk = status === "ok" || status === "healthy";
+        const isOk = isHealthyStatus(status);
         return (
           <div
             key={name}
@@ -554,7 +571,7 @@ export function DashboardPage() {
   const { data: sessions, isLoading: sessionsLoading, isError: sessionsError } = useSessions();
   const { data: peers, isLoading: peersLoading, isError: peersError } = usePeers();
 
-  const isHealthy = health?.status === "ok" || health?.status === "healthy" || health?.status === "ready";
+  const isHealthy = isHealthyStatus(health?.status);
   const healthStatus: HealthIndicator = health
     ? isHealthy
       ? "healthy"
