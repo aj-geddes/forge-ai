@@ -86,6 +86,21 @@ Or `docker-compose up` (forge on 8000, metrics on 9090, plus redis:7). Skaffold 
 
 `e2e-tests/` at the repo root is a separate pytest + pytest-playwright suite that runs against an **already-deployed instance** — it does not start the app. Configure with `E2E_BASE_URL` (default `https://forge-ai.hvs`) and `E2E_ADMIN_KEY`. Runs chromium with screenshots on.
 
+## Deployment — ArgoCD GitOps (REQUIRED)
+
+**Deployment is ArgoCD-managed. Never `kubectl apply`, `helm install`, or `skaffold run` app changes by hand.** Commit code and manifests to git, push to `origin/main`, and ArgoCD reconciles the running app state. `selfHeal: true` means manual cluster edits are reverted — fix drift in git, not in the cluster. Rollback = revert the commit.
+
+- **Live app**: https://forgeai.hvslocal (namespace `dev-aj-geddes`, cluster `hvs-k8s`, requires WireGuard VPN). ArgoCD dashboard: https://argocd.hvslocal. Platform docs: https://docs.hvslocal.
+- **Gateway API only — there is NO Ingress controller.** Expose via `HTTPRoute` (`gateway.networking.k8s.io/v1`) attached to `shared-gateway` in the `gateway` namespace, `sectionName: https`. TLS is terminated by the gateway's `hvslocal-wildcard-tls` cert; apps must not mount their own TLS secret.
+- **All cluster nodes are amd64.** Images must be built `--platform linux/amd64` or they fail with `exec format error`.
+- **Image builds need the PARENT directory as build context** (the Dockerfile does `COPY forge-ai/...` and `COPY agentweave/`, and `agentweave` is a sibling editable dep Docker cannot reach from a repo-root context):
+  ```bash
+  docker buildx build --platform linux/amd64 -f forge-ai/Dockerfile \
+    -t harbor.hvslocal/dev-aj-geddes/forge-ai:<immutable-tag> --push .   # run from the parent dir
+  ```
+  Ignore rules live in `Dockerfile.dockerignore` (BuildKit convention, git-tracked). **Never deploy `:latest`** — pin an immutable tag and bump it in git so ArgoCD picks it up.
+- **Secrets never go in manifests or images.** External Secrets Operator pulls from OpenBao via the `openbao` SecretStore in the namespace; paths are `kv/users/aj-geddes/app/<entry>` (the `remoteRef.key` omits the `kv/` prefix). `forge.yaml` references them as `${ENV_VAR}`.
+
 ## Conventions
 
 - Python 3.12+, strict mypy with the pydantic plugin, ruff line length 100

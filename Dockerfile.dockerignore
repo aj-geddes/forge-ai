@@ -1,0 +1,73 @@
+# Dockerfile-specific ignore file.
+#
+# The build context for this Dockerfile is the PARENT directory of this repo
+# (it must contain both `forge-ai/` and `agentweave/` as siblings, because the
+# Dockerfile COPYs the ../agentweave editable path dependency -- see
+# Dockerfile and pyproject.toml's [tool.uv.sources]).
+#
+# Docker/BuildKit resolves an ignore file named "<dockerfile-name>.dockerignore"
+# that sits next to the Dockerfile in preference to a ".dockerignore" at the
+# context root, so this file is honored automatically regardless of which
+# directory is actually used as the context (local `docker compose build`,
+# `skaffold build`, or CI). Patterns are still evaluated relative to the
+# CONTEXT ROOT (the parent directory), not this file's location, so every
+# pattern below is prefixed with "forge-ai/" or "agentweave/".
+#
+# That parent directory is a general dev workspace with many unrelated
+# sibling repos (~2.9GB locally), so we deny everything by default and only
+# allow the two subtrees actually needed for the build; this keeps context
+# transfer to a couple of MB instead of gigabytes.
+
+# 0. Deny everything, then re-include only what's needed.
+*
+!forge-ai
+!agentweave
+
+# --- forge-ai repo ---
+forge-ai/.git
+forge-ai/.github
+forge-ai/**/.venv
+forge-ai/**/.pytest_cache
+forge-ai/**/.mypy_cache
+forge-ai/**/.ruff_cache
+forge-ai/**/__pycache__
+forge-ai/**/*.pyc
+forge-ai/**/*.egg-info
+forge-ai/deploy/
+forge-ai/docs/
+forge-ai/tests/
+forge-ai/**/tests/
+forge-ai/**/*.md
+!forge-ai/forge.yaml.example
+forge-ai/Dockerfile
+forge-ai/Dockerfile.dockerignore
+forge-ai/skaffold.yaml
+
+# forge-ui: these are locally-generated build artifacts (npm ci / npm run
+# build run on the host during development). They MUST be excluded: the
+# Dockerfile's `COPY forge-ai/packages/forge-ui/ .` step runs AFTER
+# `RUN npm ci` in the ui-builder stage, so a stale local node_modules/dist
+# on disk would silently overwrite the container's freshly-installed
+# node_modules and break/skew the `npm run build` (tsc) step.
+forge-ai/packages/forge-ui/node_modules
+forge-ai/packages/forge-ui/dist
+forge-ai/packages/forge-ui/coverage
+forge-ai/packages/forge-ui/.vite
+forge-ai/**/*.tsbuildinfo
+
+# --- agentweave (sibling path dependency; only its pyproject.toml + package
+#     source are needed to build the venv) ---
+agentweave/.git
+agentweave/**/.venv
+agentweave/**/.pytest_cache
+agentweave/**/.mypy_cache
+agentweave/**/.ruff_cache
+agentweave/**/__pycache__
+agentweave/**/*.pyc
+agentweave/**/*.egg-info
+agentweave/deploy/
+agentweave/docs/
+agentweave/examples/
+agentweave/tests/
+agentweave/**/tests/
+agentweave/**/*.md

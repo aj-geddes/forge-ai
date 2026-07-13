@@ -5,8 +5,18 @@ metadata:
 build:
   artifacts:
     - image: forge-ai
+      # Context is the parent of this repo (not the skaffold.yaml's own
+      # directory) because the Dockerfile also COPYs the sibling
+      # ../agentweave editable dependency, which must be inside the build
+      # context. Skaffold resolves `context` relative to this skaffold.yaml
+      # file (not the invocation cwd), so `skaffold dev`/`skaffold build`
+      # work unchanged from this directory. See Dockerfile.dockerignore
+      # (colocated with the Dockerfile, so it is honored no matter which
+      # directory ends up as the build context - local compose/skaffold or
+      # CI) and Dockerfile for the full explanation.
+      context: ..
       docker:
-        dockerfile: Dockerfile
+        dockerfile: forge-ai/Dockerfile
   local:
     push: false
 manifests:

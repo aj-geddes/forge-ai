@@ -17,7 +17,17 @@ jobs:
   build-push:
     runs-on: ubuntu-latest
     steps:
+      # Check out forge-ai into a subdirectory of the runner workspace and
+      # clone agentweave alongside it, then build with context "." (the
+      # workspace root, containing both dirs as siblings). This matches
+      # ci.yaml's docker-build job and the Dockerfile, which COPYs the
+      # sibling ../agentweave editable dependency and therefore requires it
+      # to be inside the build context.
       - uses: actions/checkout@v4
+        with:
+          path: forge-ai
+
+      - run: git clone --depth 1 https://github.com/aj-geddes/agentweave.git agentweave
 
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
@@ -40,6 +50,7 @@ jobs:
       - uses: docker/build-push-action@v6
         with:
           context: .
+          file: forge-ai/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}

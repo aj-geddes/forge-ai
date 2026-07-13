@@ -16,7 +16,22 @@ WORKDIR /build
 # Build context must include agentweave as a sibling directory.
 # Use: docker build -f forge-ai/Dockerfile . (from parent directory)
 # Or the CI workflow handles this via context path.
+# All build paths (docker-compose.yaml, skaffold.yaml, .github/workflows/*)
+# are configured to use the parent-of-forge-ai directory as context so this
+# COPY resolves consistently everywhere; see Dockerfile.dockerignore, which
+# is honored regardless of what the actual context root is.
 COPY agentweave/ /build/agentweave/
+
+# Defensive cleanup: in this multi-stage Dockerfile (a preceding ui-builder
+# stage also COPYs from the build context), BuildKit does not always apply
+# Dockerfile.dockerignore's excludes to this later COPY - verified locally
+# (buildx v0.35.0 / Docker Engine 29.5.2 on Colima): agentweave/.git,
+# agentweave/docs/, agentweave/tests/, etc. were reliably excluded, but
+# agentweave/agentweave.egg-info leaked through 100% of repeated no-cache
+# builds regardless of glob vs. literal ignore pattern syntax. Deleting stale
+# VCS/build metadata here guarantees `uv sync` always resolves the agentweave
+# path dependency from clean source, independent of that host-side quirk.
+RUN rm -rf /build/agentweave/.git /build/agentweave/agentweave.egg-info /build/agentweave/build
 
 # Set the app workdir
 WORKDIR /build/forge-ai

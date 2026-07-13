@@ -3,8 +3,17 @@ version: "3.8"
 services:
   forge:
     build:
-      context: .
-      dockerfile: Dockerfile
+      # Build context is the parent of this repo (not ".") because the
+      # Dockerfile also COPYs the sibling ../agentweave editable dependency,
+      # which Docker can only reach if it's inside the context. Run this
+      # compose file with `docker compose --project-directory . -f
+      # docker-compose.yaml build`, or invoke from the parent directory, e.g.:
+      #   cd .. && docker compose -f forge-ai/docker-compose.yaml build
+      # See Dockerfile.dockerignore (colocated with the Dockerfile, so it is
+      # honored no matter which directory ends up as the build context -
+      # local compose/skaffold or CI) and Dockerfile for the full explanation.
+      context: ..
+      dockerfile: forge-ai/Dockerfile
     ports:
       - "8000:8000"
       - "9090:9090"
