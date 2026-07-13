@@ -17,6 +17,13 @@ repos:
         pass_filenames: false
         files: "pyproject\\.toml$"
 
+      - id: mypy
+        name: mypy packages (strict)
+        entry: uv run mypy packages/
+        language: system
+        pass_filenames: false
+        stages: [pre-commit]
+
       - id: pytest
         name: pytest
         entry: uv run pytest packages/ -x -q

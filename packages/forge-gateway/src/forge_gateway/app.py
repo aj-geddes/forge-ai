@@ -212,6 +212,64 @@ def _resolve_legacy_service_tokens(config: object) -> list[ServiceToken]:
     return tokens
 
 
+_FORGE_OIDC_CA_BUNDLE_ENV_VAR = "FORGE_OIDC_CA_BUNDLE"
+_SSL_CERT_FILE_ENV_VAR = "SSL_CERT_FILE"
+
+
+def _oidc_ca_verify() -> str | bool:
+    """Resolve the CA trust bundle for the gateway's OIDC (Dex) httpx clients.
+
+    Dex (``dex.hvslocal``) presents a certificate signed by the hvslocal
+    private Root CA, which is not in the public CA bundle httpx/certifi
+    trusts by default -- without this, OIDC discovery, JWKS fetches, and
+    the Dex token exchange all fail with
+    ``SSL: CERTIFICATE_VERIFY_FAILED: unable to get local issuer certificate``.
+
+    Resolution order for httpx's ``verify=`` kwarg:
+
+    1. ``FORGE_OIDC_CA_BUNDLE`` if set and the file exists -- deploy-time
+       mount of the hvslocal Root CA (see docs/adr/0001-dex-oidc-authentication.md).
+    2. ``SSL_CERT_FILE`` (the standard OpenSSL/platform convention) if set
+       and the file exists.
+    3. Otherwise ``True`` -- the httpx/certifi default public-CA behavior,
+       which preserves existing tests and non-Dex deployments.
+
+    A configured-but-missing path is a misconfiguration, not license to
+    disable verification: it is logged at WARNING and resolution falls
+    through to the next step, never to ``False``. ``verify=False`` must
+    never be returned here -- that would disable TLS verification
+    entirely rather than trusting a specific private CA.
+    """
+    bundle = os.environ.get(_FORGE_OIDC_CA_BUNDLE_ENV_VAR)
+    if bundle:
+        if os.path.isfile(bundle):
+            logger.info("OIDC HTTP client trusting CA bundle: %s", bundle)
+            return bundle
+        logger.warning(
+            "%s=%s does not exist; ignoring it and falling back to the next "
+            "CA trust source (Dex TLS may fail if it uses a private CA)",
+            _FORGE_OIDC_CA_BUNDLE_ENV_VAR,
+            bundle,
+        )
+
+    ssl_cert_file = os.environ.get(_SSL_CERT_FILE_ENV_VAR)
+    if ssl_cert_file:
+        if os.path.isfile(ssl_cert_file):
+            logger.info(
+                "OIDC HTTP client trusting CA bundle (%s): %s",
+                _SSL_CERT_FILE_ENV_VAR,
+                ssl_cert_file,
+            )
+            return ssl_cert_file
+        logger.warning(
+            "%s=%s does not exist; ignoring it and falling back to default public CA verification",
+            _SSL_CERT_FILE_ENV_VAR,
+            ssl_cert_file,
+        )
+
+    return True
+
+
 def _build_oidc_verifier(
     oidc_config: OIDCConfig, http_client: httpx.AsyncClient
 ) -> OIDCTokenVerifier:
@@ -284,7 +342,7 @@ async def _init_auth(config: object | None) -> None:
     tx_key: bytes | None = None
 
     if sec_config.oidc.enabled:
-        http_client = httpx.AsyncClient()
+        http_client = httpx.AsyncClient(verify=_oidc_ca_verify())
         discovery_doc = None
         if sec_config.oidc.discovery:
             try:
