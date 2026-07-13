@@ -294,7 +294,27 @@ describe("ConfigVisualEditor mount dirty-state (regression: false 'Unsaved chang
         default_model: "gpt-4o",
         temperature: 0.5,
         max_tokens: 2048,
-        litellm: { mode: "sidecar", endpoint: "http://litellm:4000" },
+        // Mirrors the live-deployed shape: the backend serializes an unset
+        // optional endpoint as an explicit `null` (mode "embedded" doesn't
+        // use one), and model_list[].litellm_params carries several keys
+        // whose insertion order the form's round-trip does not preserve.
+        // Regression coverage for the false "Unsaved changes" bug where a
+        // JSON.stringify-based dirty check tripped on `null` vs. absent keys
+        // and on object key reordering, not just literal edits.
+        litellm: {
+          mode: "embedded",
+          endpoint: null,
+          model_list: [
+            {
+              model_name: "nemotron",
+              litellm_params: {
+                model: "openai/nemotron-puzzle",
+                api_base: "http://x",
+                api_key: "***REDACTED***",
+              },
+            },
+          ],
+        },
       },
       tools: { openapi_sources: [], manual_tools: [], workflows: [] },
       security: {

@@ -14,8 +14,36 @@ export interface ConfigDraftState {
   resetDraft: () => void;
 }
 
+// The visual editor's form round-trip is lossless in meaning but not
+// byte-for-byte: it may drop a key whose value is an unset-optional `null`
+// (the backend serializes unset optionals as explicit `null`, e.g.
+// `llm.litellm.endpoint`), and object spreads used while rebuilding nested
+// structures (e.g. `model_list[].litellm_params`) do not preserve the
+// original key insertion order. A naive `JSON.stringify` comparison is
+// sensitive to both of those, producing a false "Unsaved changes" on load
+// even when nothing was actually edited. `normalize` builds a canonical form
+// that is insensitive to object key order and to null/undefined/absent-key
+// distinctions, while leaving array element order intact -- array order is
+// semantically significant (e.g. model_list routing priority) and a genuine
+// change.
+function normalize(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(normalize);
+  }
+  if (value !== null && typeof value === "object") {
+    const normalized: Record<string, unknown> = {};
+    for (const key of Object.keys(value as Record<string, unknown>).sort()) {
+      const entryValue = (value as Record<string, unknown>)[key];
+      if (entryValue === null || entryValue === undefined) continue;
+      normalized[key] = normalize(entryValue);
+    }
+    return normalized;
+  }
+  return value;
+}
+
 function deepEqual(a: unknown, b: unknown): boolean {
-  return JSON.stringify(a) === JSON.stringify(b);
+  return JSON.stringify(normalize(a)) === JSON.stringify(normalize(b));
 }
 
 export const useConfigStore = create<ConfigDraftState>((set) => ({
