@@ -110,3 +110,10 @@ persistence:
   storageClass: longhorn
   size: 1Gi
   mountPath: /app/data
+
+# Workload plane (AI-to-AI): SPIFFE mTLS + OPA on a :8443 listener. Off by
+# default; requires SPIRE + OPA in the cluster (see deploy/cluster/).
+agentweave:
+  enabled: false
+  socketMountPath: /spiffe-workload-api
+  opaEndpoint: http://opa.opa.svc.cluster.local:8181

@@ -25,9 +25,23 @@ allow if {
 	input.action in {"read", "list", "health_check"}
 }
 
+# A2A task / tool invocation (the actions Forge's workload plane actually sends).
+# Allowed when the caller and resource share a trust domain AND the caller is a
+# known peer whose configured trust_level is at least "medium". Forge looks the
+# trust_level up server-side from config, keyed by the VERIFIED client SPIFFE id
+# (a caller cannot assert its own level), and passes it in context.peer_trust_level.
+# An unknown peer (no config entry) has no/low trust_level here and is denied.
+allow if {
+	input.caller_spiffe_id
+	input.resource_spiffe_id
+	input.caller_trust_domain == input.resource_trust_domain
+	input.action in {"a2a:task", "tools:invoke"}
+	input.context.peer_trust_level in {"medium", "high"}
+}
+
 # Queryable at /v1/data/agentweave/authz/reason -- human-readable justification for
 # the decision, useful for audit logging and debugging policy changes.
-reason := "allow: same trust domain and action is on the low-risk allowlist" if allow
+reason := "allow: same trust domain, and action is low-risk or the caller is a >=medium-trust known peer invoking a2a:task/tools:invoke" if allow
 
 reason := sprintf(
 	"deny: action %q not allowlisted, or caller/resource trust domains differ (caller=%v, resource=%v)",

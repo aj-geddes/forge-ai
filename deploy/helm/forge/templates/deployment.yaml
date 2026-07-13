@@ -64,6 +64,13 @@ spec:
             - name: http
               containerPort: 8000
               protocol: TCP
+            {{- if .Values.agentweave.enabled }}
+            # Workload plane (AI-to-AI): pod-terminated mTLS listener. Reached via
+            # the -a2a-mtls east-west Service, NOT the HTTPRoute (see ADR-0004).
+            - name: a2a-mtls
+              containerPort: 8443
+              protocol: TCP
+            {{- end }}
           livenessProbe:
             httpGet:
               path: /health/live
@@ -97,9 +104,22 @@ spec:
             - name: data
               mountPath: {{ .Values.persistence.mountPath }}
             {{- end }}
+            {{- if .Values.agentweave.enabled }}
+            # SPIFFE Workload API socket, provided by the spiffe-csi-driver. The
+            # agent fetches its X.509 SVID here to identify on the workload plane.
+            - name: spiffe-workload-api
+              mountPath: {{ .Values.agentweave.socketMountPath }}
+              readOnly: true
+            {{- end }}
           env:
             - name: FORGE_CONFIG_PATH
               value: /app/config/forge.yaml
+            {{- if .Values.agentweave.enabled }}
+            - name: SPIFFE_ENDPOINT_SOCKET
+              value: unix://{{ .Values.agentweave.socketMountPath }}/spire-agent.sock
+            - name: OPA_ENDPOINT
+              value: {{ .Values.agentweave.opaEndpoint | quote }}
+            {{- end }}
             {{- if .Values.caBundle.enabled }}
             # Trust the hvslocal private CA so the OIDC clients can verify Dex's
             # cert (Dex is served under the hvslocal CA, not a public one).
@@ -130,6 +150,12 @@ spec:
         - name: data
           persistentVolumeClaim:
             claimName: {{ include "forge.fullname" . }}-data
+        {{- end }}
+        {{- if .Values.agentweave.enabled }}
+        - name: spiffe-workload-api
+          csi:
+            driver: csi.spiffe.io
+            readOnly: true
         {{- end }}
       {{- with .Values.agent.nodeSelector }}
       nodeSelector:

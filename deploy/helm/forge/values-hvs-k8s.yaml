@@ -179,8 +179,16 @@ forgeConfig:
           emails: ["aj_geddes@yahoo.com"]
 
     # Deprecated, inert. Kept explicitly false so nothing silently re-enables them.
+    # Workload plane (AI-to-AI: SPIFFE mTLS identity + OPA authz). Tells the app
+    # to build the WorkloadPlane and start the :8443 mTLS listener. COUPLED with
+    # the top-level `agentweave.enabled` deploy flag (which mounts the CSI SVID
+    # socket + opens the :8443 Service) — flip BOTH to true to enable. The Dex
+    # human plane is unaffected either way; a SPIRE/OPA outage degrades only
+    # agent-to-agent traffic and never gates human readiness (ADR-0004).
     agentweave:
       enabled: false
+      trust_domain: hvslocal
+      opa_endpoint: http://opa.opa.svc.cluster.local:8181
     api_keys:
       enabled: false
 
@@ -211,3 +219,10 @@ persistence:
   storageClass: longhorn
   size: 1Gi
   mountPath: /app/data
+
+# Workload plane. SPIRE + OPA are deployed (deploy/cluster/); ship enabled=false
+# first, verify the pod pulls an SVID over the CSI socket, then flip to true.
+agentweave:
+  enabled: false
+  socketMountPath: /spiffe-workload-api
+  opaEndpoint: http://opa.opa.svc.cluster.local:8181

@@ -1,0 +1,25 @@
+{{- if .Values.agentweave.enabled }}
+# East-west ClusterIP for the :8443 mTLS workload (A2A) listener.
+#
+# DELIBERATELY NOT attached to any HTTPRoute / the shared Gateway: that Gateway
+# terminates TLS, which would strip the client SVID cert before it reaches the
+# pod and break mTLS peer verification (ADR-0004 §3, §9). Peers address the pod
+# on this Service directly, presenting their own SVID.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "forge.fullname" . }}-a2a-mtls
+  labels:
+    {{- include "forge.labels" . | nindent 4 }}
+    app.kubernetes.io/component: a2a-mtls
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "forge.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: agent
+  ports:
+    - name: a2a-mtls
+      port: 8443
+      targetPort: a2a-mtls
+      protocol: TCP
+{{- end }}
