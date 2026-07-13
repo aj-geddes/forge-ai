@@ -14,8 +14,8 @@
 //      permission-denied state instead.
 
 const API_BASE = "";
-const CSRF_COOKIE_NAME = "forge_csrf";
-const CSRF_HEADER_NAME = "X-CSRF-Token";
+export const CSRF_COOKIE_NAME = "forge_csrf";
+export const CSRF_HEADER_NAME = "X-CSRF-Token";
 const SAFE_METHODS = new Set(["GET", "HEAD"]);
 
 export class ApiError extends Error {
@@ -28,7 +28,7 @@ export class ApiError extends Error {
   }
 }
 
-function readCookie(name: string): string | null {
+export function readCookie(name: string): string | null {
   if (typeof document === "undefined") return null;
   const prefix = `${name}=`;
   const match = document.cookie

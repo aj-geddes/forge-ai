@@ -39,6 +39,20 @@ class ConversationRequest(BaseModel):
     agent: str | None = None
 
 
+class ToolCallInfo(BaseModel):
+    """A single tool invocation, exposed to API/UI callers.
+
+    Mirrors ``forge_agent.agent.core.ToolCallRecord`` (name/arguments/result)
+    -- docs/user/features/chat.md's "Tool call details" are shown inline with
+    each assistant response so callers can see which tools were used, with
+    what arguments, and what they returned.
+    """
+
+    name: str
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    result: Any = None
+
+
 class ConversationResponse(BaseModel):
     """Response from conversational interaction."""
 
@@ -46,6 +60,7 @@ class ConversationResponse(BaseModel):
     session_id: str
     tools_used: list[str] = Field(default_factory=list)
     model: str | None = None
+    tool_calls: list[ToolCallInfo] = Field(default_factory=list)
 
 
 class ErrorResponse(BaseModel):

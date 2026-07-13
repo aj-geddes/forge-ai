@@ -22,16 +22,11 @@ import { Separator } from "@/components/ui/separator";
 import { cn } from "@/lib/utils";
 import { useChatStore } from "@/stores/chatStore";
 import type { Message } from "@/stores/chatStore";
-import { api } from "@/api/client";
+import { streamChatCompletion } from "@/api/chat";
+import type { ToolCallRecord } from "@/api/chat";
 import { useSessions, useDeleteSession } from "@/api/hooks";
 
-interface ChatCompletionResponse {
-  message: string;
-  session_id: string;
-  tools_used?: string[];
-}
-
-function ToolCallDetails({ tools }: { tools: string[] }) {
+function ToolCallDetails({ toolCalls }: { toolCalls: ToolCallRecord[] }) {
   const [expanded, setExpanded] = useState(false);
 
   return (
@@ -42,7 +37,10 @@ function ToolCallDetails({ tools }: { tools: string[] }) {
         className="flex w-full items-center gap-2 px-3 py-2 text-xs font-medium text-muted-foreground hover:text-foreground"
       >
         <Wrench className="h-3 w-3" />
-        <span>{tools.length} tool{tools.length !== 1 ? "s" : ""} used</span>
+        <span>
+          {toolCalls.length} tool{toolCalls.length !== 1 ? "s" : ""} used
+          {toolCalls.length > 0 && `: ${toolCalls.map((t) => t.name).join(", ")}`}
+        </span>
         <ChevronDown
           className={cn(
             "ml-auto h-3 w-3 transition-transform duration-200",
@@ -51,14 +49,26 @@ function ToolCallDetails({ tools }: { tools: string[] }) {
         />
       </button>
       {expanded && (
-        <div className="border-t px-3 py-2">
-          <div className="flex flex-wrap gap-1.5">
-            {tools.map((tool) => (
-              <Badge key={tool} variant="secondary" className="text-xs">
-                {tool}
+        <div className="space-y-2 border-t px-3 py-2">
+          {toolCalls.map((call, index) => (
+            <div key={`${call.name}-${index}`} className="space-y-1 rounded-md bg-background p-2">
+              <Badge variant="secondary" className="text-xs">
+                {call.name}
               </Badge>
-            ))}
-          </div>
+              <div>
+                <p className="text-[11px] font-medium text-muted-foreground">Arguments</p>
+                <pre className="overflow-x-auto rounded bg-muted px-2 py-1 text-[11px]">
+                  {JSON.stringify(call.arguments, null, 2)}
+                </pre>
+              </div>
+              <div>
+                <p className="text-[11px] font-medium text-muted-foreground">Result</p>
+                <pre className="overflow-x-auto rounded bg-muted px-2 py-1 text-[11px]">
+                  {JSON.stringify(call.result, null, 2)}
+                </pre>
+              </div>
+            </div>
+          ))}
         </div>
       )}
     </div>
@@ -110,8 +120,8 @@ function MessageBubble({ message }: { message: Message }) {
         >
           <p className="whitespace-pre-wrap">{message.content}</p>
         </div>
-        {message.toolsUsed && message.toolsUsed.length > 0 && (
-          <ToolCallDetails tools={message.toolsUsed} />
+        {message.toolCalls && message.toolCalls.length > 0 && (
+          <ToolCallDetails toolCalls={message.toolCalls} />
         )}
         <p className="px-1 text-xs text-muted-foreground">
           {new Date(message.timestamp).toLocaleTimeString()}
@@ -205,8 +215,15 @@ function SessionSidebar() {
 }
 
 function ChatArea() {
-  const { sessions, activeSessionId, isLoading, addMessage, setLoading } =
-    useChatStore();
+  const {
+    sessions,
+    activeSessionId,
+    isLoading,
+    addMessage,
+    appendMessageContent,
+    addToolCallToMessage,
+    setLoading,
+  } = useChatStore();
   const [input, setInput] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -223,6 +240,7 @@ function ChatArea() {
   const handleSend = useCallback(async () => {
     if (!input.trim() || !activeSessionId || isLoading) return;
 
+    const sessionId = activeSessionId;
     const userMessage: Message = {
       id: `msg-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
       role: "user",
@@ -230,45 +248,43 @@ function ChatArea() {
       timestamp: Date.now(),
     };
 
-    addMessage(activeSessionId, userMessage);
+    addMessage(sessionId, userMessage);
     setInput("");
     setLoading(true);
 
+    const assistantMessageId = `msg-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    addMessage(sessionId, {
+      id: assistantMessageId,
+      role: "assistant",
+      content: "",
+      timestamp: Date.now(),
+    });
+
     try {
-      const response = await api.post<ChatCompletionResponse>(
-        "/v1/chat/completions",
+      await streamChatCompletion(
+        { message: userMessage.content, sessionId },
         {
-          message: userMessage.content,
-          session_id: activeSessionId,
-          stream: false,
+          onChunk: (delta) => appendMessageContent(sessionId, assistantMessageId, delta),
+          onToolCall: (toolCall) =>
+            addToolCallToMessage(sessionId, assistantMessageId, toolCall),
         },
       );
-
-      const assistantMessage: Message = {
-        id: `msg-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-        role: "assistant",
-        content: response.message,
-        toolsUsed: response.tools_used,
-        timestamp: Date.now(),
-      };
-
-      addMessage(activeSessionId, assistantMessage);
     } catch (err) {
       const errorContent =
         err instanceof Error ? err.message : "An error occurred";
-
-      const errorMessage: Message = {
-        id: `msg-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-        role: "assistant",
-        content: `Error: ${errorContent}`,
-        timestamp: Date.now(),
-      };
-
-      addMessage(activeSessionId, errorMessage);
+      appendMessageContent(sessionId, assistantMessageId, `Error: ${errorContent}`);
     } finally {
       setLoading(false);
     }
-  }, [input, activeSessionId, isLoading, addMessage, setLoading]);
+  }, [
+    input,
+    activeSessionId,
+    isLoading,
+    addMessage,
+    appendMessageContent,
+    addToolCallToMessage,
+    setLoading,
+  ]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {

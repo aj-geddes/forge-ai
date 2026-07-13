@@ -10,10 +10,16 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
+from forge_agent.agent.core import ToolCallRecord
 from forge_config.schema import AgentDef, ForgeConfig
 
 from forge_gateway import security
-from forge_gateway.models import ConversationRequest, ConversationResponse, ErrorResponse
+from forge_gateway.models import (
+    ConversationRequest,
+    ConversationResponse,
+    ErrorResponse,
+    ToolCallInfo,
+)
 from forge_gateway.routes.persona import resolve_persona
 
 logger = logging.getLogger(__name__)
@@ -47,20 +53,39 @@ def _resolve_persona(agent_name: str | None) -> AgentDef | None:
     return resolve_persona(agent_name, _config)
 
 
+def _tool_call_payload(record: ToolCallRecord, session_id: str) -> str:
+    """Build the JSON payload for a ``tool_call`` SSE frame."""
+    return json.dumps(
+        {
+            "tool_call": {
+                "name": record.name,
+                "arguments": record.arguments,
+                "result": record.result,
+            },
+            "session_id": session_id,
+        },
+        default=str,
+    )
+
+
 async def _sse_generator(
-    chunks: AsyncIterator[str],
+    chunks: AsyncIterator[str | ToolCallRecord],
     session_id: str,
 ) -> AsyncIterator[str]:
-    """Wrap agent text chunks as SSE events.
+    """Wrap agent stream items as SSE events.
 
-    Yields Server-Sent Events in OpenAI-compatible format:
-    ``data: {"chunk": "...", "session_id": "..."}\n\n``
+    Text chunks are sent as ``data: {"chunk": "...", "session_id": "..."}\n\n``.
+    ``ToolCallRecord`` items are sent as a distinct frame type:
+    ``data: {"tool_call": {"name", "arguments", "result"}, "session_id": "..."}\n\n``.
 
     Sends ``data: [DONE]\n\n`` as the final sentinel.
     """
     try:
-        async for text in chunks:
-            payload = json.dumps({"chunk": text, "session_id": session_id})
+        async for item in chunks:
+            if isinstance(item, ToolCallRecord):
+                payload = _tool_call_payload(item, session_id)
+            else:
+                payload = json.dumps({"chunk": item, "session_id": session_id})
             yield f"data: {payload}\n\n"
     except Exception:
         logger.exception("Error during streaming response")
@@ -110,6 +135,10 @@ async def _handle_non_streaming(
             session_id=session_id,
             tools_used=run_result.tools_used,
             model=run_result.model_name,
+            tool_calls=[
+                ToolCallInfo(name=tc.name, arguments=tc.arguments, result=tc.result)
+                for tc in run_result.tool_calls
+            ],
         )
     except HTTPException:
         raise
@@ -126,7 +155,7 @@ async def _handle_streaming(
     """Handle a streaming chat request, returning SSE."""
     try:
         persona_tools = (persona.tools or None) if persona else None
-        chunks: AsyncIterator[str] = await _forge_agent.run_conversational(
+        chunks: AsyncIterator[str | ToolCallRecord] = await _forge_agent.run_conversational(
             message=request.message,
             session_id=session_id,
             stream=True,

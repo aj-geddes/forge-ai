@@ -34,6 +34,9 @@ export default [
         AbortController: "readonly",
         RequestInit: "readonly",
         Response: "readonly",
+        TextEncoder: "readonly",
+        TextDecoder: "readonly",
+        ReadableStream: "readonly",
         // DOM types
         React: "readonly",
         Window: "readonly",

@@ -16,7 +16,13 @@ from forge_config.secret_resolver import CompositeSecretResolver, SecretResolver
 from forge_security.secrets import K8sSecretResolver
 from pydantic import BaseModel
 from pydantic_ai import Agent as PydanticAIAgent
-from pydantic_ai.messages import ModelMessage, ModelResponse, ToolCallPart
+from pydantic_ai.messages import (
+    ModelMessage,
+    ModelRequest,
+    ModelResponse,
+    ToolCallPart,
+    ToolReturnPart,
+)
 from pydantic_ai.models import Model
 from pydantic_ai.settings import ModelSettings
 from pydantic_ai.usage import UsageLimits
@@ -27,6 +33,23 @@ from forge_agent.builder.registry import ToolSurfaceRegistry
 
 
 @dataclass
+class ToolCallRecord:
+    """A single tool invocation captured from a PydanticAI run.
+
+    Attributes:
+        name: The tool's name.
+        arguments: The arguments the model passed to the tool call.
+        result: The value the tool returned, or None if no matching
+            ``ToolReturnPart`` was found in the message history (should not
+            happen for a completed run, but guards against partial history).
+    """
+
+    name: str
+    arguments: dict[str, Any]
+    result: Any = None
+
+
+@dataclass
 class ForgeRunResult:
     """Wraps agent output with metadata about the run.
 
@@ -34,11 +57,14 @@ class ForgeRunResult:
         output: The agent's output (string for conversational, dict/BaseModel for structured).
         tools_used: List of tool names invoked during the run.
         model_name: The LLM model identifier used for the run.
+        tool_calls: Structured per-call records (name/arguments/result) for
+            every tool invoked during the run, in call order.
     """
 
     output: Any
     tools_used: list[str] = field(default_factory=list)
     model_name: str | None = None
+    tool_calls: list[ToolCallRecord] = field(default_factory=list)
 
 
 def _extract_tools_used(messages: list[ModelMessage]) -> list[str]:
@@ -52,6 +78,44 @@ def _extract_tools_used(messages: list[ModelMessage]) -> list[str]:
                     seen.add(part.tool_name)
                     tools.append(part.tool_name)
     return tools
+
+
+def _extract_tool_call_records(messages: list[ModelMessage]) -> list[ToolCallRecord]:
+    """Extract structured tool-call records (name/arguments/result).
+
+    Pairs each ``ToolCallPart`` (in a ``ModelResponse``) with its matching
+    ``ToolReturnPart`` (in a subsequent ``ModelRequest``) via ``tool_call_id``,
+    preserving the order tools were invoked in.
+
+    Args:
+        messages: The full PydanticAI message history for a run.
+
+    Returns:
+        A list of ToolCallRecord, one per tool call, in call order.
+    """
+    results_by_call_id: dict[str, Any] = {}
+    for msg in messages:
+        if isinstance(msg, ModelRequest):
+            for request_part in msg.parts:
+                if isinstance(request_part, ToolReturnPart):
+                    results_by_call_id[request_part.tool_call_id] = request_part.content
+
+    records: list[ToolCallRecord] = []
+    for msg in messages:
+        if isinstance(msg, ModelResponse):
+            for response_part in msg.parts:
+                if isinstance(response_part, ToolCallPart):
+                    arguments = (
+                        response_part.args_as_dict() if response_part.args is not None else {}
+                    )
+                    records.append(
+                        ToolCallRecord(
+                            name=response_part.tool_name,
+                            arguments=arguments,
+                            result=results_by_call_id.get(response_part.tool_call_id),
+                        )
+                    )
+    return records
 
 
 def _extract_model_name(messages: list[ModelMessage]) -> str | None:
@@ -276,13 +340,14 @@ class ForgeAgent:
         model_name_override: str | None = None,
         max_turns_override: int | None = None,
         tool_names_filter: list[str] | None = None,
-    ) -> ForgeRunResult | AsyncIterator[str]:
+    ) -> ForgeRunResult | AsyncIterator[str | ToolCallRecord]:
         """Run a conversational interaction with the agent.
 
         Args:
             message: The user message.
             session_id: Optional session ID for context continuity.
-            stream: If True, return an async iterator of text chunks.
+            stream: If True, return an async iterator of ToolCallRecord items
+                followed by text delta chunks (see ``_make_stream``).
             system_prompt_override: If set, replaces the default system prompt.
             model_name_override: If set, replaces the default model name.
             max_turns_override: If set, limits the number of LLM request
@@ -346,6 +411,7 @@ class ForgeAgent:
             output=result.output,
             tools_used=_extract_tools_used(all_msgs),
             model_name=_extract_model_name(all_msgs),
+            tool_calls=_extract_tool_call_records(all_msgs),
         )
 
     def _make_stream(
@@ -356,8 +422,17 @@ class ForgeAgent:
         *,
         agent_override: PydanticAIAgent[None] | None = None,
         usage_limits: UsageLimits | None = None,
-    ) -> AsyncIterator[str]:
+    ) -> AsyncIterator[str | ToolCallRecord]:
         """Create an async iterator that streams the agent response.
+
+        Yields ``ToolCallRecord`` items for any tools invoked during the run
+        (tool calls resolve before the final text turn streams, so these are
+        always yielded before the text deltas that follow them), then
+        incremental text DELTAS -- the new suffix since the last yielded
+        snapshot -- rather than PydanticAI's cumulative ``stream_output``
+        snapshots. Concatenating every ``str`` item yielded reconstructs the
+        final message exactly once, matching the SSE frame contract in
+        docs/developer/api-reference.md.
 
         Args:
             message: The user message.
@@ -367,7 +442,8 @@ class ForgeAgent:
             usage_limits: Optional limits on model request count.
 
         Returns:
-            Async iterator yielding text chunks.
+            Async iterator yielding ToolCallRecord items followed by text
+            delta strings.
         """
         agent = agent_override or self._agent
         context = self._context
@@ -380,10 +456,20 @@ class ForgeAgent:
         if usage_limits is not None:
             stream_kwargs["usage_limits"] = usage_limits
 
-        async def _generate() -> AsyncIterator[str]:
+        async def _generate() -> AsyncIterator[str | ToolCallRecord]:
             async with agent.run_stream(message, **stream_kwargs) as stream:
-                async for text in stream.stream_output(debounce_by=None):
-                    yield text
+                for record in _extract_tool_call_records(list(stream.all_messages())):
+                    yield record
+
+                last_text = ""
+                async for snapshot in stream.stream_output(debounce_by=None):
+                    if snapshot.startswith(last_text):
+                        delta = snapshot[len(last_text) :]
+                    else:
+                        delta = snapshot
+                    if delta:
+                        yield delta
+                    last_text = snapshot
 
                 if session_id:
                     all_msgs = stream.all_messages()
@@ -498,4 +584,5 @@ class ForgeAgent:
             output=output,
             tools_used=_extract_tools_used(all_msgs),
             model_name=_extract_model_name(all_msgs),
+            tool_calls=_extract_tool_call_records(all_msgs),
         )

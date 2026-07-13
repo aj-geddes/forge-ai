@@ -5,7 +5,7 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from forge_agent.agent.core import ForgeAgent, ForgeRunResult
+from forge_agent.agent.core import ForgeAgent, ForgeRunResult, ToolCallRecord
 from forge_config.exceptions import SecretResolutionError
 from forge_config.schema import (
     AgentDef,
@@ -442,6 +442,115 @@ class TestForgeAgentStructured:
 
         await agent.run_structured("Do something")
         assert agent._agent is not None
+
+
+class TestForgeAgentToolCallRecords:
+    """Tests that ForgeRunResult exposes structured per-tool-call records
+    (name/arguments/result), not just the flat ``tools_used`` name list --
+    this is what the gateway/UI need to render tool call details (WS-9).
+    """
+
+    @pytest.mark.anyio
+    async def test_run_conversational_returns_tool_call_records(self) -> None:
+        """A run that invokes a tool exposes name/arguments/result on tool_calls."""
+        config = _make_config()
+        agent = ForgeAgent(config, model_override=TestModel())
+        await agent.initialize()
+        assert agent._agent is not None
+
+        @agent._agent.tool_plain
+        def get_weather(city: str) -> str:
+            return f"sunny in {city}"
+
+        result = await agent.run_conversational("What's the weather in SF?")
+
+        assert len(result.tool_calls) == 1
+        call = result.tool_calls[0]
+        assert isinstance(call, ToolCallRecord)
+        assert call.name == "get_weather"
+        assert call.arguments == {"city": "a"}
+        assert call.result == "sunny in a"
+
+    @pytest.mark.anyio
+    async def test_run_conversational_no_tools_called_yields_empty_tool_calls(self) -> None:
+        """When no tool is invoked, tool_calls is an empty list."""
+        config = _make_config()
+        agent = ForgeAgent(config, model_override=TestModel())
+
+        result = await agent.run_conversational("Hello!")
+
+        assert result.tool_calls == []
+
+    @pytest.mark.anyio
+    async def test_run_structured_returns_tool_call_records(self) -> None:
+        """run_structured also exposes tool_calls on its ForgeRunResult."""
+        config = _make_config()
+        agent = ForgeAgent(config, model_override=TestModel())
+        await agent.initialize()
+        assert agent._agent is not None
+
+        @agent._agent.tool_plain
+        def get_weather(city: str) -> str:
+            return f"sunny in {city}"
+
+        result = await agent.run_structured("What's the weather?")
+
+        assert len(result.tool_calls) == 1
+        assert result.tool_calls[0].name == "get_weather"
+        assert result.tool_calls[0].result == "sunny in a"
+
+
+class TestForgeAgentStreamingDeltas:
+    """Tests that stream=True yields incremental text DELTAS, not the
+    cumulative snapshots PydanticAI's ``stream_output`` produces -- joining
+    all yielded chunks must equal the final message exactly once, with no
+    duplication (docs/developer/api-reference.md's SSE frame example reads
+    as deltas, e.g. "The current " -> "weather in SF ").
+    """
+
+    @pytest.mark.anyio
+    async def test_stream_chunks_concatenate_to_final_message_without_duplication(
+        self,
+    ) -> None:
+        config = _make_config()
+        agent = ForgeAgent(config, model_override=TestModel())
+        await agent.initialize()
+
+        non_stream_result = await agent.run_conversational("Hello!")
+        expected_text = non_stream_result.output
+        assert isinstance(expected_text, str)
+        assert len(expected_text) > 0
+
+        stream = await agent.run_conversational("Hello!", stream=True)
+        text_chunks = [item async for item in stream if isinstance(item, str)]
+
+        assert len(text_chunks) > 1  # TestModel streams in multiple increments
+        assert "".join(text_chunks) == expected_text
+
+    @pytest.mark.anyio
+    async def test_stream_includes_tool_call_record_before_text_deltas(self) -> None:
+        """Tool calls resolve before the final text streams; the stream
+        surfaces them as ToolCallRecord items distinct from text chunks."""
+        config = _make_config()
+        agent = ForgeAgent(config, model_override=TestModel())
+        await agent.initialize()
+        assert agent._agent is not None
+
+        @agent._agent.tool_plain
+        def get_weather(city: str) -> str:
+            return f"sunny in {city}"
+
+        stream = await agent.run_conversational("weather?", stream=True)
+        items = [item async for item in stream]
+
+        tool_records = [i for i in items if isinstance(i, ToolCallRecord)]
+        text_chunks = [i for i in items if isinstance(i, str)]
+
+        assert len(tool_records) == 1
+        assert tool_records[0].name == "get_weather"
+        assert tool_records[0].arguments == {"city": "a"}
+        assert tool_records[0].result == "sunny in a"
+        assert "".join(text_chunks) == '{"get_weather":"sunny in a"}'
 
 
 class TestForgeAgentPersonaRouting:

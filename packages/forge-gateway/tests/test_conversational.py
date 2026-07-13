@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import FastAPI
-from forge_agent.agent.core import ForgeRunResult
+from forge_agent.agent.core import ForgeRunResult, ToolCallRecord
 from forge_config.schema import AgentDef, AgentsConfig, ForgeConfig, LLMConfig
 from forge_gateway.routes import conversational
 from httpx import ASGITransport, AsyncClient
@@ -31,6 +31,15 @@ async def _async_iter_error(*items: str, error: Exception | None = None) -> Asyn
         yield item
     if error is not None:
         raise error
+
+
+async def _async_iter_mixed(
+    *items: str | ToolCallRecord,
+) -> AsyncIterator[str | ToolCallRecord]:
+    """Create an async iterator mixing text chunks and ToolCallRecord items,
+    as the real ``_make_stream`` yields (tool calls first, then text deltas)."""
+    for item in items:
+        yield item
 
 
 # ---------------------------------------------------------------------------
@@ -926,3 +935,98 @@ class TestErrorDetailRedaction:
         assert "secret" not in error_event["error"]
 
         assert events[2] == "data: [DONE]"
+
+
+# ---------------------------------------------------------------------------
+# 12. Structured tool_calls (name/arguments/result) -- non-streaming and SSE
+# ---------------------------------------------------------------------------
+
+
+class TestConversationalToolCallRecords:
+    """ConversationResponse and the SSE stream both expose structured
+    per-tool-call records (name/arguments/result), not just tool names."""
+
+    def test_non_streaming_response_includes_tool_calls(
+        self, client: TestClient, mock_agent: AsyncMock
+    ) -> None:
+        """The non-streaming response includes a tool_calls list with
+        name/arguments/result for each tool invoked."""
+        mock_agent.run_conversational.return_value = ForgeRunResult(
+            output="It's sunny in SF.",
+            tools_used=["get_weather"],
+            tool_calls=[
+                ToolCallRecord(
+                    name="get_weather",
+                    arguments={"city": "SF"},
+                    result="sunny in SF",
+                )
+            ],
+        )
+        response = client.post(
+            "/v1/chat/completions",
+            json={"message": "What's the weather in SF?"},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["tool_calls"] == [
+            {"name": "get_weather", "arguments": {"city": "SF"}, "result": "sunny in SF"}
+        ]
+
+    def test_non_streaming_response_empty_tool_calls_when_no_tools(
+        self, client: TestClient, mock_agent: AsyncMock
+    ) -> None:
+        """When no tool is invoked, tool_calls is an empty list."""
+        mock_agent.run_conversational.return_value = ForgeRunResult(
+            output="Just chatting.",
+            tool_calls=[],
+        )
+        response = client.post(
+            "/v1/chat/completions",
+            json={"message": "Hi"},
+        )
+        assert response.status_code == 200
+        assert response.json()["tool_calls"] == []
+
+    async def test_sse_stream_includes_tool_call_frame(
+        self, async_client: AsyncClient, mock_agent: AsyncMock
+    ) -> None:
+        """A ToolCallRecord item yielded by the agent surfaces as a distinct
+        ``tool_call`` SSE frame, separate from ``chunk`` frames."""
+        mock_agent.run_conversational.return_value = _async_iter_mixed(
+            ToolCallRecord(name="get_weather", arguments={"city": "SF"}, result="sunny"),
+            "It's ",
+            "sunny in SF.",
+        )
+        response = await async_client.post(
+            "/v1/chat/completions",
+            json={"message": "weather?", "stream": True},
+        )
+
+        events = _parse_sse_events(response.text)
+        tool_call_frame = _parse_sse_payload(events[0])
+        assert tool_call_frame["tool_call"] == {
+            "name": "get_weather",
+            "arguments": {"city": "SF"},
+            "result": "sunny",
+        }
+
+        chunk_frames = [_parse_sse_payload(ev) for ev in events[1:-1]]
+        assert [f["chunk"] for f in chunk_frames] == ["It's ", "sunny in SF."]
+        assert events[-1] == "data: [DONE]"
+
+    async def test_sse_tool_call_frame_carries_session_id(
+        self, async_client: AsyncClient, mock_agent: AsyncMock
+    ) -> None:
+        """The tool_call SSE frame carries the same session_id as chunk frames."""
+        mock_agent.run_conversational.return_value = _async_iter_mixed(
+            ToolCallRecord(name="get_weather", arguments={"city": "SF"}, result="sunny"),
+            "done",
+        )
+        response = await async_client.post(
+            "/v1/chat/completions",
+            json={"message": "weather?", "stream": True, "session_id": "tc-sess"},
+        )
+
+        events = _parse_sse_events(response.text)
+        tool_call_frame = _parse_sse_payload(events[0])
+        assert tool_call_frame["session_id"] == "tc-sess"
