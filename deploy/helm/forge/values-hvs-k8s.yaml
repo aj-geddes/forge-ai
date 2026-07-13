@@ -10,7 +10,7 @@ image:
   repository: harbor.hvslocal/dev-aj-geddes/forge-ai
   # Immutable tag pinned to the commit the image was built from. Update this
   # (and re-push a new image) on every deploy -- never track :latest.
-  tag: "fce08bf"
+  tag: "a88f82a"
   pullPolicy: IfNotPresent
 
 agent:
@@ -35,6 +35,9 @@ httpRoute:
     - name: shared-gateway
       namespace: gateway
       sectionName: https
+  # Don't serve /metrics over the public hostname; Prometheus scrapes the pod IP
+  # directly, so this doesn't affect monitoring. See templates/httproute.yaml.
+  blockPublicMetrics: true
 
 # Pulls LLM provider API keys from OpenBao (kv/users/aj-geddes/app/forge-ai)
 # via the "openbao" SecretStore already provisioned in dev-aj-geddes, into a
@@ -59,6 +62,12 @@ externalSecret:
       remoteRef:
         key: users/aj-geddes/app/forge-ai
         property: anthropic_api_key
+    # Encrypts the BFF session cookie. Rotating this invalidates all sessions,
+    # which is the intended blast radius.
+    - secretKey: FORGE_SESSION_KEY
+      remoteRef:
+        key: users/aj-geddes/app/forge-ai
+        property: session_encryption_key
 
 # Minimal, sensible forge.yaml. No secret values are embedded -- LLM API keys
 # are ${ENV_VAR} references resolved at process startup from the env vars
@@ -103,15 +112,62 @@ forgeConfig:
       timeout: 60.0
       max_retries: 3
   security:
+    # Authentication is ENFORCED. Per ADR-0001 this is also the schema default,
+    # so removing this block does not silently disable auth.
+    auth:
+      mode: enforce
+
+    # Dex OIDC. forge-ai is registered as a PUBLIC client (deploy/dex/oauth2client.yaml):
+    # the gateway runs the authorization-code flow server-side with PKCE and keeps
+    # tokens out of the browser behind an httpOnly session cookie (BFF), so there is
+    # no client_secret anywhere.
+    oidc:
+      enabled: true
+      issuer: "https://dex.hvslocal/dex"
+      client_id: "forge-ai"
+      jwks_uri: "https://dex.hvslocal/dex/keys"
+      redirect_uri: "https://forgeai.hvslocal/auth/callback"
+      scopes: ["openid", "email", "profile", "groups"]
+      allowed_algorithms: ["RS256"]
+      session:
+        encryption_key:
+          source: env
+          name: FORGE_SESSION_KEY
+        secure: true
+        same_site: lax
+
+    # Machine clients cannot do interactive OIDC. Only the SHA-256 digest lives
+    # here — a digest is not a secret, so adding a machine principal stays a
+    # reviewable diff. The raw break-glass token is in OpenBao
+    # (kv/users/aj-geddes/app/forge-ai, key `breakglass_token`) and exists so that
+    # a broken Dex or a bad role binding cannot lock us out of our own admin API.
+    service_tokens:
+      enabled: true
+      tokens:
+        - id: breakglass
+          description: "Emergency admin access, OIDC-independent. Rotate after use."
+          secret_sha256: "3bb9578430956ca1030a081b547467b526a679053cc12054ff886171609d804a"
+          roles: ["admin"]
+
+    # Deny by default: no matching binding => 403. Bootstrapped by EMAIL because
+    # the exact GitHub `groups` claim format is not yet known (ADR D-4); confirm
+    # it against GET /v1/auth/me after first login, then add a group binding.
+    authorization:
+      default_role: null
+      metrics_public: true
+      bindings:
+        - role: admin
+          emails: ["ageddes75@gmail.com"]
+
+    # Deprecated, inert. Kept explicitly false so nothing silently re-enables them.
     agentweave:
-      # No SPIRE/OPA infrastructure is wired up for this deployment yet, so
-      # AgentWeave identity/authz is explicitly disabled rather than left to
-      # fail at runtime. forge_gateway falls back to unauthenticated
-      # "development mode" when this is false (see app.py::_init_security_gate).
       enabled: false
     api_keys:
       enabled: false
+
     rate_limit_rpm: 60
+    # Never "*": the wildcard plus credentialed CORS is a total compromise once a
+    # session cookie exists. The config schema now rejects that combination.
     allowed_origins:
       - "https://forgeai.hvslocal"
   agents:
@@ -121,3 +177,11 @@ forgeConfig:
         description: "General-purpose assistant"
         system_prompt: "You are a helpful assistant."
         max_turns: 10
+
+# Mount the namespace hvslocal-ca-bundle ConfigMap so the OIDC clients trust
+# Dex (dex.hvslocal is served under the hvslocal Root CA, not a public CA).
+caBundle:
+  enabled: true
+  configMapName: hvslocal-ca-bundle
+  key: ca.crt
+  mountPath: /etc/forge/ca

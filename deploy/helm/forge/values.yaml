@@ -58,6 +58,7 @@ service:
 # This platform has no Ingress controller; routing is via Gateway API only.
 # parentRefs must point at the shared cluster Gateway.
 httpRoute:
+  blockPublicMetrics: false  # base default; hvs-k8s overrides to true
   enabled: false
   hostnames: []
   parentRefs:
@@ -95,3 +96,10 @@ forgeConfig: {}
 secrets: {}
 #  OPENAI_API_KEY: ""
 #  ANTHROPIC_API_KEY: ""
+
+# hvslocal private CA trust for the OIDC clients (off by default).
+caBundle:
+  enabled: false
+  configMapName: hvslocal-ca-bundle
+  key: ca.crt
+  mountPath: /etc/forge/ca

@@ -71,9 +71,20 @@ spec:
             - name: config
               mountPath: /app/config
               readOnly: true
+            {{- if .Values.caBundle.enabled }}
+            - name: ca-bundle
+              mountPath: {{ .Values.caBundle.mountPath }}
+              readOnly: true
+            {{- end }}
           env:
             - name: FORGE_CONFIG_PATH
               value: /app/config/forge.yaml
+            {{- if .Values.caBundle.enabled }}
+            # Trust the hvslocal private CA so the OIDC clients can verify Dex's
+            # cert (Dex is served under the hvslocal CA, not a public one).
+            - name: FORGE_OIDC_CA_BUNDLE
+              value: {{ .Values.caBundle.mountPath }}/{{ .Values.caBundle.key }}
+            {{- end }}
             {{- with .Values.agent.env }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -89,6 +100,11 @@ spec:
         - name: config
           configMap:
             name: {{ include "forge.fullname" . }}-config
+        {{- if .Values.caBundle.enabled }}
+        - name: ca-bundle
+          configMap:
+            name: {{ .Values.caBundle.configMapName }}
+        {{- end }}
       {{- with .Values.agent.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

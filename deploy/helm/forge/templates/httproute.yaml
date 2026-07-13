@@ -17,6 +17,27 @@ spec:
     - {{ . | quote }}
     {{- end }}
   rules:
+    {{- if .Values.httpRoute.blockPublicMetrics }}
+    # Keep /metrics off the public hostname. Prometheus is unaffected: it scrapes
+    # the pod IP directly (prometheus.io/scrape annotation), which never traverses
+    # this HTTPRoute, so the app can keep serving /metrics unauthenticated on the
+    # pod IP while a request to https://<host>/metrics is bounced. A more-specific
+    # PathPrefix always wins over the catch-all below, regardless of rule order.
+    # Cilium/Envoy Gateway has no core direct-response filter, so we redirect
+    # rather than 404 — the effect (telemetry not served over the public host) is
+    # the same.
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /metrics
+      filters:
+        - type: RequestRedirect
+          requestRedirect:
+            path:
+              type: ReplaceFullPath
+              replaceFullPath: /
+            statusCode: 302
+    {{- end }}
     - backendRefs:
         - name: {{ include "forge.fullname" . }}
           port: {{ .Values.service.port }}
