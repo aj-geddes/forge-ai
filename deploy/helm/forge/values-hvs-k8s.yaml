@@ -10,7 +10,7 @@ image:
   repository: harbor.hvslocal/dev-aj-geddes/forge-ai
   # Immutable tag pinned to the commit the image was built from. Update this
   # (and re-push a new image) on every deploy -- never track :latest.
-  tag: "a88f82a"
+  tag: "fc7ab4d"
   pullPolicy: IfNotPresent
 
 agent:
@@ -148,6 +148,14 @@ forgeConfig:
           description: "Emergency admin access, OIDC-independent. Rotate after use."
           secret_sha256: "3bb9578430956ca1030a081b547467b526a679053cc12054ff886171609d804a"
           roles: ["admin"]
+      # User-issued API keys (ADR-0002): a logged-in user mints their own key,
+      # scoped to a subset of their own roles. Only sha256 digests are stored, on
+      # the Longhorn PVC mounted at /app/data (persistence.enabled above).
+      user_tokens:
+        enabled: true
+        store_path: /app/data/user_tokens.json
+        default_ttl_seconds: 2592000 # 30d
+        max_ttl_seconds: 7776000 # 90d
 
     # Deny by default: no matching binding => 403. Bound to the operator's
     # identity as Dex actually asserts it (confirmed via a real login on
@@ -196,3 +204,10 @@ caBundle:
   configMapName: hvslocal-ca-bundle
   key: ca.crt
   mountPath: /etc/forge/ca
+
+# Longhorn PVC for user-issued API keys; enables the mint/list/revoke feature.
+persistence:
+  enabled: true
+  storageClass: longhorn
+  size: 1Gi
+  mountPath: /app/data
