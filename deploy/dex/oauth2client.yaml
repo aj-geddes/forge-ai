@@ -1,0 +1,33 @@
+# Dex client for Forge AI.
+#
+# NOT managed by ArgoCD: this object lives in the `dex` namespace, which our
+# AppProject (dev-aj-geddes) is not permitted to target. Apply it once with
+# platform-admin credentials:
+#
+#   kubectl apply -f deploy/dex/oauth2client.yaml
+#
+# GOTCHA: Dex's Kubernetes storage looks a client up by a DERIVED object name,
+# not by its id. metadata.name MUST equal
+#   base32_lower(id_bytes || FNV-64 offset basis 0xcbf29ce484222325)   (padding stripped)
+# For id "forge-ai" that is "mzxxez3ffvqwts7sttsiiirdeu". A readable name here
+# means Dex silently cannot find the client and returns "Invalid client_id".
+# Verified against the existing `borgmem` client, whose object name is likewise
+# derived (mjxxez3nmvw4x4u44scceizf).
+#
+# public: true => no client secret. The gateway still runs the authorization-code
+# flow server-side with PKCE (S256) and keeps tokens out of the browser behind an
+# httpOnly session cookie; PKCE is what secures the code exchange, so a confidential
+# client would buy nothing and would force a plaintext secret into this CR.
+apiVersion: dex.coreos.com/v1
+kind: OAuth2Client
+metadata:
+  name: mzxxez3ffvqwts7sttsiiirdeu
+  namespace: dex
+  labels:
+    app.kubernetes.io/name: forge-ai
+    app.kubernetes.io/component: dex-client
+id: forge-ai
+name: Forge AI
+public: true
+redirectURIs:
+  - https://forgeai.hvslocal/auth/callback
