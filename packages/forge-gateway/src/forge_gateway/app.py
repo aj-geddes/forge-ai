@@ -28,6 +28,7 @@ from forge_security.oidc import (
     fetch_discovery_document,
     resolve_endpoints,
 )
+from forge_security.workload import WorkloadUnavailable, build_workload_plane
 
 from forge_gateway import security
 from forge_gateway.middleware.csrf import CSRFMiddleware
@@ -47,6 +48,11 @@ from forge_gateway.routes import (
 from forge_gateway.routes import (
     tokens as tokens_routes,
 )
+from forge_gateway.workload import (
+    WorkloadListenerHandle,
+    WorkloadListenerStartupError,
+    start_workload_listener,
+)
 
 if TYPE_CHECKING:
     from forge_security.oidc.user_tokens import UserTokenStore
@@ -54,6 +60,8 @@ if TYPE_CHECKING:
 logger = logging.getLogger("forge.gateway")
 
 _DEV_INSECURE_LOG_INTERVAL_SECONDS = 60
+
+_WORKLOAD_TEST_MODE_ENV_VAR = "FORGE_WORKLOAD_TEST_MODE"
 
 
 def _make_reload_callback(
@@ -454,6 +462,75 @@ async def _init_auth(config: object | None) -> None:
         )
 
 
+def _workload_test_mode() -> bool:
+    """ADR-0004: unit/integration tests set ``FORGE_WORKLOAD_TEST_MODE=1``
+    to build the ``WorkloadPlane`` with agentweave's own test doubles
+    (no real SPIRE/OPA needed), mirroring the ``FORGE_DEV_INSECURE``
+    pattern used for the human plane's dev_insecure mode. Never set in
+    production."""
+    return os.environ.get(_WORKLOAD_TEST_MODE_ENV_VAR) == "1"
+
+
+async def _init_workload_plane(
+    config: object | None, agent: object | None
+) -> WorkloadListenerHandle | None:
+    """Build the ``WorkloadPlane`` and start the ``:8443`` a2a-mtls
+    listener, but only when ``security.agentweave.enabled`` (ADR-0004
+    SS4, SS8).
+
+    Every failure path here -- agentweave disabled, no config loaded,
+    SPIRE unreachable (``WorkloadUnavailable``), or the listener port
+    itself failing to bind (``WorkloadListenerStartupError``) -- ends the
+    same way: this returns ``None``, records a non-gating
+    ``health.set_workload_health(...)`` snapshot, and the caller
+    (:func:`lifespan`) proceeds with human-plane startup completely
+    unaffected. There is no path here that raises out to the lifespan and
+    blocks ``:8000`` from starting.
+    """
+    from forge_config.schema import ForgeConfig
+
+    if config is None or not isinstance(config, ForgeConfig):
+        health.set_workload_health(None)
+        return None
+
+    agentweave_config = config.security.agentweave
+    if not agentweave_config.enabled:
+        health.set_workload_health(None)
+        return None
+
+    test_mode = _workload_test_mode()
+    try:
+        plane = await build_workload_plane(
+            agentweave_config,
+            test_mode=test_mode,
+            agent_name=config.metadata.name,
+        )
+    except WorkloadUnavailable as exc:
+        logger.critical(
+            "workload plane: SPIFFE identity infrastructure unavailable (%s) -- the "
+            ":8443 a2a-mtls listener will NOT start. The human :8000 plane is "
+            "unaffected and stays Ready.",
+            exc.code,
+        )
+        health.set_workload_health({"status": "unavailable", "reason": exc.code})
+        return None
+
+    try:
+        handle = await start_workload_listener(plane, agent, config)
+    except WorkloadListenerStartupError:
+        logger.critical(
+            "workload plane: :8443 a2a-mtls listener failed to start -- the human "
+            ":8000 plane is unaffected and stays Ready.",
+            exc_info=True,
+        )
+        health.set_workload_health({"status": "unavailable", "reason": "listener_startup_failed"})
+        return None
+
+    health.set_workload_health(await plane.health())
+    logger.info("workload plane: :8443 a2a-mtls listener ready")
+    return handle
+
+
 async def _dev_insecure_heartbeat() -> None:
     """ADR-0001 SS7.2: log CRITICAL every 60s while dev_insecure is active,
     so it is impossible to be in this mode and not know it."""
@@ -513,6 +590,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     watcher = None
     dev_insecure_task: asyncio.Task[None] | None = None
+    workload_handle: WorkloadListenerHandle | None = None
 
     try:
         # Try to initialize the agent from config
@@ -567,6 +645,23 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if security.is_dev_insecure():
             dev_insecure_task = asyncio.ensure_future(_dev_insecure_heartbeat())
 
+        # ADR-0004: build the workload (SPIFFE + OPA + mTLS) plane and
+        # start the :8443 a2a-mtls listener, strictly additive to
+        # everything above. Wrapped defensively (on top of
+        # _init_workload_plane's own internal fail-closed handling) so
+        # that even an unanticipated exception here can never prevent
+        # the human :8000 plane from reaching Ready.
+        try:
+            workload_handle = await _init_workload_plane(config, agent)
+        except Exception:
+            logger.exception(
+                "workload plane: unexpected failure building the workload plane -- "
+                "the :8443 listener will not start. The human :8000 plane is "
+                "unaffected and stays Ready."
+            )
+            health.set_workload_health({"status": "unavailable", "reason": "unexpected_error"})
+            workload_handle = None
+
         # Start config file watcher for hot-reload
         if config is not None and Path(config_path).exists():
             try:
@@ -594,6 +689,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 logger.exception("Error stopping config watcher")
         if dev_insecure_task is not None:
             dev_insecure_task.cancel()
+        if workload_handle is not None:
+            try:
+                await workload_handle.stop()
+            except Exception:
+                logger.exception("Error stopping workload plane :8443 listener")
         try:
             await mcp.shutdown_active_asgi_app()
         except Exception:

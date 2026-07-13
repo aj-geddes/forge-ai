@@ -6,6 +6,7 @@ from forge_config.schema import (
     AgentsConfig,
     AgentWeaveConfig,
     AuthConfig,
+    AuthMode,
     AuthType,
     ForgeConfig,
     ForgeMetadata,
@@ -15,6 +16,7 @@ from forge_config.schema import (
     LLMConfig,
     ManualTool,
     ManualToolAPI,
+    OIDCConfig,
     OpenAPISource,
     ParameterDef,
     ParamType,
@@ -22,6 +24,7 @@ from forge_config.schema import (
     ResponseMapping,
     SecretRef,
     SecretSource,
+    SecurityAuthConfig,
     SecurityConfig,
     ToolsConfig,
     TrustLevel,
@@ -357,6 +360,18 @@ class TestPeerAgent:
         assert peer.endpoint == "https://data-forge.internal"
         assert peer.trust_level == TrustLevel.LOW
         assert peer.capabilities == []
+        assert peer.spiffe_id is None
+
+    def test_peer_agent_spiffe_id_optional(self) -> None:
+        """ADR-0004 SS7.3: PeerAgent.spiffe_id is the expected peer SVID
+        used for outbound peer verification; optional so existing configs
+        that don't set it keep parsing."""
+        peer = PeerAgent(
+            name="data-forge",
+            endpoint="https://data-forge.hvslocal:8443",
+            spiffe_id="spiffe://hvslocal/ns/dev-aj-geddes/sa/data-forge",
+        )
+        assert peer.spiffe_id == "spiffe://hvslocal/ns/dev-aj-geddes/sa/data-forge"
 
     def test_full_peer(self) -> None:
         peer = PeerAgent(
@@ -436,6 +451,39 @@ class TestAgentWeaveConfig:
             }
         )
         assert config.trust_policy == TrustPolicy.PERMISSIVE
+
+    def test_agentweave_config_workload_fields_parse(self) -> None:
+        """ADR-0004 SS7.3: workload_listener_port/audit_backend/audit_path
+        are un-inert additions for the workload (SPIFFE+OPA) plane."""
+        config = AgentWeaveConfig(
+            workload_listener_port=8444,
+            audit_backend="file",
+            audit_path="/app/data/audit/workload-audit.jsonl",
+        )
+        assert config.workload_listener_port == 8444
+        assert config.audit_backend == "file"
+        assert config.audit_path == "/app/data/audit/workload-audit.jsonl"
+
+    def test_workload_listener_port_defaults_to_8443(self) -> None:
+        assert AgentWeaveConfig().workload_listener_port == 8443
+
+    def test_audit_backend_defaults_to_stdout(self) -> None:
+        config = AgentWeaveConfig()
+        assert config.audit_backend == "stdout"
+        assert config.audit_path is None
+
+    def test_audit_backend_rejects_unknown_value(self) -> None:
+        with pytest.raises(ValidationError):
+            AgentWeaveConfig(audit_backend="carrier-pigeon")
+
+    def test_agentweave_enabled_cannot_disable_human_oidc(self) -> None:
+        """ADR-0004 SS7.3 guardrail (ADR-0001): agentweave.enabled only
+        gates the workload plane. Disabling it must leave auth.mode/oidc
+        completely untouched -- there is no field connecting the two."""
+        config = SecurityConfig(agentweave=AgentWeaveConfig(enabled=False))
+        assert config.agentweave.enabled is False
+        assert config.auth.mode == SecurityAuthConfig().mode == AuthMode.ENFORCE
+        assert config.oidc.enabled == OIDCConfig().enabled
 
 
 class TestForgeConfig:

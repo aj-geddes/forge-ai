@@ -33,11 +33,21 @@ class ToolSurfaceRegistry:
     via content hashing prevents unnecessary rebuilds.
     """
 
-    def __init__(self, secret_resolver: SecretResolver | None = None) -> None:
+    def __init__(
+        self,
+        secret_resolver: SecretResolver | None = None,
+        *,
+        workload_identity: Any | None = None,
+    ) -> None:
         self._tools: list[Tool[None]] = []
         self._version: str = ""
         self._lock = asyncio.Lock()
         self._secret_resolver = secret_resolver
+        # ADR-0004 SS6: the workload plane's identity provider, when the
+        # agent was built with one, is threaded through to PeerCaller so
+        # outbound peer calls use mTLS. ``None`` (the default) preserves
+        # the pre-ADR-0004 plain-httpx behavior.
+        self._workload_identity = workload_identity
 
     @property
     def tools(self) -> list[Tool[None]]:
@@ -137,7 +147,7 @@ class ToolSurfaceRegistry:
         if config.agents.peers:
             peer_caller = PeerCaller(
                 peers=config.agents.peers,
-                caller_id=config.metadata.name,
+                identity=self._workload_identity,
             )
             tools.extend(peer_caller.build_tools())
 

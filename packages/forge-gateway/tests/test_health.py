@@ -24,6 +24,7 @@ def _reset_health_state() -> Iterator[None]:
     health.set_started(False)
     health.set_version("")
     health.reset_components()
+    health.set_workload_health(None)
 
 
 class TestHealthEndpoints:
@@ -116,3 +117,50 @@ class TestHealthEndpoints:
             assert response.json()["status"] == "started"
         finally:
             health.set_started(False)
+
+
+class TestWorkloadHealthDoesNotGateReadiness:
+    """ADR-0004 SS8: the workload (SPIFFE/OPA/:8443-listener) health
+    component is reported for visibility but must NEVER gate
+    /health/ready -- a SPIRE/OPA outage degrades agent-to-agent traffic
+    only, never the human :8000 plane's readiness."""
+
+    def test_workload_unhealthy_does_not_flip_readiness_to_503(self, client: TestClient) -> None:
+        health.set_ready(True)
+        health.set_workload_health({"status": "unhealthy", "identity": "down", "authz": "down"})
+
+        response = client.get("/health/ready")
+
+        assert response.status_code == 200
+        assert response.json()["status"] == "ready"
+
+    def test_workload_health_is_surfaced_in_the_ready_response_body(
+        self, client: TestClient
+    ) -> None:
+        health.set_ready(True)
+        health.set_workload_health({"status": "healthy", "identity": "up", "authz": "up"})
+
+        response = client.get("/health/ready")
+        body = response.json()
+
+        assert body["workload"] == {"status": "healthy", "identity": "up", "authz": "up"}
+
+    def test_workload_health_defaults_to_none_when_agentweave_disabled(
+        self, client: TestClient
+    ) -> None:
+        health.set_ready(True)
+
+        response = client.get("/health/ready")
+
+        assert response.json()["workload"] is None
+
+    def test_workload_unavailable_reason_does_not_gate_readiness(self, client: TestClient) -> None:
+        """SPIRE unreachable at startup: the workload plane never came up
+        at all, distinct from "came up but unhealthy" -- readiness must
+        still be unaffected."""
+        health.set_ready(True)
+        health.set_workload_health({"status": "unavailable", "reason": "spire_unreachable"})
+
+        response = client.get("/health/ready")
+
+        assert response.status_code == 200

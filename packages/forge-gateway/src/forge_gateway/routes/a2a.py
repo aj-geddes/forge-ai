@@ -125,18 +125,27 @@ def set_agent(agent: Any) -> None:
     _forge_agent = agent
 
 
-@router.post(
-    "/tasks",
-    response_model=A2ATaskResponse,
-    dependencies=[Depends(security.require_permission("agent:peer"))],
-)
-async def submit_task(request: A2ATaskRequest) -> A2ATaskResponse:
-    """Handle incoming A2A task requests."""
-    if _forge_agent is None:
+async def run_a2a_task(agent: Any, request: A2ATaskRequest) -> A2ATaskResponse:
+    """Dispatch a validated A2A task request to *agent* and shape the
+    response.
+
+    Shared by both A2A surfaces: the human ``:8000`` router below
+    (identity from ``require_permission("agent:peer")``) and the
+    workload ``:8443`` mTLS listener (``forge_gateway.workload``,
+    ADR-0004 SS3 -- identity from the verified SPIFFE peer certificate).
+    Neither surface's identity source leaks into this function; it only
+    ever sees the already-authorized task request.
+
+    Raises no exception: agent failures are caught and shaped into a
+    generic ``status="failed"`` response so internal exception details
+    (which may include secrets, e.g. a database DSN) are never leaked to
+    an A2A caller.
+    """
+    if agent is None:
         raise HTTPException(status_code=503, detail="Agent not initialized")
 
     try:
-        run_result = await _forge_agent.run_structured(
+        run_result = await agent.run_structured(
             intent=request.task_type,
             params=request.payload,
         )
@@ -144,3 +153,13 @@ async def submit_task(request: A2ATaskRequest) -> A2ATaskResponse:
     except Exception:
         logger.exception("A2A task failed")
         return A2ATaskResponse(status="failed", error="Internal server error")
+
+
+@router.post(
+    "/tasks",
+    response_model=A2ATaskResponse,
+    dependencies=[Depends(security.require_permission("agent:peer"))],
+)
+async def submit_task(request: A2ATaskRequest) -> A2ATaskResponse:
+    """Handle incoming A2A task requests on the human ``:8000`` plane."""
+    return await run_a2a_task(_forge_agent, request)

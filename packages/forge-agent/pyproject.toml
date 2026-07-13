@@ -7,6 +7,11 @@ license = {text = "Apache-2.0"}
 dependencies = [
     "forge-config",
     "forge-security",
+    # PeerCaller (agent/peers.py) uses agentweave's PeerVerificationError
+    # directly for outbound mTLS peer-identity verification (ADR-0004
+    # SS6). Declared explicitly rather than left as an implicit
+    # transitive import via forge-security.
+    "agentweave",
     "pydantic-ai>=0.1",
     "litellm>=1.50",
     "fastmcp>=2.0",

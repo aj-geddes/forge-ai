@@ -64,6 +64,13 @@ class HealthResponse(BaseModel):
     components: dict[str, str] = Field(default_factory=dict)
     auth_mode: str = "enforce"
     auth_healthy: bool = True
+    workload: dict[str, str] | None = None
+    """ADR-0004 SS8: the workload (SPIFFE/OPA/:8443 a2a-mtls listener)
+    plane's health, reported for visibility only. ``None`` when
+    ``security.agentweave.enabled`` is false. Deliberately NOT part of
+    readiness gating -- see ``routes.health._is_ready``: a SPIRE/OPA
+    outage must degrade agent-to-agent traffic without pulling the human
+    ``:8000`` plane out of service."""
 
 
 # --- Admin API models ---

@@ -6,7 +6,7 @@ import re
 import warnings
 from datetime import datetime
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -554,10 +554,16 @@ class AuthorizationConfig(BaseModel):
 
 
 class AgentWeaveConfig(BaseModel):
-    """AgentWeave integration settings.
+    """AgentWeave workload-plane settings (ADR-0004).
 
-    Inert as of ADR-0001: retained only so old configs still parse. It
-    can no longer disable authentication (see SecurityConfig).
+    Inert for the *human* OIDC plane (ADR-0001): nothing here can ever
+    disable authentication on ``:8000`` -- see ``SecurityConfig``, which
+    has no field connecting ``agentweave`` to ``auth``/``oidc``. As of
+    ADR-0004, ``enabled`` un-inerts the separate *workload* (SPIFFE + OPA
+    + mTLS) plane on ``:8443``: when true, forge-gateway builds a
+    ``WorkloadPlane`` and starts the mTLS listener; when false (the
+    default-safe value for old configs), no workload listener is started
+    at all and this block has zero runtime effect.
     """
 
     enabled: bool = True
@@ -567,6 +573,19 @@ class AgentWeaveConfig(BaseModel):
     opa_endpoint: str = "http://localhost:8181"
     identity_secret: str | None = None
     trust_policy: TrustPolicy = TrustPolicy.STRICT
+
+    # --- Workload plane (ADR-0004 SS7.3) ---
+    workload_listener_port: int = 8443
+    """Port for the pod-terminated mTLS ("a2a-mtls") listener."""
+
+    audit_backend: Literal["stdout", "file"] = "stdout"
+    """Workload-plane audit sink. ``stdout`` (default) needs no volume
+    and is safe with any replica count; ``file`` requires ``audit_path``
+    and a writable, single-writer volume."""
+
+    audit_path: str | None = None
+    """Path for ``FileAuditBackend`` when ``audit_backend == "file"``.
+    Ignored (falls back to stdout) when unset."""
 
 
 class APIKeyConfig(BaseModel):
@@ -738,6 +757,11 @@ class PeerAgent(BaseModel):
     endpoint: str
     trust_level: TrustLevel = TrustLevel.LOW
     capabilities: list[str] = Field(default_factory=list)
+    spiffe_id: str | None = None
+    """Expected SPIFFE ID of this peer's SVID (ADR-0004 SS7.3), used by
+    the outbound ``PeerCaller`` to verify it reached the intended peer
+    over mTLS. ``None`` when the peer is not on the workload plane (or
+    the caller has no expectation to verify against)."""
 
 
 class AgentDef(BaseModel):

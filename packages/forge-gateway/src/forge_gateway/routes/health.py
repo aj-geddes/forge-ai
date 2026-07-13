@@ -17,6 +17,7 @@ _version = ""
 _components: dict[str, str] = {}
 _auth_mode = "enforce"
 _auth_healthy = True
+_workload_health: dict[str, str] | None = None
 
 
 def set_ready(ready: bool) -> None:
@@ -59,8 +60,33 @@ def set_auth_healthy(healthy: bool) -> None:
 
 
 def reset_components() -> None:
-    """Clear all recorded component statuses."""
+    """Clear all recorded component statuses (and the workload-plane
+    health snapshot, if any) -- called on lifespan shutdown."""
     _components.clear()
+    set_workload_health(None)
+
+
+def set_workload_health(status: dict[str, str] | None) -> None:
+    """Record the workload (SPIFFE/OPA/:8443 a2a-mtls listener) plane's
+    health for the ``/health/ready`` response body (ADR-0004 SS8).
+
+    ``None`` means the workload plane is not applicable at all
+    (``security.agentweave.enabled`` is false). A dict -- however
+    unhealthy -- means the plane was configured; its contents are
+    reported verbatim but are deliberately never consulted by
+    :func:`_is_ready`. A SPIRE/OPA outage, or the workload listener never
+    coming up because SPIRE was unreachable at startup, must degrade
+    agent-to-agent traffic only, never the human ``:8000`` plane's
+    readiness.
+    """
+    global _workload_health
+    _workload_health = status
+
+
+def get_workload_health() -> dict[str, str] | None:
+    """The last-recorded workload-plane health, or ``None`` if the
+    workload plane is not applicable."""
+    return _workload_health
 
 
 def _is_ready() -> bool:
@@ -89,7 +115,13 @@ async def liveness() -> HealthResponse:
 @router.get("/health/ready", response_model=HealthResponse)
 async def readiness() -> HealthResponse | JSONResponse:
     """Readiness probe: 503 when startup is incomplete, a component failed,
-    or the auth subsystem cannot operate."""
+    or the auth subsystem cannot operate.
+
+    ``workload`` (ADR-0004 SS8) is included in the response body for
+    visibility but -- by construction, via :func:`_is_ready` -- can never
+    be the reason this returns 503. Only the human-plane checks
+    (startup, component failures, auth health) gate readiness.
+    """
     if not _is_ready():
         body = HealthResponse(
             status="not_ready",
@@ -97,6 +129,7 @@ async def readiness() -> HealthResponse | JSONResponse:
             components=dict(_components),
             auth_mode=_auth_mode,
             auth_healthy=_auth_healthy,
+            workload=_workload_health,
         )
         return JSONResponse(status_code=503, content=body.model_dump())
     return HealthResponse(
@@ -105,6 +138,7 @@ async def readiness() -> HealthResponse | JSONResponse:
         components=dict(_components),
         auth_mode=_auth_mode,
         auth_healthy=_auth_healthy,
+        workload=_workload_health,
     )
 
 

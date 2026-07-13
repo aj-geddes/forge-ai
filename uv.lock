@@ -910,6 +910,7 @@ name = "forge-agent"
 version = "0.1.0"
 source = { editable = "packages/forge-agent" }
 dependencies = [
+    { name = "agentweave" },
     { name = "fastmcp" },
     { name = "forge-config" },
     { name = "forge-security" },
@@ -921,6 +922,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "agentweave", editable = "../agentweave" },
     { name = "fastmcp", specifier = ">=2.0" },
     { name = "forge-config", editable = "packages/forge-config" },
     { name = "forge-security", editable = "packages/forge-security" },

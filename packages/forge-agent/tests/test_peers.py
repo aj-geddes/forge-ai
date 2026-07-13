@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
@@ -11,6 +11,7 @@ from forge_agent.agent.peers import (
     PeerCaller,
     PeerCallError,
     PeerNotFoundError,
+    PeerVerificationError,
 )
 from forge_config.schema import PeerAgent, TrustLevel
 
@@ -91,7 +92,7 @@ class TestPeerCallerCallPeer:
         mock_client = AsyncMock(spec=httpx.AsyncClient)
         mock_client.post.return_value = _make_success_response()
 
-        caller = PeerCaller([peer], caller_id="my-forge", http_client=mock_client)
+        caller = PeerCaller([peer], http_client=mock_client)
         result = await caller.call_peer("data-forge", "data_query", {"sql": "SELECT 1"})
 
         assert result.status == "completed"
@@ -107,7 +108,6 @@ class TestPeerCallerCallPeer:
         body = call_args[1]["json"]
         assert body["task_type"] == "data_query"
         assert body["payload"] == {"sql": "SELECT 1"}
-        assert body["caller_id"] == "my-forge"
 
     @pytest.mark.anyio
     async def test_call_with_none_payload(self) -> None:
@@ -161,6 +161,147 @@ class TestPeerCallerCallPeer:
         assert url == "https://data-forge.example.com/a2a/tasks"
 
 
+class TestPeerCallerOutboundMTLS:
+    """ADR-0004 SS6: outbound peer calls use the workload identity's mTLS
+    client context, verify the reached peer's SPIFFE ID, and no longer
+    send a caller_id body field (identity comes from the mTLS cert)."""
+
+    @pytest.mark.anyio
+    async def test_peer_request_omits_caller_id(self) -> None:
+        peer = _make_peer("data-forge")
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.post.return_value = _make_success_response()
+
+        caller = PeerCaller([peer], http_client=mock_client)
+        await caller.call_peer("data-forge", "task", {})
+
+        body = mock_client.post.call_args[1]["json"]
+        assert "caller_id" not in body
+
+    @pytest.mark.anyio
+    async def test_peer_call_uses_mtls_context(self) -> None:
+        """When an ``identity`` provider is supplied and no explicit
+        ``http_client`` override is given, PeerCaller builds its httpx
+        client with the mTLS SSLContext from
+        ``identity.create_tls_context(server=False)``."""
+        peer = _make_peer("data-forge")
+        identity = AsyncMock()
+        identity.create_tls_context.return_value = "fake-mtls-ssl-context"
+
+        mock_client_instance = AsyncMock(spec=httpx.AsyncClient)
+        mock_client_instance.post.return_value = _make_success_response()
+
+        with patch("forge_agent.agent.peers.httpx.AsyncClient") as mock_client_cls:
+            mock_client_cls.return_value = mock_client_instance
+
+            caller = PeerCaller([peer], identity=identity)
+            result = await caller.call_peer("data-forge", "task", {})
+
+        assert result.status == "completed"
+        identity.create_tls_context.assert_awaited_once_with(server=False)
+        mock_client_cls.assert_called_once()
+        assert mock_client_cls.call_args.kwargs["verify"] == "fake-mtls-ssl-context"
+
+    @pytest.mark.anyio
+    async def test_peer_call_verifies_peer_spiffe_id(self) -> None:
+        """A response whose TLS peer certificate carries a SPIFFE ID that
+        does not match the configured ``PeerAgent.spiffe_id`` raises
+        ``PeerVerificationError`` -- the outbound call reached the wrong
+        peer, so it must not be treated as a success."""
+        from forge_agent.agent import peers as peers_module
+
+        peer = _make_peer(
+            "data-forge",
+            endpoint="https://data-forge.example.com",
+        ).model_copy(update={"spiffe_id": "spiffe://hvslocal/ns/dev/sa/data-forge"})
+
+        response = _make_success_response()
+
+        class _FakeSSLObject:
+            def getpeercert(self, binary_form: bool = False) -> bytes:
+                assert binary_form is True
+                return b"wrong-peer-cert-der"
+
+        class _FakeNetworkStream:
+            def get_extra_info(self, name: str) -> object:
+                assert name == "ssl_object"
+                return _FakeSSLObject()
+
+        response.extensions = {"network_stream": _FakeNetworkStream()}
+
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.post.return_value = response
+
+        identity = AsyncMock()
+        identity.create_tls_context.return_value = "fake-mtls-ssl-context"
+
+        caller = PeerCaller([peer], identity=identity, http_client=mock_client)
+
+        with (
+            patch.object(
+                peers_module,
+                "extract_spiffe_id_from_cert",
+                return_value="spiffe://hvslocal/ns/dev/sa/some-impostor",
+            ),
+            pytest.raises(PeerVerificationError),
+        ):
+            await caller.call_peer("data-forge", "task", {})
+
+    @pytest.mark.anyio
+    async def test_peer_call_matching_spiffe_id_succeeds(self) -> None:
+        """A response whose TLS peer certificate SPIFFE ID matches the
+        configured expectation succeeds normally."""
+        from forge_agent.agent import peers as peers_module
+
+        expected_id = "spiffe://hvslocal/ns/dev/sa/data-forge"
+        peer = _make_peer("data-forge").model_copy(update={"spiffe_id": expected_id})
+
+        response = _make_success_response()
+
+        class _FakeSSLObject:
+            def getpeercert(self, binary_form: bool = False) -> bytes:
+                return b"right-peer-cert-der"
+
+        class _FakeNetworkStream:
+            def get_extra_info(self, name: str) -> object:
+                return _FakeSSLObject()
+
+        response.extensions = {"network_stream": _FakeNetworkStream()}
+
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.post.return_value = response
+
+        identity = AsyncMock()
+        identity.create_tls_context.return_value = "fake-mtls-ssl-context"
+
+        caller = PeerCaller([peer], identity=identity, http_client=mock_client)
+
+        with patch.object(
+            peers_module,
+            "extract_spiffe_id_from_cert",
+            return_value=expected_id,
+        ):
+            result = await caller.call_peer("data-forge", "task", {})
+
+        assert result.status == "completed"
+
+    @pytest.mark.anyio
+    async def test_no_identity_skips_peer_verification(self) -> None:
+        """Without an identity provider (agentweave disabled), PeerCaller
+        behaves exactly as it did before -- plain httpx, no mTLS, no peer
+        SPIFFE-ID check, even if the peer config happens to set one."""
+        peer = _make_peer("data-forge").model_copy(
+            update={"spiffe_id": "spiffe://hvslocal/ns/dev/sa/data-forge"}
+        )
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.post.return_value = _make_success_response()
+
+        caller = PeerCaller([peer], http_client=mock_client)
+        result = await caller.call_peer("data-forge", "task", {})
+
+        assert result.status == "completed"
+
+
 class TestPeerCallerBuildTools:
     """Tests for PeerCaller.build_tools."""
 
@@ -194,7 +335,7 @@ class TestPeerCallerBuildTools:
         mock_client = AsyncMock(spec=httpx.AsyncClient)
         mock_client.post.return_value = _make_success_response()
 
-        caller = PeerCaller([peer], caller_id="test", http_client=mock_client)
+        caller = PeerCaller([peer], http_client=mock_client)
         tools = caller.build_tools()
 
         # Find the tool and call its function directly.
