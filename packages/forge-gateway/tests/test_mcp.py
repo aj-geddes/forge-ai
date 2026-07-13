@@ -15,9 +15,11 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
+from fastapi import FastAPI
 from fastmcp import FastMCP
 from fastmcp.exceptions import NotFoundError, ToolError
 from forge_gateway.routes import mcp
@@ -79,9 +81,11 @@ def _make_registry(tools: list[PydanticAITool[None]] | None = None) -> MagicMock
 
 @pytest.fixture(autouse=True)
 def _reset_mcp_state() -> Iterator[None]:
-    """Reset the module-level MCP server after each test."""
+    """Reset the module-level MCP server (and active mount state) after each test."""
     yield
     mcp._mcp_server = None
+    mcp._active_asgi_app = None
+    mcp._active_lifespan = None
 
 
 # ---------------------------------------------------------------------------
@@ -226,9 +230,13 @@ class TestMCPEndpointMount:
         mount_names = [r.name for r in app.routes if hasattr(r, "name")]
         assert "mcp" in mount_names
 
-    def test_init_mcp_server_mounts_on_app(self) -> None:
-        """_init_mcp_server() builds and mounts the MCP app at /mcp."""
-        from fastapi import FastAPI
+    async def test_init_mcp_server_builds_and_activates(self) -> None:
+        """_init_mcp_server() builds the MCP server and activates it at /mcp.
+
+        Activation (not a direct app.mount call) is what starts the FastMCP
+        ASGI app's lifespan and swaps it into the persistent /mcp dispatcher
+        mounted once in create_app().
+        """
         from forge_gateway.app import _init_mcp_server
 
         mock_registry = _make_registry([_make_pai_tool("test_tool")])
@@ -238,45 +246,36 @@ class TestMCPEndpointMount:
         mock_config = MagicMock()
         mock_config.metadata.name = "TestForge"
 
-        app = FastAPI()
-
         with (
             patch("forge_gateway.app.mcp.build_mcp_server") as mock_build,
-            patch("forge_gateway.app.mcp.get_mcp_asgi_app") as mock_get_app,
+            patch("forge_gateway.app.mcp.activate", new_callable=AsyncMock) as mock_activate,
             patch("forge_agent.ForgeAgent", new=type(mock_agent)),
             patch("forge_config.schema.ForgeConfig", new=type(mock_config)),
         ):
             mock_mcp_server = MagicMock()
             mock_build.return_value = mock_mcp_server
-            mock_asgi_app = MagicMock()
-            mock_get_app.return_value = mock_asgi_app
 
-            _init_mcp_server(app, mock_agent, mock_config)
+            await _init_mcp_server(mock_agent, mock_config)
 
             mock_build.assert_called_once()
-            mock_get_app.assert_called_once_with(mock_mcp_server)
+            mock_activate.assert_awaited_once_with(mock_mcp_server)
 
-    def test_init_mcp_server_skips_when_no_agent(self) -> None:
+    async def test_init_mcp_server_skips_when_no_agent(self) -> None:
         """_init_mcp_server() gracefully skips when agent is None."""
-        from fastapi import FastAPI
         from forge_gateway.app import _init_mcp_server
 
-        app = FastAPI()
-        _init_mcp_server(app, None, None)
+        await _init_mcp_server(None, None)
         assert get_mcp_server() is None
 
-    def test_init_mcp_server_handles_import_error(self) -> None:
+    async def test_init_mcp_server_handles_import_error(self) -> None:
         """_init_mcp_server() degrades gracefully when imports fail."""
-        from fastapi import FastAPI
         from forge_gateway.app import _init_mcp_server
-
-        app = FastAPI()
 
         with patch(
             "forge_gateway.app.mcp.build_mcp_server",
             side_effect=ImportError("no module"),
         ):
-            _init_mcp_server(app, MagicMock(), MagicMock())
+            await _init_mcp_server(MagicMock(), MagicMock())
 
 
 # ---------------------------------------------------------------------------
@@ -635,7 +634,12 @@ class TestMCPServerReflectsToolSurface:
         assert "tool_a" not in tool_names_v2
 
     def test_rebuild_replaces_module_server_reference(self) -> None:
-        """rebuild_mcp_server() replaces the module-level server reference."""
+        """rebuild_mcp_server() replaces the module-level server reference.
+
+        rebuild_mcp_server() itself still builds a fresh FastMCP object (see
+        TestRebuildAndActivate below for how the persistent /mcp mount picks up
+        the new object via activate()/rebuild_and_activate()).
+        """
         registry1 = _make_registry([_make_pai_tool("old_tool")])
         registry2 = _make_registry([_make_pai_tool("new_tool")])
 
@@ -686,3 +690,186 @@ class TestMCPServerReflectsToolSurface:
         names = {t.name for t in mcp_tools}
         assert names == {"alpha", "beta"}
         assert len(mcp_tools) == 2
+
+
+# ---------------------------------------------------------------------------
+# 9. Persistent /mcp mount dispatches to whichever ASGI app is active
+#
+# These tests cover the fix for two related runtime bugs:
+#   - The FastMCP ASGI app's own lifespan was never run by the gateway,
+#     so its streamable-HTTP session manager was never started and every
+#     call to /mcp failed with "Task group is not initialized."
+#   - rebuild_mcp_server() only swapped a module-level reference that
+#     nothing actually served, so hot-reloaded tools never appeared over
+#     MCP even though the tool registry itself was rebuilt correctly.
+#
+# The fix: mount a single persistent dispatcher ASGI app at /mcp (once,
+# for the process lifetime) that always forwards to whichever FastMCP
+# ASGI app is "active." activate()/set_active_asgi_app() start that app's
+# ASGI lifespan (so the session manager actually runs) and atomically
+# swap it in; rebuild_and_activate() combines a tool-surface rebuild with
+# activation so hot-reloads are actually reflected over MCP.
+# ---------------------------------------------------------------------------
+
+
+class TestMCPMountDispatch:
+    """The persistent mount app dispatches to whichever FastMCP ASGI app is active."""
+
+    def test_get_mcp_mount_app_returns_stable_instance(self) -> None:
+        """get_mcp_mount_app() returns the same object across calls.
+
+        It must be mounted exactly once at startup and stay mounted for
+        the process lifetime; rebuilds swap what it dispatches to, not
+        the mount itself.
+        """
+        assert mcp.get_mcp_mount_app() is mcp.get_mcp_mount_app()
+
+    async def test_no_active_app_returns_503_not_a_crash(self) -> None:
+        """Before any MCP server has been activated, requests get a clean 503."""
+        app = FastAPI()
+        app.mount("/mcp", mcp.get_mcp_mount_app())
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
+            resp = await ac.post("/mcp/", json={})
+        assert resp.status_code == 503
+
+    async def test_activate_starts_lifespan_and_becomes_active(self) -> None:
+        """activate() starts the FastMCP ASGI app's lifespan and makes it active."""
+        registry = _make_registry([_make_pai_tool("ping")])
+        server = build_mcp_server(registry)
+
+        asgi_app = await mcp.activate(server)
+        try:
+            assert mcp.get_active_asgi_app() is asgi_app
+        finally:
+            await mcp.shutdown_active_asgi_app()
+
+    async def test_activated_app_serves_tools_over_http(self) -> None:
+        """After activate(), the persistent mount actually serves the tool over HTTP.
+
+        This is the core proof that the gateway's lifespan wiring starts
+        FastMCP's own ASGI lifespan (previously it never ran, so this call
+        would fail with "Task group is not initialized").
+        """
+        registry = _make_registry([_make_pai_tool("ping")])
+        server = build_mcp_server(registry)
+
+        await mcp.activate(server)
+        try:
+            app = FastAPI()
+            app.mount("/mcp", mcp.get_mcp_mount_app())
+
+            from fastmcp import Client
+            from fastmcp.client.transports import StreamableHttpTransport
+
+            def factory(**kwargs: Any) -> httpx.AsyncClient:
+                return httpx.AsyncClient(
+                    transport=httpx.ASGITransport(app=app),
+                    base_url="http://test",
+                    **kwargs,
+                )
+
+            transport = StreamableHttpTransport(
+                url="http://test/mcp/", httpx_client_factory=factory
+            )
+            client = Client(transport)
+            async with client:
+                tools = await client.list_tools()
+        finally:
+            await mcp.shutdown_active_asgi_app()
+
+        assert {t.name for t in tools} == {"ping"}
+
+    async def test_shutdown_clears_active_app(self) -> None:
+        """shutdown_active_asgi_app() stops the lifespan and clears the active app."""
+        registry = _make_registry([_make_pai_tool("x")])
+        server = build_mcp_server(registry)
+        await mcp.activate(server)
+
+        await mcp.shutdown_active_asgi_app()
+
+        assert mcp.get_active_asgi_app() is None
+
+    async def test_shutdown_with_no_active_app_does_not_raise(self) -> None:
+        """Calling shutdown when nothing is active is a safe no-op."""
+        await mcp.shutdown_active_asgi_app()
+        assert mcp.get_active_asgi_app() is None
+
+
+# ---------------------------------------------------------------------------
+# 10. rebuild_and_activate() makes hot-reloaded tools actually live at /mcp
+# ---------------------------------------------------------------------------
+
+
+class TestRebuildAndActivate:
+    """rebuild_and_activate() rebuilds the MCP server AND swaps it into the live mount."""
+
+    async def test_rebuild_and_activate_returns_fresh_server(self) -> None:
+        """rebuild_and_activate() rebuilds the module-level FastMCP server."""
+        registry_v1 = _make_registry([_make_pai_tool("old_tool")])
+        server_v1 = build_mcp_server(registry_v1)
+        await mcp.activate(server_v1)
+
+        try:
+            registry_v2 = _make_registry([_make_pai_tool("new_tool")])
+            server_v2 = await mcp.rebuild_and_activate(registry_v2)
+
+            assert server_v2 is not server_v1
+            assert get_mcp_server() is server_v2
+        finally:
+            await mcp.shutdown_active_asgi_app()
+
+    async def test_rebuild_and_activate_updates_active_asgi_app(self) -> None:
+        """The active ASGI app after rebuild wraps the new server, not the old one."""
+        registry_v1 = _make_registry([_make_pai_tool("old_tool")])
+        server_v1 = build_mcp_server(registry_v1)
+        first_active = await mcp.activate(server_v1)
+
+        try:
+            registry_v2 = _make_registry([_make_pai_tool("new_tool")])
+            await mcp.rebuild_and_activate(registry_v2)
+
+            assert mcp.get_active_asgi_app() is not None
+            assert mcp.get_active_asgi_app() is not first_active
+        finally:
+            await mcp.shutdown_active_asgi_app()
+
+    async def test_rebuild_and_activate_serves_new_tools_over_http(self) -> None:
+        """After rebuild_and_activate(), the persistent /mcp mount serves the NEW tools.
+
+        This is the end-to-end proof that a hot-reload actually changes
+        what MCP clients see -- not just an inert module-level reference.
+        """
+        registry_v1 = _make_registry([_make_pai_tool("old_tool", "Old tool")])
+        server_v1 = build_mcp_server(registry_v1)
+        await mcp.activate(server_v1)
+
+        app = FastAPI()
+        app.mount("/mcp", mcp.get_mcp_mount_app())
+
+        from fastmcp import Client
+        from fastmcp.client.transports import StreamableHttpTransport
+
+        def factory(**kwargs: Any) -> httpx.AsyncClient:
+            return httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app),
+                base_url="http://test",
+                **kwargs,
+            )
+
+        try:
+            registry_v2 = _make_registry([_make_pai_tool("new_tool", "New tool")])
+            await mcp.rebuild_and_activate(registry_v2)
+
+            transport = StreamableHttpTransport(
+                url="http://test/mcp/", httpx_client_factory=factory
+            )
+            client = Client(transport)
+            async with client:
+                tools = await client.list_tools()
+        finally:
+            await mcp.shutdown_active_asgi_app()
+
+        names = {t.name for t in tools}
+        assert names == {"new_tool"}
+        assert "old_tool" not in names

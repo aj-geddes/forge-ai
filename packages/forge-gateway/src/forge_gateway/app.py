@@ -107,12 +107,14 @@ async def _rebuild_tool_surface(config: object, agent: object | None) -> None:
         except Exception:
             logger.exception("Failed to rebuild tool surface during config reload")
 
-    # 2. Rebuild the MCP server with updated tools
+    # 2. Rebuild the MCP server with updated tools and activate it at /mcp,
+    # so the live endpoint actually serves the new tool surface (not just an
+    # inert module-level reference -- see routes.mcp.rebuild_and_activate).
     if agent is not None:
         try:
             registry = getattr(agent, "_registry", None)
             if registry is not None:
-                mcp.rebuild_mcp_server(registry)
+                await mcp.rebuild_and_activate(registry)
                 logger.info("MCP server rebuilt with %d tools", registry.tool_count)
         except Exception:
             logger.exception("Failed to rebuild MCP server during config reload")
@@ -199,12 +201,21 @@ def _init_security_gate(config: object | None) -> None:
         set_security_gate(None)
 
 
-def _init_mcp_server(app: FastAPI, agent: object, config: object) -> None:
-    """Build the FastMCP server from the agent's tool registry and mount it.
+async def _init_mcp_server(agent: object, config: object) -> None:
+    """Build the FastMCP server from the agent's tool registry and activate it.
 
-    When the agent has an initialized tool registry, this creates an MCP
-    server exposing those tools and mounts its ASGI app at ``/mcp``.
-    Failures are logged but do not prevent the gateway from starting.
+    The ``/mcp`` mount itself is created once, in :func:`create_app`, and
+    stays mounted for the process lifetime (see
+    ``mcp.get_mcp_mount_app``); this function only builds a FastMCP server
+    from the current tool registry and makes it the live app that mount
+    dispatches to.
+
+    Activation starts the FastMCP ASGI app's own lifespan, which is
+    required for its streamable-HTTP session manager to work at all --
+    without it, every call to ``/mcp`` fails with "Task group is not
+    initialized" because the parent ASGI server never ran FastMCP's
+    lifespan on its behalf. Failures are logged but do not prevent the
+    gateway from starting.
     """
     try:
         from forge_agent import ForgeAgent
@@ -215,9 +226,8 @@ def _init_mcp_server(app: FastAPI, agent: object, config: object) -> None:
 
         server_name = config.metadata.name or "Forge AI"
         mcp_server = mcp.build_mcp_server(agent.registry, name=server_name)
-        mcp_app = mcp.get_mcp_asgi_app(mcp_server)
-        app.mount("/mcp", mcp_app, name="mcp")
-        logger.info("MCP server mounted at /mcp with %d tools", agent.registry.tool_count)
+        await mcp.activate(mcp_server)
+        logger.info("MCP server active at /mcp with %d tools", agent.registry.tool_count)
     except ImportError:
         logger.debug("MCP dependencies not available, skipping MCP server")
     except Exception:
@@ -262,8 +272,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 conversational.set_config(config)
                 a2a.set_agent(agent)
 
-                # Build MCP server from the agent's tool registry
-                _init_mcp_server(app, agent, config)
+                # Build MCP server from the agent's tool registry and
+                # activate it at the persistent /mcp mount.
+                await _init_mcp_server(agent, config)
 
                 logger.info("Agent initialized successfully")
             except ImportError:
@@ -310,6 +321,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 watcher.stop()
             except Exception:
                 logger.exception("Error stopping config watcher")
+        try:
+            await mcp.shutdown_active_asgi_app()
+        except Exception:
+            logger.exception("Error stopping MCP server")
         health.set_ready(False)
         health.set_started(False)
         health.reset_components()
@@ -334,6 +349,79 @@ def _resolve_cors_origins() -> list[str]:
 
     logger.warning("CORS allowed_origins not configured — defaulting to ['*'] (dev mode)")
     return ["*"]
+
+
+# The Docker image copies the built UI to this fixed location (see
+# Dockerfile). Kept as a module attribute (rather than inlined) so tests can
+# monkeypatch it without touching the real filesystem.
+_DOCKER_STATIC_DIR = Path("/app/static")
+
+
+def _packages_dir() -> Path:
+    """The workspace ``packages/`` directory (parent of this package)."""
+    # .../packages/forge-gateway/src/forge_gateway/app.py -> packages/
+    return Path(__file__).parent.parent.parent.parent
+
+
+def _resolve_static_dir() -> Path | None:
+    """Resolve the directory containing the built frontend SPA, if any.
+
+    Checked in order:
+
+    1. ``/app/static`` -- the Docker image location (UI copied at build
+       time; see ``Dockerfile``). Always takes priority so the Docker path
+       is never degraded.
+    2. ``packages/forge-ui/dist`` -- the local ``npm run build`` output,
+       so the gateway serves the UI when run directly (outside Docker)
+       during development.
+    3. ``packages/static`` -- a legacy location, kept for backward
+       compatibility with any manual copy.
+
+    Returns:
+        The first candidate directory that exists, or ``None`` if no
+        built UI is found anywhere.
+    """
+    packages_dir = _packages_dir()
+    candidates = [
+        _DOCKER_STATIC_DIR,
+        packages_dir / "forge-ui" / "dist",
+        packages_dir / "static",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _safe_static_path(static_dir: Path, requested_path: str) -> Path | None:
+    """Resolve *requested_path* under *static_dir*, refusing any escape.
+
+    ``Path(static_dir) / requested_path`` alone is not safe to serve
+    directly: ``..`` segments can walk out of ``static_dir``, and joining
+    with an *absolute* path silently discards the base entirely in
+    pathlib (``Path("/a/b") / "/etc/passwd" == Path("/etc/passwd")``),
+    which is a classic path-traversal footgun for user-supplied path
+    segments such as FastAPI's ``{path:path}`` converter.
+
+    Args:
+        static_dir: The directory files must be contained within.
+        requested_path: The user-supplied path segment (untrusted).
+
+    Returns:
+        The resolved, existing file path, only when it is a regular file
+        genuinely contained within *static_dir*; otherwise ``None``.
+    """
+    try:
+        resolved_static_dir = static_dir.resolve()
+        candidate = (static_dir / requested_path).resolve()
+    except OSError:
+        return None
+
+    if not candidate.is_relative_to(resolved_static_dir):
+        return None
+    if not candidate.is_file():
+        return None
+    return candidate
 
 
 def create_app() -> FastAPI:
@@ -364,13 +452,16 @@ def create_app() -> FastAPI:
     app.include_router(metrics.router)
     app.include_router(admin.router)
 
-    # Serve frontend SPA if static directory exists
-    static_dir = Path(__file__).parent.parent.parent.parent / "static"
-    if not static_dir.exists():
-        # Also check for an absolute /app/static path (Docker)
-        static_dir = Path("/app/static")
+    # MCP tool surface — mounted once, for the process lifetime. It starts
+    # out dispatching to nothing (503) until the lifespan activates a real
+    # FastMCP server; see mcp.get_mcp_mount_app / _init_mcp_server /
+    # mcp.rebuild_and_activate.
+    app.mount("/mcp", mcp.get_mcp_mount_app(), name="mcp")
 
-    if static_dir.exists():
+    # Serve frontend SPA if a built UI directory can be found
+    static_dir = _resolve_static_dir()
+
+    if static_dir is not None:
         app.mount("/assets", StaticFiles(directory=str(static_dir / "assets")), name="assets")
 
         # SPA catch-all: serve index.html for client-side routes
@@ -382,9 +473,9 @@ def create_app() -> FastAPI:
         @app.get("/{path:path}", response_model=None)
         async def spa_fallback(request: Request, path: str) -> FileResponse | JSONResponse:
             """Serve index.html for SPA client-side routes, static files, or 404."""
-            # Serve actual static files if they exist
-            static_file = static_dir / path
-            if static_file.is_file():
+            # Serve actual static files if they exist and stay within static_dir
+            static_file = _safe_static_path(static_dir, path)
+            if static_file is not None:
                 return FileResponse(str(static_file))
             # Serve index.html for known SPA routes (no-cache so deploys take effect)
             if path in spa_routes:
@@ -396,5 +487,13 @@ def create_app() -> FastAPI:
             return JSONResponse({"detail": "Not Found"}, status_code=404)
 
         logger.info("Serving UI from %s", static_dir)
+    else:
+        logger.warning(
+            "No built frontend UI found (checked %s and %s) — the UI will not be "
+            "served. Run `npm run build` in packages/forge-ui for local "
+            "development, or use the Docker image.",
+            _DOCKER_STATIC_DIR,
+            _packages_dir() / "forge-ui" / "dist",
+        )
 
     return app

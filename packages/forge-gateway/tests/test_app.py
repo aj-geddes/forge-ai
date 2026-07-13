@@ -234,6 +234,31 @@ class TestConfigWatcherShutdown:
 
             mock_watcher.stop.assert_called_once()
 
+    async def test_shutdown_tolerates_mcp_shutdown_failure(
+        self,
+        mock_config: MagicMock,
+        mock_watcher: MagicMock,
+        config_file: Path,
+    ) -> None:
+        """Shutdown should not raise if stopping the active MCP app fails."""
+        app = FastAPI(lifespan=lifespan)
+
+        with (
+            patch.dict("os.environ", {"FORGE_CONFIG_PATH": str(config_file)}),
+            patch("forge_config.load_config", return_value=mock_config),
+            patch("forge_config.ConfigWatcher", return_value=mock_watcher),
+            patch(
+                "forge_gateway.app.mcp.shutdown_active_asgi_app",
+                new_callable=AsyncMock,
+                side_effect=RuntimeError("MCP shutdown failed"),
+            ),
+        ):
+            # Should not raise despite mcp.shutdown_active_asgi_app() failure
+            async with lifespan(app):
+                pass
+
+            assert health._ready is False
+
 
 # ---------------------------------------------------------------------------
 # 3. App starts successfully even if ConfigWatcher fails to start
@@ -702,13 +727,18 @@ class TestRebuildToolSurface:
         mock_agent = MagicMock()
         mock_agent._registry = mock_registry
 
-        with patch("forge_gateway.app.mcp"):
+        with patch("forge_gateway.app.mcp", autospec=True):
             await _rebuild_tool_surface(config, mock_agent)
 
         mock_registry.build_and_swap.assert_awaited_once_with(config)
 
-    async def test_rebuild_calls_rebuild_mcp_server(self) -> None:
-        """_rebuild_tool_surface should rebuild the MCP server after tool swap."""
+    async def test_rebuild_calls_rebuild_and_activate(self) -> None:
+        """_rebuild_tool_surface should rebuild AND activate the MCP server.
+
+        Activation (not just rebuild_mcp_server) is required so hot-reloaded
+        tools are actually served at the live /mcp mount, not just recorded
+        in an inert module-level reference.
+        """
         from forge_config.schema import ForgeConfig
 
         config = ForgeConfig()
@@ -719,10 +749,10 @@ class TestRebuildToolSurface:
         mock_agent = MagicMock()
         mock_agent._registry = mock_registry
 
-        with patch("forge_gateway.app.mcp") as mock_mcp_module:
+        with patch("forge_gateway.app.mcp", autospec=True) as mock_mcp_module:
             await _rebuild_tool_surface(config, mock_agent)
 
-        mock_mcp_module.rebuild_mcp_server.assert_called_once_with(mock_registry)
+        mock_mcp_module.rebuild_and_activate.assert_awaited_once_with(mock_registry)
 
     async def test_rebuild_skips_when_no_agent(self) -> None:
         """_rebuild_tool_surface should be a no-op when agent is None."""
@@ -730,20 +760,20 @@ class TestRebuildToolSurface:
 
         config = ForgeConfig()
 
-        with patch("forge_gateway.app.mcp") as mock_mcp_module:
+        with patch("forge_gateway.app.mcp", autospec=True) as mock_mcp_module:
             # Should not raise
             await _rebuild_tool_surface(config, None)
 
-        mock_mcp_module.rebuild_mcp_server.assert_not_called()
+        mock_mcp_module.rebuild_and_activate.assert_not_called()
 
     async def test_rebuild_skips_when_config_not_forge_config(self) -> None:
         """_rebuild_tool_surface should skip when config is not a ForgeConfig."""
         mock_agent = MagicMock()
 
-        with patch("forge_gateway.app.mcp") as mock_mcp_module:
+        with patch("forge_gateway.app.mcp", autospec=True) as mock_mcp_module:
             await _rebuild_tool_surface("not-a-config", mock_agent)
 
-        mock_mcp_module.rebuild_mcp_server.assert_not_called()
+        mock_mcp_module.rebuild_and_activate.assert_not_called()
 
     async def test_rebuild_handles_build_and_swap_failure(self) -> None:
         """_rebuild_tool_surface should log but not raise on build_and_swap failure."""
@@ -756,12 +786,12 @@ class TestRebuildToolSurface:
         mock_agent = MagicMock()
         mock_agent._registry = mock_registry
 
-        with patch("forge_gateway.app.mcp") as mock_mcp_module:
+        with patch("forge_gateway.app.mcp", autospec=True) as mock_mcp_module:
             # Should not raise
             await _rebuild_tool_surface(config, mock_agent)
 
         # MCP rebuild should still be attempted even if build_and_swap fails
-        mock_mcp_module.rebuild_mcp_server.assert_called_once_with(mock_registry)
+        mock_mcp_module.rebuild_and_activate.assert_awaited_once_with(mock_registry)
 
     async def test_rebuild_handles_mcp_rebuild_failure(self) -> None:
         """_rebuild_tool_surface should log but not raise on MCP rebuild failure."""
@@ -775,8 +805,8 @@ class TestRebuildToolSurface:
         mock_agent = MagicMock()
         mock_agent._registry = mock_registry
 
-        with patch("forge_gateway.app.mcp") as mock_mcp_module:
-            mock_mcp_module.rebuild_mcp_server.side_effect = RuntimeError("MCP failed")
+        with patch("forge_gateway.app.mcp", autospec=True) as mock_mcp_module:
+            mock_mcp_module.rebuild_and_activate.side_effect = RuntimeError("MCP failed")
             # Should not raise
             await _rebuild_tool_surface(config, mock_agent)
 
@@ -789,10 +819,10 @@ class TestRebuildToolSurface:
         config = ForgeConfig()
         mock_agent = MagicMock(spec=[])  # No attributes at all
 
-        with patch("forge_gateway.app.mcp") as mock_mcp_module:
+        with patch("forge_gateway.app.mcp", autospec=True) as mock_mcp_module:
             await _rebuild_tool_surface(config, mock_agent)
 
-        mock_mcp_module.rebuild_mcp_server.assert_not_called()
+        mock_mcp_module.rebuild_and_activate.assert_not_called()
 
 
 class TestScheduleToolRebuild:
@@ -807,7 +837,7 @@ class TestScheduleToolRebuild:
         mock_agent._registry = AsyncMock()
         mock_agent._registry.build_and_swap.return_value = False
 
-        with patch("forge_gateway.app.mcp"):
+        with patch("forge_gateway.app.mcp", autospec=True):
             # We're in an async test, so a loop is running
             _schedule_tool_rebuild(config, mock_agent)
 
@@ -1039,3 +1069,281 @@ class TestVersionReportedFromConfigMetadata:
                 client = TestClient(app)
                 response = client.get("/health/ready")
                 assert response.json()["version"] == "3.4.5"
+
+
+# ---------------------------------------------------------------------------
+# 10. Static directory resolution is robust across Docker and local dev
+# ---------------------------------------------------------------------------
+
+
+class TestResolveStaticDir:
+    """_resolve_static_dir() finds the built UI in Docker, local dev, or nowhere."""
+
+    def test_prefers_docker_static_dir_when_present(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The Docker-image location (/app/static) takes priority when it exists."""
+        import forge_gateway.app as app_module
+
+        docker_dir = tmp_path / "app_static"
+        docker_dir.mkdir()
+        monkeypatch.setattr(app_module, "_DOCKER_STATIC_DIR", docker_dir)
+
+        assert app_module._resolve_static_dir() == docker_dir
+
+    def test_falls_back_to_forge_ui_dist_when_no_docker_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Outside Docker, the local `npm run build` output (forge-ui/dist) is used."""
+        import forge_gateway.app as app_module
+
+        missing_docker = tmp_path / "no-such-docker-static"
+        packages_root = tmp_path / "packages"
+        ui_dist = packages_root / "forge-ui" / "dist"
+        ui_dist.mkdir(parents=True)
+
+        monkeypatch.setattr(app_module, "_DOCKER_STATIC_DIR", missing_docker)
+        monkeypatch.setattr(app_module, "_packages_dir", lambda: packages_root)
+
+        assert app_module._resolve_static_dir() == ui_dist
+
+    def test_falls_back_to_legacy_static_dir(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A legacy manually-populated packages/static dir is still honored."""
+        import forge_gateway.app as app_module
+
+        missing_docker = tmp_path / "no-such-docker-static"
+        packages_root = tmp_path / "packages"
+        legacy_static = packages_root / "static"
+        legacy_static.mkdir(parents=True)
+
+        monkeypatch.setattr(app_module, "_DOCKER_STATIC_DIR", missing_docker)
+        monkeypatch.setattr(app_module, "_packages_dir", lambda: packages_root)
+
+        assert app_module._resolve_static_dir() == legacy_static
+
+    def test_returns_none_when_nothing_found(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When no built UI exists anywhere, resolution returns None (not an error)."""
+        import forge_gateway.app as app_module
+
+        missing_docker = tmp_path / "no-such-docker-static"
+        empty_packages_root = tmp_path / "packages-empty"
+
+        monkeypatch.setattr(app_module, "_DOCKER_STATIC_DIR", missing_docker)
+        monkeypatch.setattr(app_module, "_packages_dir", lambda: empty_packages_root)
+
+        assert app_module._resolve_static_dir() is None
+
+    def test_create_app_logs_clearly_when_no_ui_found(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """create_app() logs a clear, actionable warning when no built UI is found."""
+        import logging
+
+        import forge_gateway.app as app_module
+
+        monkeypatch.setattr(app_module, "_resolve_static_dir", lambda: None)
+
+        with (
+            patch.dict("os.environ", {"FORGE_CONFIG_PATH": "nonexistent.yaml"}),
+            caplog.at_level(logging.WARNING, logger="forge.gateway"),
+        ):
+            create_app()
+
+        assert any("No built frontend UI found" in r.message for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# 11. SPA fallback cannot escape the static directory (path traversal)
+# ---------------------------------------------------------------------------
+
+
+class TestSafeStaticPath:
+    """_safe_static_path() refuses to resolve outside of the static directory."""
+
+    def test_serves_file_within_static_dir(self, tmp_path: Path) -> None:
+        from forge_gateway.app import _safe_static_path
+
+        (tmp_path / "app.js").write_text("console.log(1);")
+
+        result = _safe_static_path(tmp_path, "app.js")
+
+        assert result == (tmp_path / "app.js").resolve()
+
+    def test_serves_file_in_nested_subdirectory(self, tmp_path: Path) -> None:
+        from forge_gateway.app import _safe_static_path
+
+        assets = tmp_path / "assets"
+        assets.mkdir()
+        (assets / "app.js").write_text("console.log(1);")
+
+        result = _safe_static_path(tmp_path, "assets/app.js")
+
+        assert result == (assets / "app.js").resolve()
+
+    def test_blocks_dotdot_traversal_outside_static_dir(self, tmp_path: Path) -> None:
+        """A ``../`` sequence that would escape the static dir is refused."""
+        from forge_gateway.app import _safe_static_path
+
+        secret = tmp_path / "secret.txt"
+        secret.write_text("top secret")
+        static_dir = tmp_path / "static"
+        static_dir.mkdir()
+
+        result = _safe_static_path(static_dir, "../secret.txt")
+
+        assert result is None
+
+    def test_blocks_deeply_nested_dotdot_traversal(self, tmp_path: Path) -> None:
+        from forge_gateway.app import _safe_static_path
+
+        secret = tmp_path / "secret.txt"
+        secret.write_text("top secret")
+        static_dir = tmp_path / "static"
+        static_dir.mkdir()
+
+        result = _safe_static_path(static_dir, "../../../../../../secret.txt")
+
+        assert result is None
+
+    def test_blocks_absolute_path_escape(self, tmp_path: Path) -> None:
+        """pathlib silently discards the base when joined with an absolute path;
+        this must not translate into serving an arbitrary absolute path."""
+        from forge_gateway.app import _safe_static_path
+
+        outside_file = tmp_path / "outside.txt"
+        outside_file.write_text("do not serve me")
+        static_dir = tmp_path / "static"
+        static_dir.mkdir()
+
+        result = _safe_static_path(static_dir, str(outside_file))
+
+        assert result is None
+
+    def test_returns_none_for_missing_file(self, tmp_path: Path) -> None:
+        from forge_gateway.app import _safe_static_path
+
+        assert _safe_static_path(tmp_path, "does-not-exist.html") is None
+
+    def test_returns_none_for_directory(self, tmp_path: Path) -> None:
+        from forge_gateway.app import _safe_static_path
+
+        sub = tmp_path / "sub"
+        sub.mkdir()
+
+        assert _safe_static_path(tmp_path, "sub") is None
+
+
+class TestSpaFallbackPathTraversalIntegration:
+    """The real /{path} route wired in create_app() refuses traversal attempts."""
+
+    def _build_app_with_static_dir(
+        self, static_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> FastAPI:
+        import forge_gateway.app as app_module
+
+        (static_dir / "index.html").write_text("<html>SPA shell</html>")
+        (static_dir / "assets").mkdir()
+        (static_dir / "assets" / "app.js").write_text("console.log('ok');")
+
+        monkeypatch.setattr(app_module, "_resolve_static_dir", lambda: static_dir)
+
+        with patch.dict("os.environ", {"FORGE_CONFIG_PATH": "nonexistent.yaml"}):
+            return create_app()
+
+    def test_legitimate_asset_is_served(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        static_dir = tmp_path / "static"
+        static_dir.mkdir()
+        app = self._build_app_with_static_dir(static_dir, monkeypatch)
+        client = TestClient(app)
+
+        resp = client.get("/assets/app.js")
+
+        assert resp.status_code == 200
+        assert "console.log" in resp.text
+
+    def test_top_level_static_file_served_via_catch_all(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A real file directly under static_dir (e.g. favicon.svg) is served
+        through the SPA catch-all route's _safe_static_path branch, not just
+        via the separate /assets mount."""
+        static_dir = tmp_path / "static"
+        static_dir.mkdir()
+        app = self._build_app_with_static_dir(static_dir, monkeypatch)
+        (static_dir / "favicon.svg").write_text("<svg>fav</svg>")
+        client = TestClient(app)
+
+        resp = client.get("/favicon.svg")
+
+        assert resp.status_code == 200
+        assert "fav" in resp.text
+
+    def test_encoded_dotdot_traversal_does_not_leak_file_contents(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A percent-encoded ``..`` segment must not reach a file outside static_dir."""
+        secret = tmp_path / "secret.txt"
+        secret.write_text("do-not-serve-me")
+        static_dir = tmp_path / "static"
+        static_dir.mkdir()
+        app = self._build_app_with_static_dir(static_dir, monkeypatch)
+        client = TestClient(app)
+
+        resp = client.get("/%2e%2e/secret.txt")
+
+        assert "do-not-serve-me" not in resp.text
+
+    def test_unknown_path_returns_404(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        static_dir = tmp_path / "static"
+        static_dir.mkdir()
+        app = self._build_app_with_static_dir(static_dir, monkeypatch)
+        client = TestClient(app)
+
+        resp = client.get("/this-does-not-exist-anywhere")
+
+        assert resp.status_code == 404
+
+    def test_known_spa_route_serves_index(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        static_dir = tmp_path / "static"
+        static_dir.mkdir()
+        app = self._build_app_with_static_dir(static_dir, monkeypatch)
+        client = TestClient(app)
+
+        resp = client.get("/config")
+
+        assert resp.status_code == 200
+        assert "SPA shell" in resp.text
+
+
+# ---------------------------------------------------------------------------
+# 12. The /mcp mount is always present, regardless of agent availability
+# ---------------------------------------------------------------------------
+
+
+class TestMCPMountAlwaysPresent:
+    """The persistent /mcp dispatcher is mounted in create_app() unconditionally.
+
+    This ensures unauthenticated/unavailable-agent requests get a clean,
+    auth-gated 401/503 response rather than a bare 404 that leaks whether
+    MCP is configured at all, and means rebuilds never need to re-mount
+    routes on a running app (which FastAPI does not support).
+    """
+
+    def test_mcp_mount_present_without_agent(self) -> None:
+        with patch.dict("os.environ", {"FORGE_CONFIG_PATH": "nonexistent.yaml"}):
+            app = create_app()
+
+        mount_names = [r.name for r in app.routes if hasattr(r, "name")]
+        assert "mcp" in mount_names

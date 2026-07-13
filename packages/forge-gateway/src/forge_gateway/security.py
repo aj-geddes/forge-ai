@@ -175,3 +175,17 @@ async def security_dependency(
     ``CallerIdentity``.
     """
     return await require_security(request, bearer)
+
+
+async def enforce_asgi_security(request: Request) -> CallerIdentity:
+    """Run the SecurityGate pipeline for a request outside FastAPI's DI system.
+
+    Equivalent to :func:`security_dependency`, but callable directly from a
+    raw ASGI application that bypasses FastAPI's routing/``Depends``
+    machinery entirely -- notably a mounted sub-application such as the MCP
+    server at ``/mcp``. ``Depends()`` resolution only happens for routes
+    registered on a FastAPI router, so a mounted ASGI app must resolve the
+    bearer token itself and call the same underlying pipeline.
+    """
+    bearer = await _bearer_scheme(request)
+    return await require_security(request, bearer)

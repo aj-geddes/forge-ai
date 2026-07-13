@@ -28,6 +28,7 @@ from forge_gateway.security import (
     _extract_caller_id,
     _extract_origin,
     _route_name,
+    enforce_asgi_security,
     require_security,
     set_security_gate,
 )
@@ -1477,3 +1478,59 @@ class TestCallerIdentity:
         ci = CallerIdentity(identity="x")
         with pytest.raises(AttributeError):
             ci.identity = "y"  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# 18. enforce_asgi_security -- SecurityGate enforcement outside FastAPI's DI
+#
+# Raw ASGI mounts (e.g. the MCP server mounted at /mcp) bypass FastAPI's
+# routing and Depends() machinery entirely, so they can't use
+# ``security_dependency`` directly. ``enforce_asgi_security`` gives such
+# mounts the exact same enforcement by resolving the bearer token itself
+# and delegating to ``require_security``.
+# ---------------------------------------------------------------------------
+
+
+class TestEnforceAsgiSecurity:
+    """Direct tests for ``enforce_asgi_security``."""
+
+    async def test_dev_mode_allows_without_credentials(self) -> None:
+        set_security_gate(None)
+        result = await enforce_asgi_security(_mock_request())
+        assert result.dev_mode is True
+
+    async def test_production_missing_identity_raises_401(self) -> None:
+        gate = AsyncMock(spec=SecurityGate)
+        set_security_gate(gate)
+        try:
+            with pytest.raises(HTTPException) as exc_info:
+                await enforce_asgi_security(_mock_request())
+            assert exc_info.value.status_code == 401
+        finally:
+            set_security_gate(None)
+
+    async def test_production_bearer_header_allowed(self) -> None:
+        gate = AsyncMock(spec=SecurityGate)
+        gate.return_value = GateResult(
+            allowed=True, identity="mcp-caller", reason="all checks passed"
+        )
+        set_security_gate(gate)
+        try:
+            req = _mock_request(headers={"Authorization": "Bearer mcp-caller"})
+            result = await enforce_asgi_security(req)
+            assert result.identity == "mcp-caller"
+            gate.assert_called_once()
+        finally:
+            set_security_gate(None)
+
+    async def test_production_gate_denied_raises_403(self) -> None:
+        gate = AsyncMock(spec=SecurityGate)
+        gate.return_value = GateResult(allowed=False, identity="caller", reason="policy denied")
+        set_security_gate(gate)
+        try:
+            req = _mock_request(headers={"Authorization": "Bearer caller"})
+            with pytest.raises(HTTPException) as exc_info:
+                await enforce_asgi_security(req)
+            assert exc_info.value.status_code == 403
+        finally:
+            set_security_gate(None)
