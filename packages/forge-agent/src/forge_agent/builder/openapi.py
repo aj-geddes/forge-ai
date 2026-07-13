@@ -54,9 +54,10 @@ class OpenAPIToolBuilder:
     async def build(self) -> list[Tool[None]]:
         """Build tool definitions from the OpenAPI spec.
 
-        Fetches/reads the spec, parses operations, applies filters,
-        and generates PydanticAI Tool objects. Auth secrets are resolved
-        at build time so that failures surface early.
+        Fetches/reads the spec, resolves local ``$ref`` pointers, parses
+        operations, applies filters, and generates PydanticAI Tool objects.
+        Auth secrets are resolved at build time so that failures surface
+        early.
 
         Returns:
             List of PydanticAI Tool objects, one per matching operation.
@@ -66,6 +67,7 @@ class OpenAPIToolBuilder:
                 cannot be resolved.
         """
         spec = await self._load_spec()
+        spec = _resolve_spec_refs(spec)
         base_url = self._extract_base_url(spec)
         operations = self._extract_operations(spec)
         filtered = self._filter_operations(operations)
@@ -74,7 +76,16 @@ class OpenAPIToolBuilder:
         return self._build_tools(filtered, base_url, auth_headers)
 
     async def _load_spec(self) -> dict[str, Any]:
-        """Load the OpenAPI spec from URL, local path, or inline spec.
+        """Load the OpenAPI spec from inline content, URL, or local path.
+
+        The documented ``spec`` field accepts either inline JSON/YAML spec
+        content, or a URL/path that is auto-detected -- forge-config's
+        ``OpenAPISource`` validator already promotes a URL-shaped ``spec``
+        value into ``source.url``, and any other ``spec`` value into
+        ``source.path`` (for the common "spec is actually a file path"
+        case). Inline *content* (rather than a path) is detected here via
+        ``_looks_like_inline_spec`` and parsed directly, so it is never
+        mistakenly opened as a file.
 
         Returns:
             The parsed OpenAPI spec as a dict.
@@ -84,6 +95,9 @@ class OpenAPIToolBuilder:
             httpx.HTTPStatusError: If fetching a remote spec fails.
         """
         source = self._source
+
+        if source.spec is not None and _looks_like_inline_spec(source.spec):
+            return _parse_spec_content(source.spec)
 
         if source.url:
             return await self._fetch_remote_spec(source.url)
@@ -97,6 +111,10 @@ class OpenAPIToolBuilder:
     async def _fetch_remote_spec(self, url: str) -> dict[str, Any]:
         """Fetch an OpenAPI spec from a remote URL.
 
+        The docs state the URL may point to a JSON or YAML spec. JSON is
+        tried first (the common case); if the body isn't valid JSON, it is
+        parsed as YAML.
+
         Args:
             url: The URL to fetch the spec from.
 
@@ -109,14 +127,17 @@ class OpenAPIToolBuilder:
         try:
             response = await client.get(url, timeout=30.0)
             response.raise_for_status()
-            result: dict[str, Any] = response.json()
-            return result
+            try:
+                result: dict[str, Any] = response.json()
+                return result
+            except (json.JSONDecodeError, ValueError):
+                return _parse_spec_content(response.text)
         finally:
             if should_close:
                 await client.aclose()
 
     def _read_local_spec(self, path: str) -> dict[str, Any]:
-        """Read an OpenAPI spec from a local file.
+        """Read an OpenAPI spec from a local file (JSON or YAML).
 
         Args:
             path: Path to the spec file (JSON or YAML).
@@ -124,20 +145,7 @@ class OpenAPIToolBuilder:
         Returns:
             The parsed spec dict.
         """
-        file_path = Path(path)
-        content = file_path.read_text()
-
-        if file_path.suffix in (".yaml", ".yml"):
-            try:
-                import yaml
-
-                parsed: dict[str, Any] = yaml.safe_load(content)
-                return parsed
-            except ImportError:
-                msg = "PyYAML is required to parse YAML specs"
-                raise ImportError(msg)  # noqa: B904
-        loaded: dict[str, Any] = json.loads(content)
-        return loaded
+        return _parse_spec_content(Path(path).read_text())
 
     def _extract_base_url(self, spec: dict[str, Any]) -> str:
         """Extract the base URL from the spec's servers list.
@@ -308,6 +316,143 @@ class OpenAPIToolBuilder:
             tools.append(tool)
 
         return tools
+
+
+def _looks_like_inline_spec(text: str) -> bool:
+    """Heuristically detect inline JSON/YAML spec *content* vs. a path/URL.
+
+    A URL is never mistaken for inline content (checked and rejected up
+    front; forge-config's validator already promotes URL-shaped ``spec``
+    values into ``source.url`` before this is even consulted). Otherwise,
+    content is recognized by syntax no valid file path can contain: a
+    JSON object (``{``), any embedded newline (multi-line YAML/JSON --
+    YAML dumps commonly sort keys alphabetically, so an ``openapi:`` key
+    is not reliably the first line), or a single-line document starting
+    with an OpenAPI/Swagger YAML root key (``openapi:``/``swagger:``).
+
+    Args:
+        text: The raw ``spec`` field value.
+
+    Returns:
+        True if `text` looks like inline spec content rather than a
+        file path.
+    """
+    stripped = text.strip()
+    if not stripped or stripped.startswith(("http://", "https://")):
+        return False
+    if stripped.startswith("{") or "\n" in stripped:
+        return True
+    return stripped.lower().startswith(("openapi:", "swagger:"))
+
+
+def _parse_spec_content(content: str) -> dict[str, Any]:
+    """Parse spec content that may be JSON or YAML.
+
+    Tries JSON first (stricter, and the common case); falls back to YAML
+    (a superset that can also parse JSON documents) so both local files
+    and remote/inline content are handled uniformly regardless of a
+    ``.yaml``/``.yml`` suffix or content-type.
+
+    Args:
+        content: The raw spec text.
+
+    Returns:
+        The parsed spec dict.
+
+    Raises:
+        ImportError: If the content isn't valid JSON and PyYAML isn't
+            installed to fall back to.
+    """
+    try:
+        loaded: dict[str, Any] = json.loads(content)
+        return loaded
+    except json.JSONDecodeError:
+        pass
+
+    try:
+        import yaml
+    except ImportError:
+        msg = "PyYAML is required to parse YAML/inline OpenAPI specs"
+        raise ImportError(msg)  # noqa: B904
+
+    parsed: dict[str, Any] = yaml.safe_load(content)
+    return parsed
+
+
+def _resolve_spec_refs(spec: dict[str, Any]) -> dict[str, Any]:
+    """Recursively resolve local ``$ref`` pointers (``#/components/...``).
+
+    OpenAPI specs (like the Swagger Petstore spec the docs cite) commonly
+    factor shared parameters, request bodies, and schemas into
+    ``components`` and reference them via ``$ref``. Without resolving
+    these, ``$ref``'d parameters/request bodies are silently dropped by
+    operation extraction. Only local (in-document, ``#/...``) refs are
+    resolved; external file/URL refs are left untouched (out of scope for
+    a single-file spec).
+
+    Args:
+        spec: The parsed OpenAPI spec, potentially containing ``$ref`` entries.
+
+    Returns:
+        A new spec tree with all local ``$ref`` occurrences replaced by
+        the objects they point to.
+    """
+    resolved = _resolve_ref_node(spec, spec, frozenset())
+    # The top-level spec document is always a dict; only nested values
+    # walked by `_resolve_ref_node` may be non-dict.
+    assert isinstance(resolved, dict)
+    return resolved
+
+
+def _resolve_ref_node(node: Any, root: dict[str, Any], seen: frozenset[str]) -> Any:
+    """Recursively walk `node`, replacing local ``$ref`` dicts with their targets.
+
+    Args:
+        node: The current node being walked (dict, list, or scalar).
+        root: The full spec document, used to resolve ``#/...`` pointers.
+        seen: The set of ``$ref`` pointers already followed on this path,
+            used to break cycles (e.g. a self-referential schema).
+
+    Returns:
+        The node with all local ``$ref`` occurrences resolved.
+    """
+    if isinstance(node, dict):
+        ref = node.get("$ref")
+        if isinstance(ref, str) and ref.startswith("#/"):
+            if ref in seen:
+                # Cyclic reference: stop recursing to avoid infinite loops.
+                return {}
+            target = _lookup_json_pointer(root, ref)
+            return _resolve_ref_node(target, root, seen | {ref})
+        return {key: _resolve_ref_node(value, root, seen) for key, value in node.items()}
+    if isinstance(node, list):
+        return [_resolve_ref_node(item, root, seen) for item in node]
+    return node
+
+
+def _lookup_json_pointer(root: dict[str, Any], ref: str) -> Any:
+    """Resolve a local JSON pointer such as ``#/components/parameters/PetId``.
+
+    Args:
+        root: The full spec document.
+        ref: A local ``$ref`` string starting with ``#/``.
+
+    Returns:
+        The object at the pointer location.
+
+    Raises:
+        ValueError: If any segment of the pointer cannot be resolved.
+    """
+    parts = ref[2:].split("/")
+    current: Any = root
+    for raw_part in parts:
+        part = raw_part.replace("~1", "/").replace("~0", "~")
+        if isinstance(current, dict) and part in current:
+            current = current[part]
+        else:
+            msg = f"Unresolvable $ref: {ref}"
+            raise ValueError(msg)
+    return current
 
 
 def _sanitize_name(name: str) -> str:

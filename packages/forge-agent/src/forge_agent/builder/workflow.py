@@ -7,12 +7,16 @@ for data binding between steps via output_as and template references.
 from __future__ import annotations
 
 import inspect
+import logging
 import re
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
 from forge_config.schema import ParamType, Workflow, WorkflowStep
 from pydantic_ai.tools import Tool
+from simpleeval import EvalWithCompoundTypes
+
+logger = logging.getLogger(__name__)
 
 # Mapping from ParamType enum to Python annotation types.
 _PARAM_TYPE_MAP: dict[ParamType, type] = {
@@ -124,27 +128,81 @@ def _resolve_template_value(value: Any, context: dict[str, Any]) -> Any:
     return value
 
 
-def _evaluate_condition(condition: str, context: dict[str, Any]) -> bool:
-    """Evaluate a simple condition expression against the workflow context.
+def _build_condition_evaluator(context: Mapping[str, Any]) -> EvalWithCompoundTypes:
+    """Construct a sandboxed expression evaluator bound to a workflow context.
 
-    Supports basic truthy checks by resolving the condition as a template
-    reference. If the resolved value is truthy, returns True.
+    Security model (this is a config-driven expression, never `eval`/`exec`):
+      - Names resolve *only* against a copy of the workflow context (step
+        outputs + input parameters) -- there is no access to Python
+        builtins, imports, or the enclosing process. An unknown name
+        (e.g. ``__import__``, ``os``) raises ``NameNotDefined``.
+      - ``.functions`` is cleared to the empty dict, so *no* function call
+        of any kind is permitted -- not even the compound-type helpers
+        (``list``/``dict``/``set``) that ``EvalWithCompoundTypes`` would
+        otherwise whitelist. Any ``Call`` node raises ``FunctionNotDefined``.
+      - Attribute access (``a.b``) is evaluated via ``simpleeval``'s
+        ``ATTR_INDEX_FALLBACK``: it tries ``getattr`` first, then falls
+        back to ``a["b"]`` -- which is exactly what lets a dotted
+        reference like ``contact.city`` read into the nested-dict workflow
+        context. Attribute names starting with ``__`` (or ``func_``) are
+        rejected unconditionally by simpleeval before any lookup happens,
+        so ``contact.__class__``/``__builtins__``-style escapes raise
+        ``FeatureNotAvailable`` rather than returning anything.
+      - Compound literals (``[...]``, ``{...}``) remain available for
+        membership tests (``status in ["ok", "done"]``) since those are
+        parsed as literal AST nodes, not function calls.
 
     Args:
-        condition: A condition expression (e.g., "step1.success").
-        context: The accumulated workflow context.
+        context: The accumulated workflow context (step outputs + inputs).
 
     Returns:
-        True if the condition is met.
+        A configured evaluator whose ``.eval(expr)`` is safe to call on
+        untrusted, config-supplied expression strings.
     """
-    resolved = _resolve_template_value("{{" + condition + "}}", context)
-    # If not resolved (still contains {{), treat as false.
-    if isinstance(resolved, str) and "{{" in resolved:
+    evaluator = EvalWithCompoundTypes(names=dict(context))
+    evaluator.functions = {}
+    return evaluator
+
+
+def _evaluate_condition(condition: str, context: dict[str, Any]) -> bool:
+    """Evaluate a workflow step ``condition`` as a sandboxed boolean expression.
+
+    Per the documented contract, ``condition`` is "a Python-style expression
+    that must evaluate to true for the step to execute" (e.g.
+    ``"contact.city is not None"``). This evaluates it as a real expression
+    -- comparisons (``==``, ``!=``, ``<``, ``>``, ``in``), boolean operators
+    (``and``/``or``/``not``), and dotted attribute/key access into the
+    context -- using a sandboxed evaluator (see ``_build_condition_evaluator``),
+    never Python's ``eval``/``exec``.
+
+    A bare dotted reference (e.g. ``"contact.city"``) with no comparison is
+    still supported: it evaluates to the referenced value, which is then
+    truthy-checked, preserving the pre-existing behavior.
+
+    Any evaluation failure -- an unresolvable name, a rejected function
+    call, a rejected dunder-attribute access, or a syntax error -- is
+    treated as the condition being unmet (fails closed: the step is
+    skipped rather than the error propagating and the step running with a
+    partially-evaluated or malicious expression).
+
+    Args:
+        condition: A condition expression (e.g., "contact.city is not None").
+        context: The accumulated workflow context (step outputs + inputs).
+
+    Returns:
+        True if the condition safely evaluates to a truthy value.
+    """
+    try:
+        evaluator = _build_condition_evaluator(context)
+        result = evaluator.eval(condition)
+    except Exception:
+        logger.warning(
+            "Workflow condition %r could not be safely evaluated; treating as False",
+            condition,
+            exc_info=True,
+        )
         return False
-    # Truthy check.
-    if isinstance(resolved, str):
-        return resolved.lower() not in ("", "false", "0", "none")
-    return bool(resolved)
+    return bool(result)
 
 
 async def _execute_workflow(

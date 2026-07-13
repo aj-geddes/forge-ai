@@ -11,6 +11,7 @@ import pytest
 from forge_agent.builder.openapi import (
     OpenAPIToolBuilder,
     _resolve_auth_headers,
+    _resolve_spec_refs,
     _sanitize_name,
 )
 from forge_config.exceptions import SecretResolutionError
@@ -1286,3 +1287,210 @@ class TestResolveAuthHeaders:
         resolver = _StubResolver({})
         with pytest.raises(SecretResolutionError, match="MISSING"):
             _resolve_auth_headers(auth, resolver)
+
+
+# ---------------------------------------------------------------------------
+# Test: local $ref resolution (parameters, requestBodies, schemas)
+# ---------------------------------------------------------------------------
+
+
+def _make_petstore_spec_with_refs() -> dict[str, Any]:
+    """A petstore-style spec using $ref for a parameter and a request body.
+
+    Mirrors the shape of the real Swagger Petstore spec the docs cite,
+    where `parameters` and `requestBody` are commonly factored into
+    `components` and referenced via $ref.
+    """
+    return {
+        "openapi": "3.0.0",
+        "info": {"title": "Petstore", "version": "1.0.0"},
+        "servers": [{"url": "https://petstore.example.com/v1"}],
+        "paths": {
+            "/pets/{petId}": {
+                "get": {
+                    "operationId": "getPetById",
+                    "summary": "Find pet by ID",
+                    "tags": ["pets"],
+                    "parameters": [{"$ref": "#/components/parameters/PetIdParam"}],
+                    "responses": {"200": {"description": "OK"}},
+                }
+            },
+            "/pets": {
+                "post": {
+                    "operationId": "addPet",
+                    "summary": "Add a new pet",
+                    "tags": ["pets"],
+                    "requestBody": {"$ref": "#/components/requestBodies/PetBody"},
+                    "responses": {"201": {"description": "Created"}},
+                }
+            },
+        },
+        "components": {
+            "parameters": {
+                "PetIdParam": {
+                    "name": "petId",
+                    "in": "path",
+                    "required": True,
+                    "schema": {"$ref": "#/components/schemas/PetId"},
+                }
+            },
+            "requestBodies": {
+                "PetBody": {
+                    "required": True,
+                    "content": {
+                        "application/json": {"schema": {"$ref": "#/components/schemas/Pet"}}
+                    },
+                }
+            },
+            "schemas": {
+                "PetId": {"type": "integer"},
+                "Pet": {
+                    "type": "object",
+                    "properties": {"name": {"type": "string"}},
+                },
+            },
+        },
+    }
+
+
+class TestOpenAPIToolBuilderRefResolution:
+    """$ref'd parameters and request bodies must be resolved, not dropped."""
+
+    @pytest.mark.anyio
+    async def test_ref_resolved_parameter_appears_in_tool_signature(self) -> None:
+        source = _make_source(include_operations=["getPetById"])
+        builder = OpenAPIToolBuilder(source)
+
+        with patch.object(
+            builder,
+            "_fetch_remote_spec",
+            new_callable=AsyncMock,
+            return_value=_make_petstore_spec_with_refs(),
+        ):
+            tools = await builder.build()
+
+        assert len(tools) == 1
+        sig = inspect.signature(tools[0].function)
+        assert "petId" in sig.parameters
+        assert sig.parameters["petId"].annotation is int
+        assert sig.parameters["petId"].default is inspect.Parameter.empty
+
+    @pytest.mark.anyio
+    async def test_ref_resolved_request_body_appears_in_tool_signature(self) -> None:
+        source = _make_source(include_operations=["addPet"])
+        builder = OpenAPIToolBuilder(source)
+
+        with patch.object(
+            builder,
+            "_fetch_remote_spec",
+            new_callable=AsyncMock,
+            return_value=_make_petstore_spec_with_refs(),
+        ):
+            tools = await builder.build()
+
+        assert len(tools) == 1
+        sig = inspect.signature(tools[0].function)
+        assert "body" in sig.parameters
+        assert sig.parameters["body"].default is inspect.Parameter.empty
+
+    def test_resolve_spec_refs_replaces_ref_with_target(self) -> None:
+        spec = _make_petstore_spec_with_refs()
+        resolved = _resolve_spec_refs(spec)
+
+        param = resolved["paths"]["/pets/{petId}"]["get"]["parameters"][0]
+        assert "$ref" not in param
+        assert param["name"] == "petId"
+        assert param["schema"] == {"type": "integer"}
+
+    def test_resolve_spec_refs_handles_cyclic_ref_without_infinite_recursion(self) -> None:
+        spec = {
+            "components": {
+                "schemas": {
+                    "Node": {
+                        "type": "object",
+                        "properties": {"child": {"$ref": "#/components/schemas/Node"}},
+                    }
+                }
+            }
+        }
+        # Should return without raising RecursionError.
+        resolved = _resolve_spec_refs(spec)
+        assert "Node" in resolved["components"]["schemas"]
+
+
+# ---------------------------------------------------------------------------
+# Test: remote YAML spec parsing + inline `spec` content (JSON and YAML)
+# ---------------------------------------------------------------------------
+
+
+class TestOpenAPIToolBuilderSpecFormats:
+    """Docs: OpenAPI sources accept a remote URL, local path, or inline spec,
+    and the URL/path spec may be JSON or YAML."""
+
+    @pytest.mark.anyio
+    async def test_remote_yaml_spec_is_parsed(self) -> None:
+        try:
+            import yaml
+        except ImportError:
+            pytest.skip("PyYAML not installed")
+
+        spec = _make_petstore_spec()
+        yaml_text = yaml.dump(spec)
+
+        source = _make_source(url="https://petstore.example.com/openapi.yaml")
+        builder = OpenAPIToolBuilder(source)
+
+        mock_response = MagicMock()
+        mock_response.json.side_effect = json.JSONDecodeError("Expecting value", "doc", 0)
+        mock_response.text = yaml_text
+        mock_response.raise_for_status.return_value = None
+
+        mock_client = AsyncMock()
+        mock_client.get.return_value = mock_response
+        mock_client.aclose.return_value = None
+
+        with patch("forge_agent.builder.openapi.httpx.AsyncClient", return_value=mock_client):
+            tools = await builder.build()
+
+        assert len(tools) == 6
+
+    @pytest.mark.anyio
+    async def test_inline_json_spec_content_loads(self) -> None:
+        spec = _make_petstore_spec()
+        source = OpenAPISource(name="inline_json", spec=json.dumps(spec))
+        builder = OpenAPIToolBuilder(source)
+
+        tools = await builder.build()
+
+        assert len(tools) == 6
+        names = {t.name for t in tools}
+        assert "listPets" in names
+
+    @pytest.mark.anyio
+    async def test_inline_yaml_spec_content_loads(self) -> None:
+        try:
+            import yaml
+        except ImportError:
+            pytest.skip("PyYAML not installed")
+
+        spec = _make_petstore_spec()
+        source = OpenAPISource(name="inline_yaml", spec=yaml.dump(spec))
+        builder = OpenAPIToolBuilder(source)
+
+        tools = await builder.build()
+
+        assert len(tools) == 6
+
+    @pytest.mark.anyio
+    async def test_inline_spec_content_takes_precedence_over_derived_path(self) -> None:
+        """Inline JSON content (which the config validator routes into `path`
+        since it isn't a URL) must be parsed directly, not opened as a file."""
+        spec = _make_petstore_spec()
+        source = OpenAPISource(name="inline_precedence", spec=json.dumps(spec))
+        # The config validator should have derived `path` from the inline spec text.
+        assert source.path == json.dumps(spec)
+
+        builder = OpenAPIToolBuilder(source)
+        loaded = await builder._load_spec()
+
+        assert loaded["paths"]

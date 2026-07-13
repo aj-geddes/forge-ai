@@ -7,7 +7,12 @@ from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
-from forge_agent.builder.workflow import WorkflowBuilder, _default_executor
+from forge_agent.builder.workflow import (
+    WorkflowBuilder,
+    _build_condition_evaluator,
+    _default_executor,
+    _evaluate_condition,
+)
 from forge_config.schema import (
     ParameterDef,
     ParamType,
@@ -224,3 +229,166 @@ class TestWorkflowBuilder:
         await tool.function(target="production")
 
         assert captured_params[0]["env"] == "production"
+
+
+# ---------------------------------------------------------------------------
+# Test: _evaluate_condition as a real, sandboxed boolean expression evaluator
+# ---------------------------------------------------------------------------
+#
+# docs/user/configuration.md documents `condition` as: "Python-style
+# expression that must evaluate to true for the step to execute (e.g.,
+# `"contact.city is not None"`)."
+
+
+class TestEvaluateConditionDocumentedExample:
+    """The documented condition example must actually work."""
+
+    def test_documented_example_true_when_city_set(self) -> None:
+        """`contact.city is not None` is True when city is set."""
+        context = {"contact": {"city": "Springfield"}}
+        assert _evaluate_condition("contact.city is not None", context) is True
+
+    def test_documented_example_false_when_city_none(self) -> None:
+        """`contact.city is not None` is False when city is None."""
+        context = {"contact": {"city": None}}
+        assert _evaluate_condition("contact.city is not None", context) is False
+
+    def test_documented_example_false_when_city_missing(self) -> None:
+        """`contact.city is not None` is False when contact has no city key."""
+        context = {"contact": {}}
+        assert _evaluate_condition("contact.city is not None", context) is False
+
+
+class TestEvaluateConditionComparisons:
+    """Comparison expressions should work against the workflow context."""
+
+    def test_greater_than_true(self) -> None:
+        assert _evaluate_condition("count > 0", {"count": 5}) is True
+
+    def test_greater_than_false(self) -> None:
+        assert _evaluate_condition("count > 0", {"count": 0}) is False
+
+    def test_equality(self) -> None:
+        assert _evaluate_condition("status == 'ready'", {"status": "ready"}) is True
+        assert _evaluate_condition("status == 'ready'", {"status": "pending"}) is False
+
+    def test_membership_in(self) -> None:
+        assert _evaluate_condition("status in ['ok', 'done']", {"status": "done"}) is True
+        assert _evaluate_condition("status in ['ok', 'done']", {"status": "error"}) is False
+
+    def test_boolean_and_or_not(self) -> None:
+        context = {"a": True, "b": False}
+        assert _evaluate_condition("a and not b", context) is True
+        assert _evaluate_condition("a or b", context) is True
+        assert _evaluate_condition("not a", context) is False
+
+
+class TestEvaluateConditionBareDottedRef:
+    """Backward compat: a bare dotted ref must still be truthy-checked."""
+
+    def test_bare_dotted_ref_true(self) -> None:
+        context = {"check_result": {"proceed": True}}
+        assert _evaluate_condition("check_result.proceed", context) is True
+
+    def test_bare_dotted_ref_false(self) -> None:
+        context = {"check_result": {"proceed": False}}
+        assert _evaluate_condition("check_result.proceed", context) is False
+
+    def test_bare_top_level_name_truthy(self) -> None:
+        assert _evaluate_condition("weather", {"weather": {"temp": 70}}) is True
+        assert _evaluate_condition("weather", {"weather": {}}) is False
+
+
+class TestEvaluateConditionSandboxing:
+    """Condition evaluation must be sandboxed: no function calls, no dunder access."""
+
+    def test_evaluator_rejects_function_calls(self) -> None:
+        """The low-level evaluator raises rather than executing any function call."""
+        from simpleeval import FunctionNotDefined
+
+        evaluator = _build_condition_evaluator({"contact": {"city": "Boston"}})
+        with pytest.raises(FunctionNotDefined):
+            evaluator.eval("len(contact)")
+
+    def test_evaluator_rejects_dunder_attribute_access(self) -> None:
+        """The low-level evaluator raises rather than exposing __class__/__builtins__."""
+        from simpleeval import FeatureNotAvailable
+
+        evaluator = _build_condition_evaluator({"contact": {"city": "Boston"}})
+        with pytest.raises(FeatureNotAvailable):
+            evaluator.eval("contact.__class__")
+
+    def test_public_wrapper_fails_closed_on_function_call(self) -> None:
+        """A condition attempting a function call is rejected, not executed; step is skipped."""
+        assert _evaluate_condition("len(contact)", {"contact": {"city": "Boston"}}) is False
+
+    def test_public_wrapper_fails_closed_on_dunder_access(self) -> None:
+        """A condition attempting __builtins__-style access is rejected, not executed."""
+        condition = "contact.__class__.__mro__"
+        assert _evaluate_condition(condition, {"contact": {"city": "Boston"}}) is False
+
+    def test_injected_shell_command_is_never_executed(self, monkeypatch: Any) -> None:
+        """A condition trying to shell out must not run the shell command."""
+        calls: list[str] = []
+        monkeypatch.setattr("os.system", lambda cmd: calls.append(cmd))
+
+        result = _evaluate_condition("__import__('os').system('touch pwned')", {})
+
+        assert result is False
+        assert calls == []
+
+
+class TestWorkflowConditionIntegration:
+    """End-to-end: a workflow step's documented condition gates execution."""
+
+    @pytest.mark.anyio
+    async def test_step_runs_when_documented_condition_is_true(self) -> None:
+        call_log: list[str] = []
+
+        async def mock_executor(tool_name: str, params: dict[str, Any]) -> dict[str, Any]:
+            call_log.append(tool_name)
+            if tool_name == "lookup_contact":
+                return {"city": "Springfield"}
+            return {"forecast": "sunny"}
+
+        workflow = _make_workflow(
+            steps=[
+                WorkflowStep(tool="lookup_contact", output_as="contact"),
+                WorkflowStep(
+                    tool="get_weather",
+                    condition="contact.city is not None",
+                ),
+            ]
+        )
+
+        builder = WorkflowBuilder(workflow, tool_executor=mock_executor)
+        tool = builder.build()
+        await tool.function()
+
+        assert call_log == ["lookup_contact", "get_weather"]
+
+    @pytest.mark.anyio
+    async def test_step_skipped_when_documented_condition_is_false(self) -> None:
+        call_log: list[str] = []
+
+        async def mock_executor(tool_name: str, params: dict[str, Any]) -> dict[str, Any]:
+            call_log.append(tool_name)
+            if tool_name == "lookup_contact":
+                return {"city": None}
+            return {"forecast": "sunny"}
+
+        workflow = _make_workflow(
+            steps=[
+                WorkflowStep(tool="lookup_contact", output_as="contact"),
+                WorkflowStep(
+                    tool="get_weather",
+                    condition="contact.city is not None",
+                ),
+            ]
+        )
+
+        builder = WorkflowBuilder(workflow, tool_executor=mock_executor)
+        tool = builder.build()
+        await tool.function()
+
+        assert call_log == ["lookup_contact"]

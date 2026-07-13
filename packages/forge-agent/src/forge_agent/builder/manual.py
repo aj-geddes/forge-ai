@@ -11,11 +11,26 @@ import re
 from typing import Any
 
 import httpx
-from forge_config.schema import HTTPMethod, ManualTool, ManualToolAPI, ParamType
+from forge_config.schema import HTTPMethod, ManualTool, ManualToolAPI, ParamType, ResponseMapping
 from forge_config.secret_resolver import SecretResolver
 from pydantic_ai.tools import Tool
 
 from forge_agent.builder.openapi import _resolve_auth_headers
+
+
+class ToolResponseError(Exception):
+    """Raised when a manual tool's API response indicates a failure.
+
+    Signaled by ``response_mapping.status_field`` resolving to a known
+    failure marker, or ``response_mapping.error_path`` resolving to a
+    truthy error value. See ``_check_response_for_error`` for the exact
+    semantics.
+    """
+
+    def __init__(self, message: str, *, response: Any = None) -> None:
+        super().__init__(message)
+        self.response = response
+
 
 # Mapping from ParamType enum to Python annotation types.
 _PARAM_TYPE_MAP: dict[ParamType, type] = {
@@ -26,6 +41,11 @@ _PARAM_TYPE_MAP: dict[ParamType, type] = {
     ParamType.ARRAY: list,
     ParamType.OBJECT: dict,
 }
+
+# String values at `status_field` that indicate the call failed, matched
+# case-insensitively. A boolean `False` at `status_field` is also treated
+# as failure (see `_is_failure_status`).
+_FAILURE_STATUS_VALUES = frozenset({"error", "fail", "failed", "failure"})
 
 
 class ManualToolBuilder:
@@ -263,13 +283,85 @@ def _resolve_dot_path(obj: Any, path: str) -> Any:
     return current
 
 
+def _is_failure_status(value: Any) -> bool:
+    """Return True if a `status_field` value is a known failure marker.
+
+    A boolean ``False`` is a failure marker (common for `{"success": false}`
+    style envelopes). A string is a failure marker if, case-insensitively,
+    it is one of "error", "fail", "failed", "failure" (common for
+    `{"status": "error"}` style envelopes). Anything else -- including the
+    field being absent (``None``) -- is treated as success, so tools whose
+    APIs don't use this convention are unaffected.
+
+    Args:
+        value: The value resolved at `response_mapping.status_field`.
+
+    Returns:
+        True if the value indicates failure.
+    """
+    if isinstance(value, bool):
+        return value is False
+    if isinstance(value, str):
+        return value.strip().lower() in _FAILURE_STATUS_VALUES
+    return False
+
+
+def _check_response_for_error(result: Any, mapping: ResponseMapping) -> None:
+    """Raise ToolResponseError if the response indicates failure.
+
+    Semantics:
+      - ``status_field``: a dot-path into the raw response whose value
+        indicates success/failure (see `_is_failure_status`).
+      - ``error_path``: a dot-path into the raw response holding an error
+        message. If it resolves to a truthy value, the call is treated as
+        failed and that value (stringified) becomes the error message.
+      - If both are configured and both indicate failure, the `error_path`
+        message takes precedence (it is the more specific signal).
+      - When neither is configured, or both resolve to non-failure values,
+        this is a no-op and the response is mapped/returned as usual.
+
+    Args:
+        result: The raw API response (prior to result_path extraction).
+        mapping: The response mapping configuration.
+
+    Raises:
+        ToolResponseError: If status_field or error_path indicates failure.
+    """
+    if not isinstance(result, dict):
+        return
+
+    error_message: str | None = None
+    if mapping.error_path is not None:
+        error_value = _resolve_dot_path(result, mapping.error_path)
+        if error_value:
+            error_message = str(error_value)
+
+    status_failed = False
+    status_value: Any = None
+    if mapping.status_field is not None:
+        status_value = _resolve_dot_path(result, mapping.status_field)
+        status_failed = _is_failure_status(status_value)
+
+    if error_message is not None:
+        raise ToolResponseError(error_message, response=result)
+    if status_failed:
+        msg = (
+            f"Tool call failed: response field '{mapping.status_field}' "
+            f"indicated failure ({status_value!r})"
+        )
+        raise ToolResponseError(msg, response=result)
+
+
 def _apply_response_mapping(result: Any, api_config: ManualToolAPI) -> Any:
     """Apply response mapping to extract and reshape relevant data.
 
-    First applies ``result_path`` (a "$"-rooted dot-notation JSONPath) to
-    extract a sub-object from the raw response. Then, if ``field_map`` is
-    set, builds a new dict whose keys are the field_map's output names and
-    whose values are resolved via dot-notation from the extracted result.
+    First checks ``status_field``/``error_path`` for a failure signal (see
+    `_check_response_for_error`) and raises `ToolResponseError` if found.
+    Otherwise, applies ``result_path`` (a "$"-rooted dot-notation JSONPath)
+    to extract a sub-object from the raw response. Then, if ``field_map``
+    is set, builds a new dict whose keys are the field_map's output names
+    and whose values are resolved via dot-notation from the extracted
+    result.
 
     Args:
         result: The raw API response.
@@ -277,8 +369,13 @@ def _apply_response_mapping(result: Any, api_config: ManualToolAPI) -> Any:
 
     Returns:
         The mapped result.
+
+    Raises:
+        ToolResponseError: If the response indicates failure via
+            status_field or error_path.
     """
     mapping = api_config.response_mapping
+    _check_response_for_error(result, mapping)
     current = result
 
     if mapping.result_path != "$" and isinstance(result, dict):

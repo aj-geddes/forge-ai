@@ -11,6 +11,7 @@ dependencies = [
     "litellm>=1.50",
     "fastmcp>=2.0",
     "httpx>=0.28",
+    "simpleeval>=1.0",
 ]
 
 [build-system]

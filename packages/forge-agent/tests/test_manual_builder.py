@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
-from forge_agent.builder.manual import ManualToolBuilder
+from forge_agent.builder.manual import ManualToolBuilder, ToolResponseError
 from forge_config.exceptions import SecretResolutionError
 from forge_config.schema import (
     AuthConfig,
@@ -451,3 +451,151 @@ class TestManualToolBuilderAuth:
         builder = ManualToolBuilder(config)  # No resolver, no auth
         tool = builder.build()
         assert tool.name == "test_tool"
+
+
+# ---------------------------------------------------------------------------
+# Test: response_mapping.status_field / error_path
+# ---------------------------------------------------------------------------
+#
+# Semantics implemented (docs + ResponseMapping schema in forge-config):
+#   - status_field: a dot-path into the raw response whose value indicates
+#     success/failure. Known failure markers: the strings "error", "fail",
+#     "failed", "failure" (case-insensitive) or the boolean False. Any other
+#     value (including the field being absent) is treated as success.
+#   - error_path: a dot-path into the raw response holding an error message.
+#     If it resolves to a truthy value, the call is treated as failed and
+#     that value (stringified) becomes the error message.
+#   - When either indicates failure, ToolResponseError is raised instead of
+#     returning a (misleadingly "successful") mapped result.
+#   - When neither is configured, or both indicate success, the response is
+#     mapped and returned exactly as before (no behavior change).
+
+
+class TestResponseMappingStatusFieldAndErrorPath:
+    """Tests for status_field/error_path wiring in _apply_response_mapping."""
+
+    @pytest.mark.anyio
+    async def test_status_field_failure_value_raises_tool_response_error(self) -> None:
+        config = _make_manual_tool(
+            response_mapping=ResponseMapping(status_field="status"),
+        )
+
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"status": "error", "data": {"id": 1}}
+        mock_response.raise_for_status.return_value = None
+
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.request = AsyncMock(return_value=mock_response)
+
+        builder = ManualToolBuilder(config, http_client=mock_client)
+        tool = builder.build()
+
+        with pytest.raises(ToolResponseError):
+            await tool.function()
+
+    @pytest.mark.anyio
+    async def test_status_field_success_value_passes_through(self) -> None:
+        config = _make_manual_tool(
+            response_mapping=ResponseMapping(status_field="status"),
+        )
+
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"status": "ok", "data": {"id": 1}}
+        mock_response.raise_for_status.return_value = None
+
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.request = AsyncMock(return_value=mock_response)
+
+        builder = ManualToolBuilder(config, http_client=mock_client)
+        tool = builder.build()
+
+        result = await tool.function()
+        assert result == {"status": "ok", "data": {"id": 1}}
+
+    @pytest.mark.anyio
+    async def test_error_path_with_message_raises_tool_response_error(self) -> None:
+        config = _make_manual_tool(
+            response_mapping=ResponseMapping(error_path="error.message"),
+        )
+
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "error": {"message": "invalid API key"},
+            "data": None,
+        }
+        mock_response.raise_for_status.return_value = None
+
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.request = AsyncMock(return_value=mock_response)
+
+        builder = ManualToolBuilder(config, http_client=mock_client)
+        tool = builder.build()
+
+        with pytest.raises(ToolResponseError, match="invalid API key"):
+            await tool.function()
+
+    @pytest.mark.anyio
+    async def test_error_path_absent_or_empty_passes_through(self) -> None:
+        config = _make_manual_tool(
+            response_mapping=ResponseMapping(error_path="error.message"),
+        )
+
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"error": {"message": ""}, "data": {"id": 1}}
+        mock_response.raise_for_status.return_value = None
+
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.request = AsyncMock(return_value=mock_response)
+
+        builder = ManualToolBuilder(config, http_client=mock_client)
+        tool = builder.build()
+
+        result = await tool.function()
+        assert result == {"error": {"message": ""}, "data": {"id": 1}}
+
+    @pytest.mark.anyio
+    async def test_no_status_field_or_error_path_configured_behaves_as_before(self) -> None:
+        """Default ResponseMapping (neither field set) must not change behavior."""
+        config = _make_manual_tool(
+            response_mapping=ResponseMapping(result_path="$.data"),
+        )
+
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"status": "error", "data": {"id": 1}}
+        mock_response.raise_for_status.return_value = None
+
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.request = AsyncMock(return_value=mock_response)
+
+        builder = ManualToolBuilder(config, http_client=mock_client)
+        tool = builder.build()
+
+        result = await tool.function()
+        assert result == {"id": 1}
+
+    @pytest.mark.anyio
+    async def test_status_field_and_error_path_both_indicate_success(self) -> None:
+        config = _make_manual_tool(
+            response_mapping=ResponseMapping(
+                status_field="status",
+                error_path="error",
+                result_path="$.data",
+            ),
+        )
+
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "status": "success",
+            "error": None,
+            "data": {"id": 7},
+        }
+        mock_response.raise_for_status.return_value = None
+
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.request = AsyncMock(return_value=mock_response)
+
+        builder = ManualToolBuilder(config, http_client=mock_client)
+        tool = builder.build()
+
+        result = await tool.function()
+        assert result == {"id": 7}
