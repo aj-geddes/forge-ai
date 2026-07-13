@@ -2,7 +2,7 @@ import { useLocation } from "react-router-dom";
 import { HelpCircle, LogOut, Moon, Sun } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useUIStore } from "@/stores/uiStore";
-import { useAuthStore } from "@/stores/authStore";
+import { useAuth, useLogout } from "@/api/auth";
 import { useGuideStore } from "@/stores/guideStore";
 import { useHealth } from "@/api/hooks";
 import { cn } from "@/lib/utils";
@@ -20,12 +20,14 @@ const pageTitles: Record<string, string> = {
 export function Header() {
   const location = useLocation();
   const { darkMode, toggleDarkMode } = useUIStore();
-  const logout = useAuthStore((s) => s.logout);
+  const { user } = useAuth();
+  const logout = useLogout();
   const { togglePanel } = useGuideStore();
   const { data: health } = useHealth();
 
   const title = pageTitles[location.pathname] ?? "Forge AI";
   const isHealthy = health?.status === "ok" || health?.status === "healthy" || health?.status === "ready";
+  const displayName = user?.name || user?.email || user?.sub;
 
   return (
     <header className="flex h-14 items-center justify-between border-b bg-background px-6">
@@ -48,6 +50,16 @@ export function Header() {
             {health === undefined ? "Checking..." : isHealthy ? "Healthy" : "Unhealthy"}
           </span>
         </div>
+
+        {/* Signed-in identity */}
+        {displayName && (
+          <span
+            className="hidden max-w-[160px] truncate text-sm text-muted-foreground md:inline"
+            title={displayName}
+          >
+            {displayName}
+          </span>
+        )}
 
         {/* Dark mode toggle */}
         <Button
@@ -73,7 +85,8 @@ export function Header() {
         <Button
           variant="ghost"
           size="icon"
-          onClick={logout}
+          onClick={() => logout.mutate()}
+          disabled={logout.isPending}
           title="Sign out"
         >
           <LogOut className="h-4 w-4" />

@@ -1,8 +1,9 @@
 import { Suspense, lazy } from "react";
 import { Routes, Route } from "react-router-dom";
 import { Layout } from "@/components/layout/Layout";
+import { RequirePermission } from "@/components/layout/RequirePermission";
 import { LoginPage } from "@/features/login/LoginPage";
-import { useAuthStore } from "@/stores/authStore";
+import { useAuth } from "@/api/auth";
 
 const DashboardPage = lazy(() =>
   import("@/features/dashboard/DashboardPage").then((m) => ({ default: m.DashboardPage }))
@@ -35,8 +36,17 @@ function PageLoader() {
 }
 
 export function App() {
-  const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
+  const { isAuthenticated, isLoading } = useAuth();
 
+  if (isLoading) {
+    return <PageLoader />;
+  }
+
+  // Unauthenticated visitors landing on any app route see the login page
+  // (client-rendered, no automatic navigation to the IdP -- the user must
+  // click "Sign in with GitHub" themselves). A live session that expires
+  // mid-use is handled separately, by the API client's 401 interceptor,
+  // which does perform a full navigation (see api/client.ts).
   if (!isAuthenticated) {
     return <LoginPage />;
   }
@@ -45,12 +55,54 @@ export function App() {
     <Suspense fallback={<PageLoader />}>
       <Routes>
         <Route element={<Layout />}>
-          <Route path="/" element={<DashboardPage />} />
-          <Route path="/config" element={<ConfigPage />} />
-          <Route path="/tools" element={<ToolsPage />} />
-          <Route path="/chat" element={<ChatPage />} />
-          <Route path="/peers" element={<PeersPage />} />
-          <Route path="/security" element={<SecurityPage />} />
+          <Route
+            path="/"
+            element={
+              <RequirePermission permission="config:read">
+                <DashboardPage />
+              </RequirePermission>
+            }
+          />
+          <Route
+            path="/config"
+            element={
+              <RequirePermission permission="config:read">
+                <ConfigPage />
+              </RequirePermission>
+            }
+          />
+          <Route
+            path="/tools"
+            element={
+              <RequirePermission permission="config:read">
+                <ToolsPage />
+              </RequirePermission>
+            }
+          />
+          <Route
+            path="/chat"
+            element={
+              <RequirePermission permission="agent:invoke">
+                <ChatPage />
+              </RequirePermission>
+            }
+          />
+          <Route
+            path="/peers"
+            element={
+              <RequirePermission permission="config:read">
+                <PeersPage />
+              </RequirePermission>
+            }
+          />
+          <Route
+            path="/security"
+            element={
+              <RequirePermission permission="config:read">
+                <SecurityPage />
+              </RequirePermission>
+            }
+          />
           <Route path="/guide" element={<GuidePage />} />
         </Route>
       </Routes>

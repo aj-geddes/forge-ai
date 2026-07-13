@@ -13,20 +13,29 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useUIStore } from "@/stores/uiStore";
+import { useAuth } from "@/api/auth";
 import { Separator } from "@/components/ui/separator";
 
+// `permission: null` means always visible once signed in (e.g. the guide).
+// This is cosmetic nav gating only -- the gateway independently enforces
+// every request each page makes (ADR-0001 section 6).
 const navItems = [
-  { to: "/", label: "Dashboard", icon: LayoutDashboard },
-  { to: "/config", label: "Config", icon: Settings },
-  { to: "/tools", label: "Tools", icon: Wrench },
-  { to: "/chat", label: "Chat", icon: MessageSquare },
-  { to: "/peers", label: "Peers", icon: Network },
-  { to: "/security", label: "Security", icon: Shield },
-  { to: "/guide", label: "Guide", icon: BookOpen },
+  { to: "/", label: "Dashboard", icon: LayoutDashboard, permission: "config:read" },
+  { to: "/config", label: "Config", icon: Settings, permission: "config:read" },
+  { to: "/tools", label: "Tools", icon: Wrench, permission: "config:read" },
+  { to: "/chat", label: "Chat", icon: MessageSquare, permission: "agent:invoke" },
+  { to: "/peers", label: "Peers", icon: Network, permission: "config:read" },
+  { to: "/security", label: "Security", icon: Shield, permission: "config:read" },
+  { to: "/guide", label: "Guide", icon: BookOpen, permission: null },
 ] as const;
 
 export function Sidebar() {
   const { sidebarCollapsed, toggleSidebar } = useUIStore();
+  const { can } = useAuth();
+
+  const visibleItems = navItems.filter(
+    (item) => item.permission === null || can(item.permission),
+  );
 
   return (
     <aside
@@ -47,7 +56,7 @@ export function Sidebar() {
 
       {/* Navigation */}
       <nav className="flex-1 space-y-1 p-2">
-        {navItems.map(({ to, label, icon: Icon }) => (
+        {visibleItems.map(({ to, label, icon: Icon }) => (
           <NavLink
             key={to}
             to={to}
