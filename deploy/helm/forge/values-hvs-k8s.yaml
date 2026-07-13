@@ -10,7 +10,7 @@ image:
   repository: harbor.hvslocal/dev-aj-geddes/forge-ai
   # Immutable tag pinned to the commit the image was built from. Update this
   # (and re-push a new image) on every deploy -- never track :latest.
-  tag: "fc7ab4d"
+  tag: "3c722df"
   pullPolicy: IfNotPresent
 
 agent:
@@ -186,7 +186,7 @@ forgeConfig:
     # human plane is unaffected either way; a SPIRE/OPA outage degrades only
     # agent-to-agent traffic and never gates human readiness (ADR-0004).
     agentweave:
-      enabled: false
+      enabled: true
       trust_domain: hvslocal
       opa_endpoint: http://opa.opa.svc.cluster.local:8181
     api_keys:
@@ -223,6 +223,6 @@ persistence:
 # Workload plane. SPIRE + OPA are deployed (deploy/cluster/); ship enabled=false
 # first, verify the pod pulls an SVID over the CSI socket, then flip to true.
 agentweave:
-  enabled: false
+  enabled: true
   socketMountPath: /spiffe-workload-api
   opaEndpoint: http://opa.opa.svc.cluster.local:8181
