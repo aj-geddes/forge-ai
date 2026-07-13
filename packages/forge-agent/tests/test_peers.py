@@ -11,6 +11,7 @@ from forge_agent.agent.peers import (
     PeerCaller,
     PeerCallError,
     PeerNotFoundError,
+    PeerPinningRequiredError,
     PeerVerificationError,
 )
 from forge_config.schema import PeerAgent, TrustLevel
@@ -183,15 +184,40 @@ class TestPeerCallerOutboundMTLS:
         """When an ``identity`` provider is supplied and no explicit
         ``http_client`` override is given, PeerCaller builds its httpx
         client with the mTLS SSLContext from
-        ``identity.create_tls_context(server=False)``."""
-        peer = _make_peer("data-forge")
+        ``identity.create_tls_context(server=False)``, and pre-send
+        verifies the peer's SPIFFE ID over that same context (ADR-0004
+        SS6) before the real request is sent."""
+        from forge_agent.agent import peers as peers_module
+
+        expected_id = "spiffe://hvslocal/ns/dev/sa/data-forge"
+        peer = _make_peer("data-forge").model_copy(update={"spiffe_id": expected_id})
         identity = AsyncMock()
         identity.create_tls_context.return_value = "fake-mtls-ssl-context"
 
-        mock_client_instance = AsyncMock(spec=httpx.AsyncClient)
-        mock_client_instance.post.return_value = _make_success_response()
+        response = _make_success_response()
 
-        with patch("forge_agent.agent.peers.httpx.AsyncClient") as mock_client_cls:
+        class _FakeSSLObject:
+            def getpeercert(self, binary_form: bool = False) -> bytes:
+                return b"right-peer-cert-der"
+
+        class _FakeNetworkStream:
+            def get_extra_info(self, name: str) -> object:
+                return _FakeSSLObject()
+
+        response.extensions = {"network_stream": _FakeNetworkStream()}
+
+        mock_client_instance = AsyncMock(spec=httpx.AsyncClient)
+        mock_client_instance.post.return_value = response
+
+        with (
+            patch("forge_agent.agent.peers.httpx.AsyncClient") as mock_client_cls,
+            patch.object(
+                peers_module,
+                "_probe_peer_tls_identity",
+                new=AsyncMock(return_value=expected_id),
+            ) as mock_probe,
+            patch.object(peers_module, "extract_spiffe_id_from_cert", return_value=expected_id),
+        ):
             mock_client_cls.return_value = mock_client_instance
 
             caller = PeerCaller([peer], identity=identity)
@@ -201,6 +227,7 @@ class TestPeerCallerOutboundMTLS:
         identity.create_tls_context.assert_awaited_once_with(server=False)
         mock_client_cls.assert_called_once()
         assert mock_client_cls.call_args.kwargs["verify"] == "fake-mtls-ssl-context"
+        mock_probe.assert_awaited_once()
 
     @pytest.mark.anyio
     async def test_peer_call_verifies_peer_spiffe_id(self) -> None:
@@ -293,6 +320,54 @@ class TestPeerCallerOutboundMTLS:
         peer = _make_peer("data-forge").model_copy(
             update={"spiffe_id": "spiffe://hvslocal/ns/dev/sa/data-forge"}
         )
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.post.return_value = _make_success_response()
+
+        caller = PeerCaller([peer], http_client=mock_client)
+        result = await caller.call_peer("data-forge", "task", {})
+
+        assert result.status == "completed"
+
+
+class TestPeerCallerMandatoryPinning:
+    """HIGH finding fix (ADR-0004 SS7.3): mandatory pinning. A peer with
+    no pinned spiffe_id must never receive a task payload over a channel
+    whose only guarantee is 'some SPIRE workload answered' -- so calling
+    such a peer while an identity provider (mTLS) is configured is
+    refused before any connection is attempted."""
+
+    @pytest.mark.anyio
+    async def test_unpinned_peer_rejected_when_identity_present(self) -> None:
+        peer = _make_peer("data-forge")  # spiffe_id defaults to None
+        identity = AsyncMock()
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+
+        caller = PeerCaller([peer], identity=identity, http_client=mock_client)
+
+        with pytest.raises(PeerPinningRequiredError, match="data-forge"):
+            await caller.call_peer("data-forge", "task", {"secret": "value"})
+
+        mock_client.post.assert_not_called()
+        identity.create_tls_context.assert_not_called()
+
+    @pytest.mark.anyio
+    async def test_pinning_required_error_is_a_peer_verification_error(self) -> None:
+        """Callers that only catch PeerVerificationError (the pre-existing
+        outbound-verification failure mode) still catch this."""
+        peer = _make_peer("data-forge")
+        identity = AsyncMock()
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+
+        caller = PeerCaller([peer], identity=identity, http_client=mock_client)
+
+        with pytest.raises(PeerVerificationError):
+            await caller.call_peer("data-forge", "task", {})
+
+    @pytest.mark.anyio
+    async def test_unpinned_peer_allowed_without_identity(self) -> None:
+        """No identity provider (agentweave disabled) -- unpinned peers
+        remain allowed, matching pre-ADR-0004 behavior exactly."""
+        peer = _make_peer("data-forge")
         mock_client = AsyncMock(spec=httpx.AsyncClient)
         mock_client.post.return_value = _make_success_response()
 

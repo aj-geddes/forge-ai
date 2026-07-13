@@ -428,9 +428,25 @@ class TestAgentsConfig:
 class TestAgentWeaveConfig:
     def test_defaults(self) -> None:
         config = AgentWeaveConfig()
-        assert config.enabled is True
+        assert config.enabled is False
         assert config.identity_secret is None
         assert config.trust_policy == TrustPolicy.STRICT
+
+    def test_enabled_defaults_to_false(self) -> None:
+        """HIGH finding fix: AgentWeaveConfig.enabled must default to
+        False -- the workload plane (SPIFFE+OPA mTLS on :8443) is an
+        opt-in enable switch per ADR-0004's staged-rollout safety, and
+        the docstring already claims False is the default-safe value. A
+        forge.yaml that omits security.agentweave must never silently
+        get a running mTLS listener."""
+        assert AgentWeaveConfig().enabled is False
+
+    def test_config_omitting_agentweave_yields_workload_disabled(self) -> None:
+        """A ForgeConfig built with no security.agentweave block at all
+        (the common case: most forge.yaml files never mention it) must
+        still resolve to a disabled workload plane."""
+        config = ForgeConfig()
+        assert config.security.agentweave.enabled is False
 
     def test_with_identity_secret(self) -> None:
         config = AgentWeaveConfig(
@@ -587,3 +603,53 @@ class TestForgeConfig:
         # Verify peers
         assert len(config.agents.peers) == 1
         assert config.agents.peers[0].trust_level == TrustLevel.HIGH
+
+
+class TestAgentWeavePeerPinning:
+    """HIGH finding fix (ADR-0004 SS7.3): when the workload plane is
+    enabled, every configured peer must be pinned -- a PeerAgent with no
+    spiffe_id has nothing for outbound mTLS callers to verify against,
+    so it must be rejected at config-load time rather than silently
+    accepted and trusted at runtime."""
+
+    def test_unpinned_peer_rejected_when_agentweave_enabled(self) -> None:
+        with pytest.raises(ValidationError, match="data-forge"):
+            ForgeConfig(
+                security=SecurityConfig(agentweave=AgentWeaveConfig(enabled=True)),
+                agents=AgentsConfig(
+                    peers=[
+                        PeerAgent(
+                            name="data-forge",
+                            endpoint="https://data-forge.hvslocal:8443",
+                        ),
+                    ]
+                ),
+            )
+
+    def test_pinned_peer_accepted_when_agentweave_enabled(self) -> None:
+        config = ForgeConfig(
+            security=SecurityConfig(agentweave=AgentWeaveConfig(enabled=True)),
+            agents=AgentsConfig(
+                peers=[
+                    PeerAgent(
+                        name="data-forge",
+                        endpoint="https://data-forge.hvslocal:8443",
+                        spiffe_id="spiffe://hvslocal/ns/dev-aj-geddes/sa/data-forge",
+                    ),
+                ]
+            ),
+        )
+        assert config.agents.peers[0].spiffe_id is not None
+
+    def test_unpinned_peer_allowed_when_agentweave_disabled(self) -> None:
+        """The default (agentweave disabled) must keep parsing configs
+        that predate ADR-0004 SS7.3 pinning -- nothing to verify against
+        when the workload plane never runs."""
+        config = ForgeConfig(
+            agents=AgentsConfig(
+                peers=[
+                    PeerAgent(name="data-forge", endpoint="https://data-forge.hvslocal:8443"),
+                ]
+            ),
+        )
+        assert config.agents.peers[0].spiffe_id is None

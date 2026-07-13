@@ -9,18 +9,45 @@ There is deliberately no ``caller_id`` in :class:`A2ATaskRequest` -- the
 server already ignores it (ADR-0001 closed that bypass), and on the
 workload plane the caller's identity is the verified SPIFFE ID of the
 client certificate presented during the TLS handshake, not anything the
-caller could self-report in JSON. When an ``identity`` provider is
-supplied, :class:`PeerCaller` builds its outbound client from that
-provider's mTLS context and verifies the SPIFFE ID presented by the
-responding peer against ``PeerAgent.spiffe_id`` (when configured),
-raising :class:`PeerVerificationError` on a mismatch -- the request may
-have reached the wrong service entirely, and must not be trusted.
+caller could self-report in JSON.
+
+ADR-0004 SS7.3 (mandatory pinning + pre-send verification): when an
+``identity`` provider is supplied, every peer :class:`PeerCaller` is
+asked to call MUST have a pinned ``PeerAgent.spiffe_id`` -- a peer with
+no pinned identity is refused outright (:class:`PeerPinningRequiredError`,
+a subclass of :class:`PeerVerificationError`) before any connection is
+attempted, because there would be nothing to verify the responder
+against. ``httpx``'s ``client.post(...)`` connects and sends the full
+request body in a single call, so verifying the peer only *after*
+``post()`` returns would let a complete task payload already reach a
+wrong-but-trust-domain-valid peer before a mismatch is even detected.
+To close that window, :meth:`PeerCaller.call_peer` first performs a
+handshake-only TLS probe (:func:`_probe_peer_tls_identity`) to the peer
+over the *same* mTLS ``SSLContext`` the real request will use, reads the
+SPIFFE ID from the peer's certificate, and only proceeds to send the
+real request -- payload and all -- once that matches ``peer.spiffe_id``.
+On a mismatch, :class:`PeerVerificationError` is raised and *nothing* is
+ever written to the connection beyond the TLS handshake itself.
+
+This pre-send probe applies only to the internally managed mTLS client
+(no ``http_client`` override). When a caller supplies its own
+``http_client`` (a test/DI seam -- see :class:`PeerCaller`'s docstring),
+there is no way to know it is safe to open a second, independent
+handshake-only connection to the same origin (it may not even be a real
+network endpoint), so verification there still falls back to inspecting
+the actual response's TLS connection *after* ``post()`` returns
+(:meth:`PeerCaller._verify_peer_identity`) -- the same residual timing
+window the security review identified, now scoped to that explicit
+opt-in seam rather than the default production path.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
+from contextlib import suppress
 from typing import Any, Protocol
+from urllib.parse import urlsplit
 
 import httpx
 from agentweave.transport.channel import PeerVerificationError
@@ -37,6 +64,7 @@ __all__ = [
     "PeerCallError",
     "PeerCaller",
     "PeerNotFoundError",
+    "PeerPinningRequiredError",
     "PeerVerificationError",
 ]
 
@@ -65,6 +93,105 @@ class PeerNotFoundError(Exception):
 
 class PeerCallError(Exception):
     """Raised when calling a peer agent fails due to a network or protocol error."""
+
+
+class PeerPinningRequiredError(PeerVerificationError):  # type: ignore[misc]
+    """Raised when :class:`PeerCaller` has a workload ``identity`` (mTLS
+    is in play) but the target peer has no pinned ``spiffe_id`` to
+    verify against (ADR-0004 SS7.3, mandatory pinning).
+
+    A peer with no pinned SPIFFE ID must never receive a task payload
+    over a channel whose only guarantee is "some SPIRE workload
+    answered" -- there is nothing to verify the responder's identity
+    against, so the call is refused before any connection is attempted.
+
+    Subclasses :class:`PeerVerificationError` so callers that already
+    handle outbound peer-verification failures generically continue to
+    catch this without changes.
+    """
+
+    def __init__(self, peer_name: str) -> None:
+        self.peer_name = peer_name
+        message = (
+            f"Peer '{peer_name}' has no spiffe_id configured, but this "
+            "PeerCaller is using a workload identity (mTLS). ADR-0004 "
+            "SS7.3 requires every peer called over mTLS to have a "
+            "pinned spiffe_id so its identity can be verified before a "
+            "task payload is sent. Set PeerAgent.spiffe_id for this peer."
+        )
+        # Deliberately bypass PeerVerificationError.__init__'s
+        # expected/actual formatting -- there is no expected id to
+        # report here, only "none configured at all".
+        Exception.__init__(self, message)
+        self.expected_id = "<none configured>"
+        self.actual_id = None
+
+
+def _split_endpoint_host_port(endpoint: str) -> tuple[str, int]:
+    """Parse *endpoint* (e.g. ``https://peer.hvslocal:8443``) into
+    ``(host, port)`` -- the same origin ``httpx``'s ``client.post`` will
+    connect to for the real request -- for the pre-send TLS probe.
+    """
+    parsed = urlsplit(endpoint)
+    host = parsed.hostname
+    if not host:
+        msg = f"Peer endpoint {endpoint!r} has no host to verify mTLS identity against"
+        raise PeerCallError(msg)
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    return host, port
+
+
+async def _probe_peer_tls_identity(
+    ssl_context: Any,
+    host: str,
+    port: int,
+    *,
+    connect_timeout: float = 10.0,
+) -> str | None:
+    """Open a handshake-only TLS connection to *host*:*port* using
+    *ssl_context* and return the SPIFFE ID presented by the peer's
+    certificate -- WITHOUT sending any application data.
+
+    This is the pre-send half of ADR-0004 SS6/SS7.3 peer verification
+    (see the module docstring): it performs the same TLS handshake
+    ``httpx`` would perform to the same origin, over the same mTLS
+    ``SSLContext``, reads the peer certificate, and closes the
+    connection immediately -- before any request line or body is ever
+    written to the socket.
+
+    Returns ``None`` (never raises for identity-related reasons) when
+    the peer presents no certificate or the certificate has no SPIFFE
+    SAN -- callers must treat ``None`` as "no identity available", not
+    as a match.
+
+    Raises:
+        OSError: On connection failure (DNS, refused, timeout, TLS
+            handshake/verification failure) -- callers translate this
+            into :class:`PeerCallError`, consistent with how a failed
+            ``client.post`` is handled.
+        TimeoutError: If the connection does not complete within
+            *connect_timeout* seconds.
+    """
+    _reader, writer = await asyncio.wait_for(
+        asyncio.open_connection(host, port, ssl=ssl_context, server_hostname=host),
+        timeout=connect_timeout,
+    )
+    try:
+        ssl_object = writer.get_extra_info("ssl_object")
+        if ssl_object is None:
+            return None
+        try:
+            cert_der = ssl_object.getpeercert(binary_form=True)
+        except Exception:
+            logger.warning("Could not read peer certificate from pre-send mTLS probe")
+            return None
+        if not cert_der:
+            return None
+        return extract_spiffe_id_from_cert(cert_der)
+    finally:
+        writer.close()
+        with suppress(Exception):
+            await writer.wait_closed()
 
 
 class WorkloadIdentityProvider(Protocol):
@@ -123,15 +250,21 @@ class PeerCaller:
         peers: List of PeerAgent configurations.
         http_client: Optional pre-configured httpx client. When given, it
             is used as-is (test/DI seam) -- ``identity`` is not consulted
-            to build a client, but peer SPIFFE-ID verification (when
-            ``identity`` is set and the peer configures ``spiffe_id``)
-            still applies to whatever client is used.
+            to build a client. Peer SPIFFE-ID verification still applies
+            (mandatory pinning is enforced regardless of this override),
+            but the pre-send TLS probe (ADR-0004 SS7.3) is skipped for
+            an injected client -- verification instead happens by
+            inspecting the actual response's TLS connection *after*
+            ``post()`` returns, which is the documented residual timing
+            window for this explicit opt-in seam (see the module
+            docstring).
         identity: Optional workload identity provider (ADR-0004 SS6). When
             set and no ``http_client`` override is given, outbound calls
             use an mTLS client built from
-            ``identity.create_tls_context(server=False)``, and the
-            responding peer's SPIFFE ID is verified against
-            ``PeerAgent.spiffe_id`` when configured.
+            ``identity.create_tls_context(server=False)``, every peer
+            must have a pinned ``spiffe_id`` (mandatory pinning --
+            :class:`PeerPinningRequiredError` otherwise), and the peer's
+            SPIFFE ID is verified BEFORE the request is sent.
     """
 
     def __init__(
@@ -145,6 +278,7 @@ class PeerCaller:
         self._http_client = http_client
         self._identity = identity
         self._mtls_client: httpx.AsyncClient | None = None
+        self._mtls_ssl_context: Any = None
 
     @property
     def peer_names(self) -> list[str]:
@@ -186,17 +320,68 @@ class PeerCaller:
 
         if self._identity is not None:
             if self._mtls_client is None:
-                ssl_context = await self._identity.create_tls_context(server=False)
-                self._mtls_client = httpx.AsyncClient(verify=ssl_context)
+                self._mtls_ssl_context = await self._identity.create_tls_context(server=False)
+                self._mtls_client = httpx.AsyncClient(verify=self._mtls_ssl_context)
             return self._mtls_client, False
 
         return httpx.AsyncClient(), True
+
+    def _require_pinned_spiffe_id(self, peer: PeerAgent) -> None:
+        """Mandatory pinning (ADR-0004 SS7.3): when this caller has a
+        workload ``identity`` (mTLS is in play), every peer it calls must
+        have a pinned ``spiffe_id`` to verify against -- a peer with no
+        pinned identity must never receive a payload over a channel whose
+        only guarantee is "some SPIRE workload answered".
+
+        A no-op when no ``identity`` is configured -- nothing to pin
+        against on a plain (non-mTLS) call, matching pre-ADR-0004
+        behavior exactly.
+
+        Raises:
+            PeerPinningRequiredError: ``identity`` is set but ``peer`` has
+                no ``spiffe_id`` configured.
+        """
+        if self._identity is not None and not peer.spiffe_id:
+            raise PeerPinningRequiredError(peer.name)
+
+    async def _verify_peer_before_send(self, peer: PeerAgent) -> None:
+        """Pre-send half of ADR-0004 SS6/SS7.3 peer verification (see the
+        module docstring): perform a handshake-only TLS probe to *peer*
+        over the cached mTLS ``SSLContext`` and confirm the presented
+        SPIFFE ID matches ``peer.spiffe_id`` BEFORE the real request
+        (carrying the task payload) is ever sent. Only called for the
+        internally managed mTLS client -- see :meth:`call_peer`.
+
+        Raises:
+            PeerVerificationError: The probe's verified peer SPIFFE ID
+                does not match ``peer.spiffe_id`` -- nothing is sent.
+            PeerCallError: The probe connection itself failed (DNS,
+                refused, timeout, TLS handshake/verification failure).
+        """
+        if self._mtls_ssl_context is None:
+            msg = f"No mTLS SSLContext available to verify peer '{peer.name}' before sending"
+            raise PeerCallError(msg)
+
+        host, port = _split_endpoint_host_port(peer.endpoint)
+        try:
+            actual = await _probe_peer_tls_identity(self._mtls_ssl_context, host, port)
+        except (OSError, TimeoutError) as exc:
+            msg = f"Failed to verify peer '{peer.name}' at {peer.endpoint} before sending: {exc}"
+            raise PeerCallError(msg) from exc
+
+        if actual != peer.spiffe_id:
+            raise PeerVerificationError(peer.spiffe_id, actual)
 
     def _verify_peer_identity(self, peer: PeerAgent, response: httpx.Response) -> None:
         """Verify the responding peer's SPIFFE ID matches ``peer.spiffe_id``
         (ADR-0004 SS6). A no-op unless both a workload ``identity`` and an
         expected ``peer.spiffe_id`` are configured -- there is nothing to
-        verify against otherwise.
+        verify against otherwise. This is a post-send, defense-in-depth
+        check: for the internally managed mTLS client, the pre-send probe
+        in :meth:`_verify_peer_before_send` already blocked sending to a
+        mismatched peer; for an injected ``http_client`` (test/DI seam),
+        this is the *only* verification performed -- see the module
+        docstring for that residual timing window.
 
         Raises:
             PeerVerificationError: The connection's verified peer SPIFFE ID
@@ -227,18 +412,38 @@ class PeerCaller:
 
         Raises:
             PeerNotFoundError: If the peer name is not configured.
-            PeerCallError: If the HTTP call fails.
+            PeerCallError: If the HTTP call (or the pre-send verification
+                probe) fails.
+            PeerPinningRequiredError: If this caller has a workload
+                ``identity`` (mTLS) but ``peer`` has no pinned
+                ``spiffe_id`` (ADR-0004 SS7.3, mandatory pinning). No
+                connection is attempted.
             PeerVerificationError: If mTLS peer verification is enabled
-                and the responding peer's SPIFFE ID doesn't match.
+                and the responding peer's SPIFFE ID doesn't match --
+                raised BEFORE the task payload is sent whenever the
+                internally managed mTLS client is in use (see the module
+                docstring for the residual window with an injected
+                ``http_client``).
         """
         peer = self.get_peer(name)
         url = peer.endpoint.rstrip("/") + "/a2a/tasks"
+
+        # ADR-0004 SS7.3: mandatory pinning -- refuse before ever
+        # attempting a connection when there is nothing to verify the
+        # peer against.
+        self._require_pinned_spiffe_id(peer)
 
         request = A2ATaskRequest(task_type=task_type, payload=payload or {})
 
         client, should_close = await self._resolve_client()
 
         try:
+            if self._identity is not None and self._http_client is None:
+                # ADR-0004 SS6/SS7.3: verify the peer BEFORE sending the
+                # task payload -- see _verify_peer_before_send and the
+                # module docstring.
+                await self._verify_peer_before_send(peer)
+
             response = await client.post(
                 url,
                 json=request.model_dump(),

@@ -566,7 +566,7 @@ class AgentWeaveConfig(BaseModel):
     at all and this block has zero runtime effect.
     """
 
-    enabled: bool = True
+    enabled: bool = False
     trust_domain: str = "forge.local"
     spiffe_endpoint: str = "unix:///run/spire/sockets/agent.sock"
     authz_provider: str = "opa"
@@ -806,3 +806,30 @@ class ForgeConfig(BaseModel):
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
     security: SecurityConfig = Field(default_factory=SecurityConfig)
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
+
+    @model_validator(mode="after")
+    def validate_agentweave_peers_are_pinned(self) -> ForgeConfig:
+        """ADR-0004 SS7.3 mandatory pinning: when the workload (SPIFFE +
+        OPA mTLS) plane is enabled, every configured peer must carry a
+        pinned ``spiffe_id``. Without one, the outbound ``PeerCaller``
+        has nothing to verify the responding peer's SVID against, and a
+        task payload could be sent to -- and trusted from -- whatever
+        workload happens to answer on that endpoint, so long as it holds
+        any valid SPIRE-issued certificate in the trust domain. Reject
+        that configuration at load time rather than let it parse and
+        fail (or worse, silently under-verify) at runtime."""
+        if self.security.agentweave.enabled:
+            unpinned = [peer.name for peer in self.agents.peers if not peer.spiffe_id]
+            if unpinned:
+                names = ", ".join(unpinned)
+                msg = (
+                    "security.agentweave.enabled is true, but the following "
+                    f"agents.peers have no spiffe_id pinned: {names}. ADR-0004 "
+                    "SS7.3 requires every peer called over the mTLS workload "
+                    "plane to have a pinned spiffe_id so PeerCaller can verify "
+                    "it reached the intended peer before sending a task "
+                    "payload. Set spiffe_id for each peer, or remove it from "
+                    "agents.peers, or disable security.agentweave."
+                )
+                raise ValueError(msg)
+        return self

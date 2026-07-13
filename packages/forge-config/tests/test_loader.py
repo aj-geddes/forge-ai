@@ -24,6 +24,13 @@ class TestLoadConfig:
         assert config.llm.default_model == "gpt-4o"
         assert config.security.rate_limit_rpm == 60
 
+    def test_config_omitting_agentweave_yields_workload_disabled(self) -> None:
+        """HIGH finding fix: minimal_config.yaml has no security block at
+        all, let alone security.agentweave -- loading it must never
+        silently enable the AgentWeave workload (SPIFFE+OPA mTLS) plane."""
+        config = load_config(FIXTURES / "minimal_config.yaml")
+        assert config.security.agentweave.enabled is False
+
     def test_file_not_found(self) -> None:
         with pytest.raises(ConfigLoadError, match="not found"):
             load_config("/nonexistent/forge.yaml")
