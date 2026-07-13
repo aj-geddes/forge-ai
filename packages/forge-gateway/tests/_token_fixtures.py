@@ -71,6 +71,7 @@ async def wire(
     user_tokens_enabled: bool = True,
     default_ttl_seconds: int = 2_592_000,
     max_ttl_seconds: int = 7_776_000,
+    max_tokens_per_owner: int | None = None,
     roles: dict[str, list[str]] | None = None,
     static_service_token: bool = False,
     store_path: Path | None = None,
@@ -125,6 +126,26 @@ async def wire(
             ServiceToken(id="svc1", secret_sha256=STATIC_SERVICE_TOKEN_DIGEST, roles=["admin"])
         )
 
+    # max_tokens_per_owner is only passed through when the caller explicitly
+    # asked for it, so tests that omit it exercise UserTokenConfig's own
+    # default rather than a value pinned here.
+    user_token_config = (
+        UserTokenConfig(
+            enabled=user_tokens_enabled,
+            store_path=str(resolved_store_path),
+            default_ttl_seconds=default_ttl_seconds,
+            max_ttl_seconds=max_ttl_seconds,
+            max_tokens_per_owner=max_tokens_per_owner,
+        )
+        if max_tokens_per_owner is not None
+        else UserTokenConfig(
+            enabled=user_tokens_enabled,
+            store_path=str(resolved_store_path),
+            default_ttl_seconds=default_ttl_seconds,
+            max_ttl_seconds=max_ttl_seconds,
+        )
+    )
+
     security.configure_auth(
         session_codec=session_codec,
         service_token_verifier=ServiceTokenVerifier(static_tokens, store=store),
@@ -133,12 +154,7 @@ async def wire(
         cookie_name=SESSION_COOKIE_NAME,
         dev_insecure=False,
         user_token_store=store,
-        user_token_config=UserTokenConfig(
-            enabled=user_tokens_enabled,
-            store_path=str(resolved_store_path),
-            default_ttl_seconds=default_ttl_seconds,
-            max_ttl_seconds=max_ttl_seconds,
-        ),
+        user_token_config=user_token_config,
         authorization_config=authorization_config,
     )
     return TokenTestWiring(

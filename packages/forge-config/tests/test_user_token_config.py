@@ -90,3 +90,30 @@ def test_static_token_id_without_reserved_prefix_is_legal():
         tokens=[ServiceToken(id="my-token", secret_sha256="c" * 64, roles=["read"])]
     )
     assert config.tokens[0].id == "my-token"
+
+
+def test_default_max_tokens_per_owner_is_25():
+    config = UserTokenConfig()
+    assert config.max_tokens_per_owner == 25
+
+
+def test_custom_max_tokens_per_owner_is_honored():
+    config = UserTokenConfig(max_tokens_per_owner=5)
+    assert config.max_tokens_per_owner == 5
+
+
+def test_max_tokens_per_owner_below_one_raises_config_error():
+    with pytest.raises(ValidationError) as exc_info:
+        UserTokenConfig(max_tokens_per_owner=0)
+    assert "max_tokens_per_owner" in str(exc_info.value)
+
+
+def test_max_tokens_per_owner_of_one_is_legal():
+    config = UserTokenConfig(max_tokens_per_owner=1)
+    assert config.max_tokens_per_owner == 1
+
+
+def test_max_tokens_per_owner_omitted_from_legacy_dict_uses_default():
+    legacy_dict = {"enabled": True, "store_path": "/app/data/user_tokens.json"}
+    config = UserTokenConfig.model_validate(legacy_dict)
+    assert config.max_tokens_per_owner == 25

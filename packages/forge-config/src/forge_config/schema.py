@@ -461,6 +461,13 @@ class UserTokenConfig(BaseModel):
     store_path: str = "/app/data/user_tokens.json"
     default_ttl_seconds: int = 2_592_000  # 30 days
     max_ttl_seconds: int = 7_776_000  # 90 days
+    # DoS guard (security review finding): caps the number of ACTIVE
+    # (non-revoked, non-expired) tokens a single owner may hold at once.
+    # Enforced by forge-gateway at mint time -- this field only carries the
+    # configured limit. 25 is a generous default for real per-device usage
+    # while still bounding the shared PVC store and the cost of the
+    # single-global-lock rewrite-the-whole-document write path.
+    max_tokens_per_owner: int = Field(default=25, ge=1)
 
     @field_validator("store_path")
     @classmethod

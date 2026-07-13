@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import logging
 import re
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, Request
@@ -124,6 +125,20 @@ def _feature_store(request: Request) -> tuple[UserTokenStore | None, JSONRespons
     return store, None
 
 
+def _active_token_count(store: UserTokenStore, owner_sub: str) -> int:
+    """Count *owner_sub*'s ACTIVE tokens -- neither revoked nor expired as
+    of now. Revoked/expired tombstones are excluded so a user who revokes
+    stale keys can always mint fresh ones (ADR-0002's cap is on live
+    exposure, not lifetime mint count); this is the same predicate a
+    future tombstone-compaction pass would use, just not persisted here."""
+    now = datetime.now(UTC)
+    return sum(
+        1
+        for record in store.list_for_owner(owner_sub)
+        if not record.is_revoked and not record.is_expired(now)
+    )
+
+
 def _serialize_record(record: UserTokenRecord, *, include_owner_email: bool) -> TokenListItem:
     return TokenListItem(
         id=record.id,
@@ -182,6 +197,24 @@ async def mint_token(request: Request, body: MintTokenRequest) -> JSONResponse:
     authorizer = security.get_authorizer()
     assert authorizer is not None  # noqa: S101 -- invariant: set whenever get_principal succeeded
     requested_permissions = authorizer.permissions_for_roles(requested_roles)
+
+    if _active_token_count(store, principal.sub) >= user_token_config.max_tokens_per_owner:
+        # DoS guard (security review finding): a single owner minting
+        # unbounded tokens fills the shared PVC store and slows the
+        # single-global-lock rewrite-the-whole-document write path for
+        # every caller. Applies uniformly, including to admins -- there is
+        # no exemption, so the limit is simple and always honored.
+        return JSONResponse(
+            {
+                "error": "too_many_tokens",
+                "detail": (
+                    "you already have the maximum of "
+                    f"{user_token_config.max_tokens_per_owner} active token(s); "
+                    "revoke one before minting another"
+                ),
+            },
+            status_code=403,
+        )
 
     try:
         minted = await mint_user_token(
