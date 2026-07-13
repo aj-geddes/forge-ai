@@ -48,12 +48,10 @@ import ssl
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from agentweave.authz.opa import OPAProvider
 from agentweave.observability.audit import AuditTrail
-from agentweave.testing.mocks import AuthzDecision as MockAuthzDecision
-from agentweave.testing.mocks import MockAuthorizationProvider, MockIdentityProvider
 
 from forge_security.oidc.principal import Principal
 from forge_security.workload.audit import build_audit_trail
@@ -61,6 +59,19 @@ from forge_security.workload.authz import authorize_workload
 from forge_security.workload.errors import WorkloadUnauthenticated, WorkloadUnavailable
 from forge_security.workload.mtls import server_ssl_context
 from forge_security.workload.resolver import resolve_workload_principal
+
+if TYPE_CHECKING:
+    # Type-checking only -- production code must NEVER import agentweave's
+    # test doubles at module load. ``agentweave.testing.__init__``
+    # unconditionally imports ``agentweave.testing.fixtures``, which
+    # unconditionally imports ``pytest`` -- a dev-only dependency not
+    # present in the production image. ``from __future__ import
+    # annotations`` (above) makes every annotation below a lazy string, so
+    # this import never executes at runtime; ``build_workload_plane``'s
+    # ``test_mode`` branch does its own local (runtime) import of the same
+    # names, at the only point they're actually instantiated.
+    from agentweave.testing.mocks import AuthzDecision as MockAuthzDecision
+    from agentweave.testing.mocks import MockAuthorizationProvider, MockIdentityProvider
 
 try:
     from agentweave.identity.spiffe import SPIFFEIdentityProvider
@@ -260,6 +271,12 @@ async def build_workload_plane(
     failure cannot affect the human plane.
     """
     if test_mode:
+        # Deferred on purpose: production must never import agentweave's
+        # test doubles (and their pytest dependency) merely by importing
+        # this module -- only `test_mode=True` callers (unit tests, local
+        # dev) ever reach this branch, and only then is the import made.
+        from agentweave.testing.mocks import MockAuthorizationProvider, MockIdentityProvider
+
         identity: Any = _MockIdentityAdapter(
             MockIdentityProvider(
                 spiffe_id=f"spiffe://{agentweave_config.trust_domain}/agent/{agent_name}"

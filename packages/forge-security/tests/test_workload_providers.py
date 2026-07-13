@@ -16,6 +16,8 @@ Two modes, tested separately:
 
 from __future__ import annotations
 
+import importlib
+import sys
 from typing import Any
 
 import pytest
@@ -131,6 +133,140 @@ class TestBuildWorkloadPlaneProductionMode:
 
         assert identity_calls[0]["endpoint"] == "unix:///env-override.sock"
         assert opa_calls[0]["endpoint"] == "http://opa-env.example:8181"
+
+
+class _BlockAgentweaveTesting:
+    """A ``sys.meta_path`` finder that makes ``agentweave.testing`` (and
+    any submodule of it, e.g. ``agentweave.testing.mocks``) raise
+    ``ModuleNotFoundError`` -- simulating the production container, which
+    does not ship ``pytest`` (a dev-only dependency that
+    ``agentweave.testing.__init__`` unconditionally imports via
+    ``agentweave.testing.fixtures``)."""
+
+    _BLOCKED = "agentweave.testing"
+
+    def find_spec(self, fullname: str, path: Any, target: Any = None) -> None:
+        if fullname == self._BLOCKED or fullname.startswith(f"{self._BLOCKED}."):
+            raise ModuleNotFoundError(
+                f"simulated production environment: {fullname!r} is unavailable "
+                "(pytest, its transitive dependency, is not installed in prod)"
+            )
+        return None
+
+
+# Only the two modules the bug (and its fix) actually live in. Deliberately
+# NOT the sibling submodules (``errors``, ``audit``, ``authz``, ``mtls``,
+# ``resolver``) -- reloading those too would mint a *second*,
+# identity-distinct ``WorkloadUnavailable`` class, which ``pytest.raises``
+# (bound to the module-level import at the top of this file) would then
+# fail to match even on an otherwise-correct exception.
+_RELOAD_TARGETS = ("forge_security.workload", "forge_security.workload.providers")
+
+
+def _agentweave_testing_module_names() -> list[str]:
+    """``agentweave.testing`` (and its submodules, e.g.
+    ``agentweave.testing.mocks``) is already imported and cached in
+    ``sys.modules`` by this file's own top-level ``from agentweave.testing
+    import ...``. A ``sys.meta_path`` finder is only ever consulted for a
+    name that ISN'T already in ``sys.modules`` -- so it must be purged too,
+    or ``_BlockAgentweaveTesting`` would never actually run."""
+    return [
+        name
+        for name in sys.modules
+        if name == "agentweave.testing" or name.startswith("agentweave.testing.")
+    ]
+
+
+def _reload_forge_security_workload(*, purge_agentweave_testing: bool = True) -> tuple[Any, Any]:
+    """Drop ``forge_security.workload``/``forge_security.workload.providers``
+    from ``sys.modules`` and re-import them fresh, so the import machinery
+    actually re-runs their module bodies.
+
+    ``purge_agentweave_testing=True`` (the default) also purges the cached
+    ``agentweave.testing`` tree first -- required so the simulated-production
+    ``meta_path`` block below is actually *consulted* (a finder is only
+    asked about names not already in ``sys.modules``). Pass ``False`` for a
+    plain reload with the finder gone, so a lazy re-import of
+    ``agentweave.testing.mocks`` inside ``test_mode`` reuses the SAME
+    ``MockIdentityProvider``/``MockAuthorizationProvider`` classes this
+    file's own top-level import bound -- otherwise ``isinstance`` checks
+    against those would spuriously fail against a second, freshly-imported,
+    identity-distinct copy of the same classes.
+    """
+    for name in _RELOAD_TARGETS:
+        sys.modules.pop(name, None)
+    if purge_agentweave_testing:
+        for name in _agentweave_testing_module_names():
+            sys.modules.pop(name, None)
+    workload = importlib.import_module("forge_security.workload")
+    providers = importlib.import_module("forge_security.workload.providers")
+    return workload, providers
+
+
+def _save_reload_state() -> dict[str, Any]:
+    names = (*_RELOAD_TARGETS, *_agentweave_testing_module_names())
+    return {name: sys.modules[name] for name in names if name in sys.modules}
+
+
+def _restore_reload_state(saved: dict[str, Any]) -> None:
+    for name in (*_RELOAD_TARGETS, *_agentweave_testing_module_names()):
+        sys.modules.pop(name, None)
+    sys.modules.update(saved)
+
+
+class TestWorkloadImportsWithoutAgentweaveTestingOrPytest:
+    """Production-crash regression (caught by an image pre-flight):
+    ``forge_security.workload.providers`` must never import
+    ``agentweave.testing`` (and therefore ``pytest``, a dev-only
+    dependency) at module load -- only lazily, inside the ``test_mode``
+    branch of ``build_workload_plane``. Otherwise
+    ``import forge_security.workload`` crashes the gateway before
+    uvicorn even starts, in any image without ``pytest`` installed."""
+
+    async def test_workload_imports_without_agentweave_testing_or_pytest(self) -> None:
+        saved = _save_reload_state()
+        finder = _BlockAgentweaveTesting()
+        sys.meta_path.insert(0, finder)
+        try:
+            workload, providers = _reload_forge_security_workload()
+
+            assert workload.WorkloadPlane is providers.WorkloadPlane
+
+            # Production mode must fail closed with WorkloadUnavailable
+            # (no SPIRE socket on this box) -- NOT ModuleNotFoundError.
+            with pytest.raises(WorkloadUnavailable):
+                await providers.build_workload_plane(_cfg(), test_mode=False)
+        finally:
+            sys.meta_path.remove(finder)
+            _restore_reload_state(saved)
+
+    async def test_workload_test_mode_still_works_after_reimport(self) -> None:
+        """``test_mode=True`` still needs ``agentweave.testing`` -- but only
+        once it actually *runs* (in the test venv, where it IS present),
+        never merely from importing the module. Proves the fix only moved
+        *when* the import happens, not *whether* test_mode still works."""
+        saved = _save_reload_state()
+        finder = _BlockAgentweaveTesting()
+        sys.meta_path.insert(0, finder)
+        try:
+            _reload_forge_security_workload()
+        finally:
+            sys.meta_path.remove(finder)
+            _restore_reload_state(saved)
+
+        # Reload once more, this time with agentweave.testing available
+        # (the finder is gone), and confirm test_mode=True still works.
+        # `purge_agentweave_testing=False`: keep reusing the SAME mock
+        # classes this file imported at the top, so the isinstance checks
+        # below are meaningful.
+        saved = _save_reload_state()
+        try:
+            _workload, providers = _reload_forge_security_workload(purge_agentweave_testing=False)
+            plane = await providers.build_workload_plane(_cfg(), test_mode=True)
+            assert isinstance(plane, providers.WorkloadPlane)
+            assert isinstance(plane.identity._mock, MockIdentityProvider)  # noqa: SLF001
+        finally:
+            _restore_reload_state(saved)
 
 
 class TestBuildWorkloadPlaneFailsClosedOnUnreachableSpire:
