@@ -1,0 +1,25 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: forge-ai
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: dev-aj-geddes
+  source:
+    repoURL: https://github.com/aj-geddes/forge-ai
+    targetRevision: main
+    path: deploy/helm/forge
+    helm:
+      valueFiles:
+        - values-hvs-k8s.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: dev-aj-geddes
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false

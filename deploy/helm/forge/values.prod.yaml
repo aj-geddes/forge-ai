@@ -1,4 +1,9 @@
-# Production overrides (large profile)
+# Production-scale overrides.
+# Note: the old "large" profile's separate gateway pod, the litellm
+# "dedicated" mode deployment, and the default Redis deployment have all
+# been removed from this chart -- none of them were wired to anything the
+# application code actually uses. Scale by adding replicas to the single
+# agent deployment (below) instead.
 profile: large
 
 agent:
@@ -11,26 +16,6 @@ agent:
       cpu: "2"
       memory: 2Gi
 
-gateway:
-  enabled: true
-  replicaCount: 2
-  resources:
-    requests:
-      cpu: 250m
-      memory: 256Mi
-    limits:
-      cpu: "1"
-      memory: 1Gi
-
-litellm:
-  mode: dedicated
-
-redis:
-  mode: single-pvc
-  persistence:
-    enabled: true
-    size: 5Gi
-
 autoscaling:
   enabled: true
   minReplicas: 3
@@ -40,6 +25,3 @@ autoscaling:
 podDisruptionBudget:
   enabled: true
   minAvailable: 2
-
-serviceMonitor:
-  enabled: true

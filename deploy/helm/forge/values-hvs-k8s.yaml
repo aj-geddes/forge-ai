@@ -1,0 +1,114 @@
+# Cluster-specific overrides for the hvs-k8s cluster, dev-aj-geddes namespace,
+# reachable at https://forgeai.hvslocal via the shared Gateway API listener.
+#
+# Consumed by the ArgoCD Application at deploy/argocd/application.yaml via
+# spec.source.helm.valueFiles.
+
+profile: small
+
+image:
+  repository: harbor.hvslocal/dev-aj-geddes/forge-ai
+  # Immutable tag pinned to the commit the image was built from. Update this
+  # (and re-push a new image) on every deploy -- never track :latest.
+  tag: "1d45e57"
+  pullPolicy: IfNotPresent
+
+agent:
+  replicaCount: 1
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+
+service:
+  type: ClusterIP
+  port: 8000
+
+httpRoute:
+  enabled: true
+  hostnames:
+    - forgeai.hvslocal
+  parentRefs:
+    - name: shared-gateway
+      namespace: gateway
+      sectionName: https
+
+# Pulls LLM provider API keys from OpenBao (kv/users/aj-geddes/app/forge-ai)
+# via the "openbao" SecretStore already provisioned in dev-aj-geddes, into a
+# Secret consumed by the agent Deployment's envFrom. The entry must exist in
+# OpenBao with these two properties before the pod will have working LLM
+# credentials (its absence does not block the pod from becoming Ready --
+# forge_gateway's readiness check only tracks tool-surface/agent init, not
+# whether the configured API keys are real -- but LLM calls will fail until
+# populated).
+externalSecret:
+  enabled: true
+  secretStoreRef:
+    name: openbao
+    kind: SecretStore
+  refreshInterval: 1h
+  data:
+    - secretKey: OPENAI_API_KEY
+      remoteRef:
+        key: users/aj-geddes/app/forge-ai
+        property: openai_api_key
+    - secretKey: ANTHROPIC_API_KEY
+      remoteRef:
+        key: users/aj-geddes/app/forge-ai
+        property: anthropic_api_key
+
+# Minimal, sensible forge.yaml. No secret values are embedded -- LLM API keys
+# are ${ENV_VAR} references resolved at process startup from the env vars
+# populated by the externalSecret above (see forge_config.loader's
+# _substitute_env_vars). Tool sources are intentionally empty: this chart
+# should not depend on reachable third-party OpenAPI endpoints at agent
+# startup, since a failed tool-surface build marks the "agent" health
+# component "failed" and holds the pod out of the Service via /health/ready.
+forgeConfig:
+  metadata:
+    name: forge-ai
+    version: "0.1.0"
+    description: "Forge AI gateway - hvs-k8s / dev-aj-geddes"
+    environment: development
+  llm:
+    default_model: claude-sonnet
+    temperature: 0.7
+    max_tokens: 4096
+    system_prompt: "You are a helpful AI assistant with access to tools."
+    litellm:
+      mode: embedded
+      model_list:
+        - model_name: gpt-4o
+          litellm_params:
+            model: openai/gpt-4o
+            api_key: ${OPENAI_API_KEY}
+        - model_name: claude-sonnet
+          litellm_params:
+            model: anthropic/claude-sonnet-4-20250514
+            api_key: ${ANTHROPIC_API_KEY}
+      fallback_models:
+        - gpt-4o
+      timeout: 30.0
+      max_retries: 3
+  security:
+    agentweave:
+      # No SPIRE/OPA infrastructure is wired up for this deployment yet, so
+      # AgentWeave identity/authz is explicitly disabled rather than left to
+      # fail at runtime. forge_gateway falls back to unauthenticated
+      # "development mode" when this is false (see app.py::_init_security_gate).
+      enabled: false
+    api_keys:
+      enabled: false
+    rate_limit_rpm: 60
+    allowed_origins:
+      - "https://forgeai.hvslocal"
+  agents:
+    default: assistant
+    agents:
+      - name: assistant
+        description: "General-purpose assistant"
+        system_prompt: "You are a helpful assistant."
+        max_turns: 10

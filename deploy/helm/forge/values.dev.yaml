@@ -1,4 +1,8 @@
 # Development overrides
+# Note: FORGE_ENV / LOG_LEVEL env vars were removed -- no code in this repo
+# reads them (config/environment comes from FORGE_CONFIG_PATH's forge.yaml,
+# and logging is unconditionally structured). Do not reintroduce env vars
+# here without also wiring code to read them.
 profile: small
 
 image:
@@ -13,8 +17,3 @@ agent:
     limits:
       cpu: 500m
       memory: 512Mi
-  env:
-    - name: FORGE_ENV
-      value: development
-    - name: LOG_LEVEL
-      value: DEBUG

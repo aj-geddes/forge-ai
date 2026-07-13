@@ -4,9 +4,9 @@ Profile: {{ .Values.profile | default "small" }}
 Release: {{ .Release.Name }}
 
 1. Get the application URL:
-{{- if .Values.ingress.enabled }}
-  {{- range $host := .Values.ingress.hosts }}
-  http{{ if $.Values.ingress.tls }}s{{ end }}://{{ $host.host }}
+{{- if .Values.httpRoute.enabled }}
+  {{- range $host := .Values.httpRoute.hostnames }}
+  https://{{ $host }}
   {{- end }}
 {{- else }}
   kubectl port-forward svc/{{ include "forge.fullname" . }} {{ .Values.service.port }}:{{ .Values.service.port }}

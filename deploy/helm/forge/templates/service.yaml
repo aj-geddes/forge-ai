@@ -11,14 +11,6 @@ spec:
       targetPort: http
       protocol: TCP
       name: http
-    - port: {{ .Values.service.metricsPort }}
-      targetPort: metrics
-      protocol: TCP
-      name: metrics
   selector:
     {{- include "forge.selectorLabels" . | nindent 4 }}
-    {{- if .Values.gateway.enabled }}
-    app.kubernetes.io/component: gateway
-    {{- else }}
     app.kubernetes.io/component: agent
-    {{- end }}
