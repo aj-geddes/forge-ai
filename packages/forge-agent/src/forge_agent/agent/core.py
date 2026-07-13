@@ -27,8 +27,8 @@ from pydantic_ai.models import Model
 from pydantic_ai.settings import ModelSettings
 from pydantic_ai.usage import UsageLimits
 
-from forge_agent.agent.context import ConversationContext
 from forge_agent.agent.llm import LLMRouter
+from forge_agent.agent.store import ConversationStore, InMemoryConversationStore
 from forge_agent.builder.registry import ToolSurfaceRegistry
 
 
@@ -186,6 +186,14 @@ class ForgeAgent:
             surface. Defaults to a CompositeSecretResolver (env-backed)
             so configs like ``forge.yaml.example`` work without callers
             wiring one up explicitly.
+        conversation_store: Optional ConversationStore (ADR-0003 WS-7)
+            used to persist per-session message history. Defaults to an
+            ``InMemoryConversationStore`` so existing construction (no
+            store wired up) behaves exactly as before -- durable,
+            cross-replica storage via ``RedisConversationStore`` is
+            strictly opt-in, built by callers (e.g. the gateway lifespan)
+            via ``forge_agent.agent.store.build_conversation_store`` and
+            injected here.
     """
 
     def __init__(
@@ -193,12 +201,13 @@ class ForgeAgent:
         config: ForgeConfig,
         model_override: Model | None = None,
         secret_resolver: SecretResolver | None = None,
+        conversation_store: ConversationStore | None = None,
     ) -> None:
         self._config = config
         self._llm_router = LLMRouter(config.llm)
         self._secret_resolver: SecretResolver = secret_resolver or build_default_secret_resolver()
         self._registry = ToolSurfaceRegistry(secret_resolver=self._secret_resolver)
-        self._context = ConversationContext()
+        self._context: ConversationStore = conversation_store or InMemoryConversationStore()
         self._model_override = model_override
         self._agent: PydanticAIAgent[None] | None = None
 
@@ -208,14 +217,24 @@ class ForgeAgent:
         return self._registry
 
     @property
-    def context(self) -> ConversationContext:
-        """The conversation context manager."""
+    def context(self) -> ConversationStore:
+        """The conversation store (ADR-0003 WS-7)."""
         return self._context
 
     @property
     def llm_router(self) -> LLMRouter:
         """The LLM router."""
         return self._llm_router
+
+    async def aclose(self) -> None:
+        """Release resources held by this agent's conversation store.
+
+        Delegates to ``ConversationStore.close()`` (a no-op for the
+        default in-memory store; closes the underlying Redis client for
+        ``RedisConversationStore``). Callers that own this agent's
+        lifecycle (e.g. the gateway lifespan) must call this on shutdown.
+        """
+        await self._context.close()
 
     def resolve_persona(self, name: str) -> AgentDef | None:
         """Look up a named agent persona from the config's agents list.
@@ -380,7 +399,7 @@ class ForgeAgent:
 
         message_history = None
         if session_id:
-            message_history = self._context.get_messages(session_id) or None
+            message_history = await self._context.get_messages(session_id) or None
 
         usage_limits = _build_usage_limits(max_turns_override)
 
@@ -405,7 +424,7 @@ class ForgeAgent:
 
         # Store messages in context.
         if session_id:
-            self._context.add_messages(session_id, all_msgs)
+            await self._context.add_messages(session_id, all_msgs)
 
         return ForgeRunResult(
             output=result.output,
@@ -473,7 +492,7 @@ class ForgeAgent:
 
                 if session_id:
                     all_msgs = stream.all_messages()
-                    context.add_messages(session_id, list(all_msgs))
+                    await context.add_messages(session_id, list(all_msgs))
 
         return _generate()
 

@@ -1027,6 +1027,168 @@ class TestAgentInitializationHealthState:
 
 
 # ---------------------------------------------------------------------------
+# 8b. Conversation store wiring (ADR-0003 WS-7)
+# ---------------------------------------------------------------------------
+
+
+class TestConversationStoreWiring:
+    """The lifespan builds a ConversationStore from config, injects it into
+    the agent, and closes it on shutdown."""
+
+    async def test_builds_store_from_config_and_injects_into_agent(
+        self,
+        mock_watcher: MagicMock,
+        config_file: Path,
+    ) -> None:
+        from forge_config.schema import ForgeConfig
+
+        real_config = ForgeConfig()
+        app = FastAPI(lifespan=lifespan)
+
+        sentinel_store = MagicMock()
+        mock_agent = MagicMock()
+        mock_agent.initialize = AsyncMock(return_value=None)
+        mock_agent._registry = None
+        mock_agent.context = sentinel_store
+        forge_agent_ctor = MagicMock(return_value=mock_agent)
+
+        with (
+            patch.dict("os.environ", {"FORGE_CONFIG_PATH": str(config_file)}),
+            patch("forge_config.load_config", return_value=real_config),
+            patch("forge_config.ConfigWatcher", return_value=mock_watcher),
+            patch("forge_agent.ForgeAgent", forge_agent_ctor),
+            patch(
+                "forge_agent.agent.store.build_conversation_store",
+                return_value=sentinel_store,
+            ) as mock_build,
+        ):
+            async with lifespan(app):
+                pass
+
+        mock_build.assert_called_once()
+        assert mock_build.call_args.args[0] is real_config.conversation_store
+        forge_agent_ctor.assert_called_once()
+        assert forge_agent_ctor.call_args.kwargs["conversation_store"] is sentinel_store
+
+    async def test_closes_conversation_store_on_shutdown(
+        self,
+        mock_watcher: MagicMock,
+        config_file: Path,
+    ) -> None:
+        from forge_config.schema import ForgeConfig
+
+        real_config = ForgeConfig()
+        app = FastAPI(lifespan=lifespan)
+
+        mock_agent = MagicMock()
+        mock_agent.initialize = AsyncMock(return_value=None)
+        mock_agent._registry = None
+        mock_agent.aclose = AsyncMock(return_value=None)
+
+        with (
+            patch.dict("os.environ", {"FORGE_CONFIG_PATH": str(config_file)}),
+            patch("forge_config.load_config", return_value=real_config),
+            patch("forge_config.ConfigWatcher", return_value=mock_watcher),
+            patch("forge_agent.ForgeAgent", return_value=mock_agent),
+        ):
+            async with lifespan(app):
+                pass
+
+        mock_agent.aclose.assert_awaited_once()
+
+    async def test_closes_orphaned_store_when_agent_construction_fails(
+        self,
+        mock_watcher: MagicMock,
+        config_file: Path,
+    ) -> None:
+        """If the store is built successfully but ForgeAgent itself never
+        gets constructed, the orphaned store must still be closed on
+        shutdown -- not just leaked."""
+        from forge_config.schema import ForgeConfig
+
+        real_config = ForgeConfig()
+        app = FastAPI(lifespan=lifespan)
+
+        orphaned_store = MagicMock()
+        orphaned_store.close = AsyncMock(return_value=None)
+
+        with (
+            patch.dict("os.environ", {"FORGE_CONFIG_PATH": str(config_file)}),
+            patch("forge_config.load_config", return_value=real_config),
+            patch("forge_config.ConfigWatcher", return_value=mock_watcher),
+            patch("forge_agent.ForgeAgent", side_effect=RuntimeError("agent boom")),
+            patch(
+                "forge_agent.agent.store.build_conversation_store",
+                return_value=orphaned_store,
+            ),
+        ):
+            async with lifespan(app):
+                pass
+
+        orphaned_store.close.assert_awaited_once()
+
+    async def test_shutdown_tolerates_orphaned_store_close_failure(
+        self,
+        mock_watcher: MagicMock,
+        config_file: Path,
+    ) -> None:
+        """A failure while closing the orphaned store on shutdown must be
+        logged, not raised -- shutdown must always complete."""
+        from forge_config.schema import ForgeConfig
+
+        real_config = ForgeConfig()
+        app = FastAPI(lifespan=lifespan)
+
+        orphaned_store = MagicMock()
+        orphaned_store.close = AsyncMock(side_effect=RuntimeError("close boom"))
+
+        with (
+            patch.dict("os.environ", {"FORGE_CONFIG_PATH": str(config_file)}),
+            patch("forge_config.load_config", return_value=real_config),
+            patch("forge_config.ConfigWatcher", return_value=mock_watcher),
+            patch("forge_agent.ForgeAgent", side_effect=RuntimeError("agent boom")),
+            patch(
+                "forge_agent.agent.store.build_conversation_store",
+                return_value=orphaned_store,
+            ),
+        ):
+            async with lifespan(app):
+                pass  # must not raise on exit either
+
+        orphaned_store.close.assert_awaited_once()
+
+    async def test_store_build_failure_falls_back_gracefully(
+        self,
+        mock_watcher: MagicMock,
+        config_file: Path,
+    ) -> None:
+        """A broken conversation_store config (e.g. an unresolvable Redis
+        secret) must never prevent the gateway from starting -- the agent
+        still initializes with its own (in-memory) default."""
+        from forge_config.schema import ForgeConfig
+
+        real_config = ForgeConfig()
+        app = FastAPI(lifespan=lifespan)
+
+        mock_agent = MagicMock()
+        mock_agent.initialize = AsyncMock(return_value=None)
+        mock_agent._registry = None
+
+        with (
+            patch.dict("os.environ", {"FORGE_CONFIG_PATH": str(config_file)}),
+            patch("forge_config.load_config", return_value=real_config),
+            patch("forge_config.ConfigWatcher", return_value=mock_watcher),
+            patch("forge_agent.ForgeAgent", return_value=mock_agent),
+            patch(
+                "forge_agent.agent.store.build_conversation_store",
+                side_effect=RuntimeError("boom"),
+            ),
+        ):
+            async with lifespan(app):
+                assert health._components.get("agent") == "ready"
+
+
+# ---------------------------------------------------------------------------
 # 9. Version is populated from config metadata
 # ---------------------------------------------------------------------------
 

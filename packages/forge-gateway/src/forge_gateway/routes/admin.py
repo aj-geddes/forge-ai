@@ -253,23 +253,29 @@ async def preview_tools(request: AdminToolPreviewRequest) -> AdminToolPreviewRes
     dependencies=[_read],
 )
 async def list_sessions() -> list[AdminSessionResponse]:
-    """List active agent sessions."""
+    """List active agent sessions.
+
+    Reads through ``ForgeAgent.context`` (ADR-0003 WS-7's async
+    ``ConversationStore`` abstraction) rather than any backend-specific
+    internals, so this works identically whether the agent is wired to
+    the in-memory default store or a ``RedisConversationStore``.
+    """
     if _agent is None:
         return []
 
-    context = getattr(_agent, "_context", None)
-    if context is None:
+    store = getattr(_agent, "context", None)
+    if store is None:
         return []
 
     sessions: list[AdminSessionResponse] = []
-    session_store = getattr(context, "_sessions", {})
-    for sid, session in session_store.items():
-        msg_count = len(getattr(session, "messages", []))
+    for session_id in await store.session_ids():
         sessions.append(
             AdminSessionResponse(
-                session_id=sid,
-                message_count=msg_count,
-                agent=getattr(session, "agent", None),
+                session_id=session_id,
+                message_count=await store.message_count(session_id),
+                # Per-session persona attribution isn't tracked by
+                # ConversationStore -- reserved for a future enhancement.
+                agent=None,
             )
         )
     return sessions
@@ -285,15 +291,14 @@ async def delete_session(session_id: str) -> dict[str, str]:
     if _agent is None:
         raise HTTPException(status_code=404, detail="No agent available")
 
-    context = getattr(_agent, "_context", None)
-    if context is None:
+    store = getattr(_agent, "context", None)
+    if store is None:
         raise HTTPException(status_code=404, detail="No session context available")
 
-    session_store = getattr(context, "_sessions", {})
-    if session_id not in session_store:
+    if session_id not in await store.session_ids():
         raise HTTPException(status_code=404, detail=f"Session '{session_id}' not found")
 
-    del session_store[session_id]
+    await store.clear_session(session_id)
     return {"status": "deleted", "session_id": session_id}
 
 

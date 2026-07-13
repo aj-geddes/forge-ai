@@ -8,6 +8,8 @@ from forge_config.schema import (
     AuthConfig,
     AuthMode,
     AuthType,
+    ConversationStoreBackend,
+    ConversationStoreConfig,
     ForgeConfig,
     ForgeMetadata,
     HTTPMethod,
@@ -33,6 +35,49 @@ from forge_config.schema import (
     WorkflowStep,
 )
 from pydantic import ValidationError
+
+
+class TestConversationStoreConfig:
+    """ADR-0003 WS-7: session/conversation store configuration."""
+
+    def test_defaults_to_memory_backend(self) -> None:
+        config = ConversationStoreConfig()
+        assert config.backend == ConversationStoreBackend.MEMORY
+
+    def test_default_max_messages_matches_conversation_context(self) -> None:
+        config = ConversationStoreConfig()
+        assert config.max_messages == 50
+
+    def test_default_key_prefix(self) -> None:
+        config = ConversationStoreConfig()
+        assert config.key_prefix == "forge:session:"
+
+    def test_default_ttl_is_none(self) -> None:
+        config = ConversationStoreConfig()
+        assert config.ttl_seconds is None
+
+    def test_default_redis_url_is_env_ref(self) -> None:
+        config = ConversationStoreConfig()
+        assert config.redis_url is not None
+        assert config.redis_url.source == SecretSource.ENV
+        assert config.redis_url.name == "FORGE_REDIS_URL"
+
+    def test_redis_backend_with_url_is_valid(self) -> None:
+        config = ConversationStoreConfig(
+            backend=ConversationStoreBackend.REDIS,
+            redis_url=SecretRef(source=SecretSource.ENV, name="MY_REDIS_URL"),
+        )
+        assert config.backend == ConversationStoreBackend.REDIS
+
+    def test_redis_backend_without_url_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="redis_url"):
+            ConversationStoreConfig(backend=ConversationStoreBackend.REDIS, redis_url=None)
+
+    def test_forge_config_defaults_to_memory_backend(self) -> None:
+        """A ForgeConfig with no conversation_store block must still behave
+        exactly as today -- in-memory, no Redis required."""
+        config = ForgeConfig()
+        assert config.conversation_store.backend == ConversationStoreBackend.MEMORY
 
 
 class TestSecretRef:

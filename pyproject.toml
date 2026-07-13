@@ -24,6 +24,9 @@ dev = [
     "mypy>=1.14",
     "types-PyYAML>=6.0",
     "pre-commit>=4.6.0",
+    # Test-only: in-process fake Redis for RedisConversationStore tests
+    # (ADR-0003 WS-7) -- no real Redis server required for the suite.
+    "fakeredis[lua]>=2.26",
 ]
 
 [tool.uv.workspace]

@@ -23,6 +23,7 @@ import pytest
 import yaml
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from forge_agent.agent.store import InMemoryConversationStore
 from forge_config.schema import (
     AgentsConfig,
     AuthorizationConfig,
@@ -1255,27 +1256,22 @@ class TestPreviewTools:
 
 @pytest.mark.usefixtures("_wire_auth")
 class TestListSessionsWithData:
-    """Cover list_sessions when agent has context with sessions."""
+    """Cover list_sessions when agent has a ConversationStore with sessions
+    (ADR-0003 WS-7: the async ConversationStore abstraction, not the old
+    ConversationContext._sessions dict poked directly)."""
 
     async def test_list_sessions_with_sessions(
         self,
         async_client: httpx.AsyncClient,
         auth_headers: dict[str, str],
     ) -> None:
-        """Lines 211-226: agent has context with session store containing sessions."""
-        session1 = MagicMock()
-        session1.messages = ["msg1", "msg2", "msg3"]
-        session1.agent = "assistant"
-
-        session2 = MagicMock()
-        session2.messages = []
-        session2.agent = None
-
-        mock_context = MagicMock()
-        mock_context._sessions = {"sess-1": session1, "sess-2": session2}
+        """Lines 211-226: agent's store has sessions with messages."""
+        store = InMemoryConversationStore()
+        await store.add_messages("sess-1", ["msg1", "msg2", "msg3"])
+        await store.add_messages("sess-2", [])
 
         mock_agent = MagicMock()
-        mock_agent._context = mock_context
+        mock_agent.context = store
 
         admin.set_state(
             config=ForgeConfig(),
@@ -1286,14 +1282,11 @@ class TestListSessionsWithData:
         resp = await async_client.get("/v1/admin/sessions", headers=auth_headers)
         assert resp.status_code == 200
         sessions = resp.json()
-        assert len(sessions) == 2
+        assert len(sessions) == 1
 
-        # Find each session in the response
         sess_map = {s["session_id"]: s for s in sessions}
         assert sess_map["sess-1"]["message_count"] == 3
-        assert sess_map["sess-1"]["agent"] == "assistant"
-        assert sess_map["sess-2"]["message_count"] == 0
-        assert sess_map["sess-2"]["agent"] is None
+        assert sess_map["sess-1"]["agent"] is None
 
         # Cleanup
         admin.set_state(config=None, config_path="", agent=None)
@@ -1303,8 +1296,8 @@ class TestListSessionsWithData:
         async_client: httpx.AsyncClient,
         auth_headers: dict[str, str],
     ) -> None:
-        """Lines 211-212: agent exists but has no _context attribute."""
-        mock_agent = MagicMock(spec=[])  # No _context attribute
+        """Lines 211-212: agent exists but has no context attribute."""
+        mock_agent = MagicMock(spec=[])  # No context attribute
         admin.set_state(
             config=ForgeConfig(),
             config_path="/tmp/test.yaml",  # noqa: S108
@@ -1334,15 +1327,11 @@ class TestDeleteSessionSuccess:
         auth_headers: dict[str, str],
     ) -> None:
         """Lines 242-247: session exists and is deleted successfully."""
-        session = MagicMock()
-        session.messages = ["msg1"]
-        session.agent = "assistant"
-
-        mock_context = MagicMock()
-        mock_context._sessions = {"target-session": session}
+        store = InMemoryConversationStore()
+        await store.add_messages("target-session", ["msg1"])
 
         mock_agent = MagicMock()
-        mock_agent._context = mock_context
+        mock_agent.context = store
 
         admin.set_state(
             config=ForgeConfig(),
@@ -1356,7 +1345,7 @@ class TestDeleteSessionSuccess:
         assert data["status"] == "deleted"
         assert data["session_id"] == "target-session"
         # Verify session was actually removed
-        assert "target-session" not in mock_context._sessions
+        assert "target-session" not in await store.session_ids()
 
         # Cleanup
         admin.set_state(config=None, config_path="", agent=None)
@@ -1367,11 +1356,11 @@ class TestDeleteSessionSuccess:
         auth_headers: dict[str, str],
     ) -> None:
         """Lines 243-244: session ID not in session store -> 404."""
-        mock_context = MagicMock()
-        mock_context._sessions = {"other-session": MagicMock()}
+        store = InMemoryConversationStore()
+        await store.add_messages("other-session", ["msg1"])
 
         mock_agent = MagicMock()
-        mock_agent._context = mock_context
+        mock_agent.context = store
 
         admin.set_state(
             config=ForgeConfig(),
@@ -1391,8 +1380,8 @@ class TestDeleteSessionSuccess:
         async_client: httpx.AsyncClient,
         auth_headers: dict[str, str],
     ) -> None:
-        """Lines 238-240: agent exists but has no _context -> 404."""
-        mock_agent = MagicMock(spec=[])  # No _context attribute
+        """Lines 238-240: agent exists but has no context -> 404."""
+        mock_agent = MagicMock(spec=[])  # No context attribute
         admin.set_state(
             config=ForgeConfig(),
             config_path="/tmp/test.yaml",  # noqa: S108

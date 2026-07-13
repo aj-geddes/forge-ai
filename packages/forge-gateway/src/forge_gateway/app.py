@@ -56,6 +56,7 @@ from forge_gateway.workload import (
 )
 
 if TYPE_CHECKING:
+    from forge_agent.agent.store import ConversationStore
     from forge_security.oidc.user_tokens import UserTokenStore
 
 logger = logging.getLogger("forge.gateway")
@@ -195,6 +196,36 @@ def _refresh_agent_card(config: object | None, agent: object | None = None) -> N
         )
     except Exception:
         logger.exception("Failed to build A2A agent card")
+
+
+def _build_agent_conversation_store(config: object) -> ConversationStore | None:
+    """Build the ``ConversationStore`` selected by ``config.conversation_store``
+    (ADR-0003 WS-7), for injection into the ``ForgeAgent`` constructed below.
+
+    Any failure here -- an unresolvable ``redis_url`` secret, a malformed
+    config, forge-agent not being importable -- is logged and degrades to
+    ``None``. ``ForgeAgent`` treats ``conversation_store=None`` as "build me
+    the in-memory default", so a broken Redis configuration can never
+    prevent the gateway from starting; it only loses the durability the
+    Redis backend would have provided.
+    """
+    from forge_config.schema import ForgeConfig
+
+    if not isinstance(config, ForgeConfig):
+        return None
+
+    try:
+        from forge_agent.agent.core import build_default_secret_resolver
+        from forge_agent.agent.store import build_conversation_store
+
+        return build_conversation_store(config.conversation_store, build_default_secret_resolver())
+    except Exception:
+        logger.exception(
+            "Failed to build conversation store (backend=%s) from config -- "
+            "falling back to the in-memory default",
+            config.conversation_store.backend.value,
+        )
+        return None
 
 
 def _resolve_legacy_service_tokens(config: object) -> list[ServiceToken]:
@@ -598,6 +629,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         config_path = os.environ.get("FORGE_CONFIG_PATH", "forge.yaml")
         config = None
         agent = None
+        conversation_store: ConversationStore | None = None
 
         try:
             from forge_config import load_config
@@ -606,11 +638,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             logger.info("Loaded config: %s", config.metadata.name)
             health.set_version(config.metadata.version)
 
+            # Build the ADR-0003 WS-7 conversation store from config
+            # (defaults to in-memory; degrades to None -- and thus
+            # ForgeAgent's own in-memory default -- on any failure) before
+            # constructing the agent, so it can be injected below.
+            conversation_store = _build_agent_conversation_store(config)
+
             # Try to build the agent
             try:
                 from forge_agent import ForgeAgent
 
-                agent = ForgeAgent(config)
+                agent = ForgeAgent(config, conversation_store=conversation_store)
                 await agent.initialize()
                 health.set_component_status("agent", "ready")
 
@@ -699,6 +737,22 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await mcp.shutdown_active_asgi_app()
         except Exception:
             logger.exception("Error stopping MCP server")
+        # Close the ADR-0003 WS-7 conversation store. Prefer closing
+        # through the agent (agent.context is always the store actually in
+        # use, whether it's the one built above or ForgeAgent's own
+        # in-memory fallback); if agent construction/initialization itself
+        # failed after the store was already built, close the orphaned
+        # store directly so its resources (e.g. a Redis client) don't leak.
+        if agent is not None:
+            try:
+                await agent.aclose()
+            except Exception:
+                logger.exception("Error closing conversation store")
+        elif conversation_store is not None:
+            try:
+                await conversation_store.close()
+            except Exception:
+                logger.exception("Error closing conversation store")
         try:
             await security.shutdown_auth()
         except Exception:

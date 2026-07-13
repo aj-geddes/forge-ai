@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from forge_agent.agent.core import ForgeAgent, ForgeRunResult, ToolCallRecord
+from forge_agent.agent.store import InMemoryConversationStore
 from forge_config.exceptions import SecretResolutionError
 from forge_config.schema import (
     AgentDef,
@@ -137,6 +138,35 @@ class TestForgeAgentInitialization:
         assert agent.registry is not None
         assert agent.context is not None
         assert agent.llm_router is not None
+
+
+class TestForgeAgentConversationStoreWiring:
+    """ADR-0003 WS-7: ForgeAgent accepts an injected ConversationStore,
+    defaulting to the in-memory store so current construction still works."""
+
+    def test_defaults_to_in_memory_store(self) -> None:
+        config = _make_config()
+        agent = ForgeAgent(config, model_override=TestModel())
+
+        assert isinstance(agent.context, InMemoryConversationStore)
+
+    def test_accepts_injected_store(self) -> None:
+        config = _make_config()
+        injected_store = InMemoryConversationStore(max_messages=5)
+
+        agent = ForgeAgent(config, model_override=TestModel(), conversation_store=injected_store)
+
+        assert agent.context is injected_store
+
+    @pytest.mark.anyio
+    async def test_run_conversational_uses_the_injected_store(self) -> None:
+        config = _make_config()
+        injected_store = InMemoryConversationStore()
+        agent = ForgeAgent(config, model_override=TestModel(), conversation_store=injected_store)
+
+        await agent.run_conversational("Hello!", session_id="sess1")
+
+        assert await injected_store.message_count("sess1") > 0
 
 
 class TestForgeAgentSecretResolverWiring:
@@ -376,7 +406,7 @@ class TestForgeAgentConversational:
         assert isinstance(result2, ForgeRunResult)
 
         # Session should have messages stored.
-        assert agent.context.message_count("sess1") > 0
+        assert await agent.context.message_count("sess1") > 0
 
     @pytest.mark.anyio
     async def test_run_conversational_stream(self) -> None:

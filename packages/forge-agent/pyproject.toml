@@ -17,6 +17,10 @@ dependencies = [
     "fastmcp>=2.0",
     "httpx>=0.28",
     "simpleeval>=1.0",
+    # RedisConversationStore (ADR-0003 WS-7): durable, cross-replica
+    # session storage, selected by config (defaults to the in-memory
+    # store below -- see forge_agent.agent.store).
+    "redis>=5.0",
 ]
 
 [build-system]

@@ -76,6 +76,13 @@ class TrustPolicy(str, Enum):
     PERMISSIVE = "permissive"
 
 
+class ConversationStoreBackend(str, Enum):
+    """Backend for ForgeAgent's session/conversation store (ADR-0003 WS-7)."""
+
+    MEMORY = "memory"
+    REDIS = "redis"
+
+
 # --- Secret References ---
 
 
@@ -747,6 +754,38 @@ class SecurityConfig(BaseModel):
         return self
 
 
+# --- Conversation Store Configuration (ADR-0003 WS-7) ---
+
+
+class ConversationStoreConfig(BaseModel):
+    """Session/conversation store configuration (ADR-0003 WS-7).
+
+    Selects the backend ForgeAgent uses to persist per-session message
+    history. Defaults to the in-memory backend so that an entirely
+    absent ``conversation_store:`` block in ``forge.yaml`` -- i.e. every
+    config written before this feature existed -- behaves exactly as it
+    did before: ephemeral, single-process, dev-friendly storage. Setting
+    ``backend: redis`` opts into durable, cross-replica session storage
+    (the docs' documented Redis capability), backed by
+    ``forge_agent.agent.store.RedisConversationStore``.
+    """
+
+    backend: ConversationStoreBackend = ConversationStoreBackend.MEMORY
+    redis_url: SecretRef | None = Field(
+        default_factory=lambda: SecretRef(source=SecretSource.ENV, name="FORGE_REDIS_URL")
+    )
+    key_prefix: str = "forge:session:"
+    ttl_seconds: int | None = None
+    max_messages: int = 50
+
+    @model_validator(mode="after")
+    def validate_redis_requires_url(self) -> ConversationStoreConfig:
+        if self.backend == ConversationStoreBackend.REDIS and self.redis_url is None:
+            msg = "conversation_store.redis_url is required when backend is 'redis'"
+            raise ValueError(msg)
+        return self
+
+
 # --- Agents Configuration ---
 
 
@@ -806,6 +845,7 @@ class ForgeConfig(BaseModel):
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
     security: SecurityConfig = Field(default_factory=SecurityConfig)
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
+    conversation_store: ConversationStoreConfig = Field(default_factory=ConversationStoreConfig)
 
     @model_validator(mode="after")
     def validate_agentweave_peers_are_pinned(self) -> ForgeConfig:

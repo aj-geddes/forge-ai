@@ -77,6 +77,14 @@ class ConversationContext:
         """Return the number of active sessions."""
         return len(self._sessions)
 
+    def session_ids(self) -> list[str]:
+        """Return the identifiers of all active sessions.
+
+        Returns:
+            A list of session IDs currently tracked (order not guaranteed).
+        """
+        return list(self._sessions.keys())
+
     def message_count(self, session_id: str) -> int:
         """Return the number of messages in a session.
 

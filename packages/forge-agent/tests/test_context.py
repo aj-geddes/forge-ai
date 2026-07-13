@@ -97,3 +97,20 @@ class TestConversationContext:
         ctx = ConversationContext()
         messages = ctx.get_messages("nonexistent")
         assert messages == []
+
+    def test_session_ids_empty(self) -> None:
+        ctx = ConversationContext()
+        assert ctx.session_ids() == []
+
+    def test_session_ids_lists_all_active_sessions(self) -> None:
+        ctx = ConversationContext()
+        ctx.add_message("s1", "a")
+        ctx.add_message("s2", "b")
+        assert sorted(ctx.session_ids()) == ["s1", "s2"]
+
+    def test_session_ids_excludes_cleared_session(self) -> None:
+        ctx = ConversationContext()
+        ctx.add_message("s1", "a")
+        ctx.add_message("s2", "b")
+        ctx.clear_session("s1")
+        assert ctx.session_ids() == ["s2"]
