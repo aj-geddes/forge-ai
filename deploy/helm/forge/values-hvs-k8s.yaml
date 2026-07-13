@@ -74,24 +74,33 @@ forgeConfig:
     description: "Forge AI gateway - hvs-k8s / dev-aj-geddes"
     environment: development
   llm:
-    default_model: claude-sonnet
+    # Default to the on-LAN vLLM endpoint: no cloud egress, no API key to
+    # rotate, no per-token cost. Verified reachable from a pod in this
+    # namespace (GET http://192.168.86.42:8000/v1/models -> ["nemotron-puzzle"]).
+    # It is OpenAI-compatible, so LiteLLM routes to it with the openai/ prefix
+    # plus api_base; vLLM requires no auth, but LiteLLM demands a non-empty
+    # api_key, hence the placeholder.
+    default_model: nemotron
     temperature: 0.7
     max_tokens: 4096
     system_prompt: "You are a helpful AI assistant with access to tools."
     litellm:
       mode: embedded
       model_list:
-        - model_name: gpt-4o
+        - model_name: nemotron
           litellm_params:
-            model: openai/gpt-4o
-            api_key: ${OPENAI_API_KEY}
+            model: openai/nemotron-puzzle
+            api_base: http://192.168.86.42:8000/v1
+            api_key: not-used-by-vllm
+        # Cloud fallback. Only reachable when the corresponding key is
+        # populated in OpenBao at kv/users/aj-geddes/app/forge-ai.
         - model_name: claude-sonnet
           litellm_params:
             model: anthropic/claude-sonnet-4-20250514
             api_key: ${ANTHROPIC_API_KEY}
       fallback_models:
-        - gpt-4o
-      timeout: 30.0
+        - claude-sonnet
+      timeout: 60.0
       max_retries: 3
   security:
     agentweave:
