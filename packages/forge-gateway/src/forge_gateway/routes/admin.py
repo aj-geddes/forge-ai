@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +27,8 @@ from forge_gateway.models import (
     AdminConfigResponse,
     AdminConfigUpdateRequest,
     AdminConfigUpdateResponse,
+    AdminPeerCreateRequest,
+    AdminPeerPingResponse,
     AdminPeerResponse,
     AdminPeerStatus,
     AdminSessionResponse,
@@ -99,8 +102,6 @@ async def get_config() -> AdminConfigResponse:
 )
 async def update_config(request: AdminConfigUpdateRequest) -> AdminConfigUpdateResponse:
     """Validate, apply in-memory, rebuild tools, and best-effort persist to disk."""
-    global _config
-
     # Preserve original secret refs — the client receives redacted values,
     # so we must restore the real SecretRef entries before applying.
     incoming = request.config
@@ -113,7 +114,19 @@ async def update_config(request: AdminConfigUpdateRequest) -> AdminConfigUpdateR
     except ValidationError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
-    # Apply config in-memory immediately
+    return await _apply_and_persist_config(new_config)
+
+
+async def _apply_and_persist_config(new_config: ForgeConfig) -> AdminConfigUpdateResponse:
+    """Apply *new_config* in-memory, re-wire auth, hot-reload the tool
+    surface, and best-effort persist to disk.
+
+    Shared by ``PUT /v1/admin/config`` and ``POST /v1/admin/peers`` so both
+    mutation paths persist and hot-reload identically -- a peer added via
+    the Peers page takes effect the same way an edit made in the Config
+    Builder does.
+    """
+    global _config
     _config = new_config
 
     # Re-wire the auth subsystem so updated bindings/service tokens/OIDC
@@ -303,6 +316,7 @@ async def list_peers() -> list[AdminPeerResponse]:
             endpoint=peer.endpoint,
             trust_level=peer.trust_level.value,
             capabilities=peer.capabilities,
+            spiffe_id=peer.spiffe_id,
             status=AdminPeerStatus.UNKNOWN,
         )
         for peer in _config.agents.peers
@@ -310,15 +324,82 @@ async def list_peers() -> list[AdminPeerResponse]:
 
 
 @router.post(
+    "/peers",
+    response_model=AdminPeerResponse,
+    status_code=201,
+    responses={400: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
+    dependencies=[_write],
+)
+async def create_peer(request: AdminPeerCreateRequest) -> AdminPeerResponse:
+    """Add a peer to ``agents.peers``, persist, and hot-reload.
+
+    Mirrors docs/user/features/peers.md "Adding a peer": validates the
+    submitted fields against the ``PeerAgent`` schema, runs the same SSRF
+    check as peer ping on the endpoint, and -- when
+    ``security.agentweave.enabled`` is true -- forge-config's
+    ``validate_agentweave_peers_are_pinned`` model_validator requires a
+    ``spiffe_id`` (ADR-0004 SS7.3). That validator raising is caught here
+    and surfaced as a clean 400, never an unhandled 500. The new peer is
+    persisted and hot-reloaded via the same path ``PUT /v1/admin/config``
+    uses.
+    """
+    if _config is None:
+        raise HTTPException(status_code=500, detail="No config loaded")
+
+    if any(peer.name == request.name for peer in _config.agents.peers):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Peer '{request.name}' already exists",
+        )
+
+    if not validate_peer_endpoint(request.endpoint):
+        raise HTTPException(
+            status_code=400,
+            detail="Peer endpoint targets a private or internal network",
+        )
+
+    config_dict = _config.model_dump(mode="json")
+    config_dict.setdefault("agents", {}).setdefault("peers", []).append(
+        {
+            "name": request.name,
+            "endpoint": request.endpoint,
+            "trust_level": request.trust_level,
+            "capabilities": request.capabilities,
+            "spiffe_id": request.spiffe_id,
+        }
+    )
+
+    try:
+        new_config = ForgeConfig.model_validate(config_dict)
+    except ValidationError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+    await _apply_and_persist_config(new_config)
+
+    created = next(peer for peer in new_config.agents.peers if peer.name == request.name)
+    return AdminPeerResponse(
+        name=created.name,
+        endpoint=created.endpoint,
+        trust_level=created.trust_level.value,
+        capabilities=created.capabilities,
+        spiffe_id=created.spiffe_id,
+        status=AdminPeerStatus.UNKNOWN,
+    )
+
+
+@router.post(
     "/peers/{name}/ping",
+    response_model=AdminPeerPingResponse,
     responses={404: {"model": ErrorResponse}, 400: {"model": ErrorResponse}},
     dependencies=[_read],
 )
-async def ping_peer(name: str) -> dict[str, Any]:
+async def ping_peer(name: str) -> AdminPeerPingResponse:
     """Health-check a specific peer.
 
     Only allows pinging peers that are in the configured peer list,
     and validates that peer endpoints don't target private/internal IPs.
+    Measures the round-trip latency of a reachable check (docs/user/
+    features/peers.md "Pinging a peer") -- left unset when unreachable.
     """
     if _config is None:
         raise HTTPException(status_code=404, detail="No config loaded")
@@ -336,6 +417,7 @@ async def ping_peer(name: str) -> dict[str, Any]:
 
     import httpx
 
+    start = time.monotonic()
     try:
         async with httpx.AsyncClient() as client:
             resp = await client.get(
@@ -343,9 +425,15 @@ async def ping_peer(name: str) -> dict[str, Any]:
                 timeout=5.0,
             )
             resp.raise_for_status()
-            return {"name": name, "status": "reachable", "http_status": resp.status_code}
+            latency_ms = (time.monotonic() - start) * 1000
+            return AdminPeerPingResponse(
+                name=name,
+                status="reachable",
+                http_status=resp.status_code,
+                latency_ms=round(latency_ms, 2),
+            )
     except httpx.HTTPError as e:
-        return {"name": name, "status": "unreachable", "error": str(e)}
+        return AdminPeerPingResponse(name=name, status="unreachable", error=str(e))
 
 
 # --- Helpers ---

@@ -141,7 +141,44 @@ class AdminPeerResponse(BaseModel):
     endpoint: str
     trust_level: str = "low"
     capabilities: list[str] = Field(default_factory=list)
+    spiffe_id: str | None = None
+    """Pinned SPIFFE ID (ADR-0004 SS7.3), required by forge-config when
+    ``security.agentweave.enabled`` is true. ``None`` otherwise."""
     status: AdminPeerStatus = AdminPeerStatus.UNKNOWN
+
+
+class AdminPeerCreateRequest(BaseModel):
+    """POST /v1/admin/peers request body -- mirrors ``forge_config.schema.
+    PeerAgent`` field-for-field (docs/user/features/peers.md "Adding a
+    peer"). ``trust_level`` is validated against ``PeerAgent``'s
+    ``TrustLevel`` enum by the gateway when the peer is appended to the
+    running config, not here -- an invalid value surfaces as a clean 400
+    from that validation step rather than a FastAPI 422."""
+
+    name: str
+    endpoint: str
+    trust_level: str = "low"
+    capabilities: list[str] = Field(default_factory=list)
+    spiffe_id: str | None = None
+    """Required by forge-config when ``security.agentweave.enabled`` is
+    true (ADR-0004 SS7.3 peer pinning) -- optional otherwise."""
+
+
+class AdminPeerPingResponse(BaseModel):
+    """POST /v1/admin/peers/{name}/ping response.
+
+    ``latency_ms`` is populated only when ``status`` is ``"reachable"`` --
+    it measures the round-trip time of the successful health check
+    (docs/user/features/peers.md "Pinging a peer"). It is left unset on an
+    unreachable peer, where the meaningful signal is ``error``, not a
+    partial/failed-request duration.
+    """
+
+    name: str
+    status: str
+    http_status: int | None = None
+    error: str | None = None
+    latency_ms: float | None = None
 
 
 # --- User-issued API key models (ADR-0002) ---

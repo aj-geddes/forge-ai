@@ -20,6 +20,7 @@ from unittest.mock import MagicMock
 
 import httpx
 import pytest
+import yaml
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from forge_config.schema import (
@@ -1650,3 +1651,356 @@ class TestListToolsWithPeerTools:
 
         # Cleanup
         admin.set_state(config=None, config_path="", agent=None)
+
+
+# =========================================================================
+# 19. POST /v1/admin/peers -- create a peer (docs/user/features/peers.md)
+# =========================================================================
+
+
+@pytest.mark.usefixtures("_wire_auth", "_wire_admin")
+class TestCreatePeerNoAuth:
+    async def test_create_peer_requires_auth(self, async_client: httpx.AsyncClient) -> None:
+        resp = await async_client.post(
+            "/v1/admin/peers",
+            json={"name": "new-peer", "endpoint": "https://new-peer.example.com"},
+        )
+        assert resp.status_code == 401
+
+
+class TestCreatePeerRequiresWritePermission:
+    """A caller with only config:read (e.g. the 'viewer' role) must not be
+    able to create a peer -- creation is a mutation and requires
+    config:write, matching every other admin mutation (ADR-0001 SS6.1)."""
+
+    async def test_viewer_role_cannot_create_peer(self) -> None:
+        viewer_token = "forge_sk_viewer_zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"  # noqa: S105
+        digest = hashlib.sha256(viewer_token.encode("utf-8")).hexdigest()
+        security.configure_auth(
+            session_codec=None,
+            service_token_verifier=ServiceTokenVerifier(
+                [ServiceToken(id="viewer-svc", secret_sha256=digest, roles=["viewer"])]
+            ),
+            oidc_verifier=None,
+            authorizer=Authorizer(AuthorizationConfig()),
+            dev_insecure=False,
+        )
+        admin.set_state(config=ForgeConfig(), config_path="/tmp/test.yaml", agent=None)  # noqa: S108
+
+        app = _make_app()
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
+            resp = await ac.post(
+                "/v1/admin/peers",
+                json={"name": "new-peer", "endpoint": "https://new-peer.example.com"},
+                headers={"Authorization": f"Bearer {viewer_token}"},
+            )
+
+        assert resp.status_code == 403
+        assert resp.json()["detail"] == "forbidden"
+
+        security.reset_auth()
+        admin.set_state(config=None, config_path="", agent=None)
+
+
+@pytest.mark.usefixtures("_wire_auth")
+class TestCreatePeer:
+    """POST /v1/admin/peers: validates, SSRF-checks, appends to
+    agents.peers, persists + hot-reloads the same way PUT /v1/admin/config
+    does, and returns the created peer."""
+
+    async def test_creates_and_returns_the_peer(
+        self,
+        async_client: httpx.AsyncClient,
+        auth_headers: dict[str, str],
+        tmp_path: Any,
+    ) -> None:
+        config_file = tmp_path / "forge.yaml"
+        config_file.write_text("metadata:\n  name: old\n")
+        admin.set_state(config=ForgeConfig(), config_path=str(config_file), agent=None)
+
+        resp = await async_client.post(
+            "/v1/admin/peers",
+            json={
+                "name": "data-forge",
+                "endpoint": "https://data-forge.hvs.internal.example.com",
+                "trust_level": "high",
+                "capabilities": ["data_query", "reporting"],
+            },
+            headers=auth_headers,
+        )
+
+        assert resp.status_code == 201
+        data = resp.json()
+        assert data["name"] == "data-forge"
+        assert data["endpoint"] == "https://data-forge.hvs.internal.example.com"
+        assert data["trust_level"] == "high"
+        assert data["capabilities"] == ["data_query", "reporting"]
+
+        admin.set_state(config=None, config_path="", agent=None)
+
+    async def test_persists_to_disk(
+        self,
+        async_client: httpx.AsyncClient,
+        auth_headers: dict[str, str],
+        tmp_path: Any,
+    ) -> None:
+        config_file = tmp_path / "forge.yaml"
+        config_file.write_text("metadata:\n  name: old\n")
+        admin.set_state(config=ForgeConfig(), config_path=str(config_file), agent=None)
+
+        resp = await async_client.post(
+            "/v1/admin/peers",
+            json={"name": "peer-x", "endpoint": "https://peer-x.example.com"},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 201
+
+        persisted = yaml.safe_load(config_file.read_text())
+        peer_names = [p["name"] for p in persisted["agents"]["peers"]]
+        assert "peer-x" in peer_names
+
+        admin.set_state(config=None, config_path="", agent=None)
+
+    async def test_appends_to_the_running_config(
+        self,
+        async_client: httpx.AsyncClient,
+        auth_headers: dict[str, str],
+        tmp_path: Any,
+    ) -> None:
+        config_file = tmp_path / "forge.yaml"
+        config_file.write_text("metadata:\n  name: old\n")
+        config = ForgeConfig(
+            agents=AgentsConfig(
+                peers=[PeerAgent(name="existing", endpoint="https://existing.example.com")]
+            )
+        )
+        admin.set_state(config=config, config_path=str(config_file), agent=None)
+
+        resp = await async_client.post(
+            "/v1/admin/peers",
+            json={"name": "peer-y", "endpoint": "https://peer-y.example.com"},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 201
+
+        get_resp = await async_client.get("/v1/admin/peers", headers=auth_headers)
+        names = {p["name"] for p in get_resp.json()}
+        assert names == {"existing", "peer-y"}
+
+        admin.set_state(config=None, config_path="", agent=None)
+
+    async def test_hot_reloads_tool_surface(
+        self,
+        async_client: httpx.AsyncClient,
+        auth_headers: dict[str, str],
+        tmp_path: Any,
+    ) -> None:
+        from unittest.mock import AsyncMock
+
+        config_file = tmp_path / "forge.yaml"
+        config_file.write_text("metadata:\n  name: old\n")
+
+        mock_registry = MagicMock()
+        mock_registry.build_and_swap = AsyncMock(return_value=True)
+        mock_agent = MagicMock()
+        mock_agent._registry = mock_registry
+
+        admin.set_state(config=ForgeConfig(), config_path=str(config_file), agent=mock_agent)
+
+        resp = await async_client.post(
+            "/v1/admin/peers",
+            json={"name": "peer-z", "endpoint": "https://peer-z.example.com"},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 201
+        mock_registry.build_and_swap.assert_awaited_once()
+
+        admin.set_state(config=None, config_path="", agent=None)
+
+    async def test_rejects_ssrf_endpoint(
+        self,
+        async_client: httpx.AsyncClient,
+        auth_headers: dict[str, str],
+    ) -> None:
+        admin.set_state(config=ForgeConfig(), config_path="/tmp/test.yaml", agent=None)  # noqa: S108
+
+        resp = await async_client.post(
+            "/v1/admin/peers",
+            json={"name": "internal-peer", "endpoint": "http://192.168.1.50:8000"},
+            headers=auth_headers,
+        )
+
+        assert resp.status_code == 400
+        detail = resp.json()["detail"].lower()
+        assert "private" in detail or "internal" in detail
+
+        # The rejected peer must never have been appended to the running config.
+        get_resp = await async_client.get("/v1/admin/peers", headers=auth_headers)
+        assert get_resp.json() == []
+
+        admin.set_state(config=None, config_path="", agent=None)
+
+    async def test_rejects_localhost_endpoint(
+        self,
+        async_client: httpx.AsyncClient,
+        auth_headers: dict[str, str],
+    ) -> None:
+        admin.set_state(config=ForgeConfig(), config_path="/tmp/test.yaml", agent=None)  # noqa: S108
+
+        resp = await async_client.post(
+            "/v1/admin/peers",
+            json={"name": "local-peer", "endpoint": "http://localhost:9000"},
+            headers=auth_headers,
+        )
+
+        assert resp.status_code == 400
+
+        admin.set_state(config=None, config_path="", agent=None)
+
+    async def test_rejects_unpinned_peer_when_agentweave_enabled(
+        self,
+        async_client: httpx.AsyncClient,
+        auth_headers: dict[str, str],
+    ) -> None:
+        """ADR-0004 SS7.3: when security.agentweave.enabled is true, every
+        peer must carry a spiffe_id. forge-config enforces this at load
+        time by raising a ValueError from a model_validator -- the admin
+        API must surface that as a clean 4xx, never an unhandled 500."""
+        from forge_config.schema import AgentWeaveConfig, SecurityConfig
+
+        config = ForgeConfig(
+            security=SecurityConfig(agentweave=AgentWeaveConfig(enabled=True)),
+        )
+        admin.set_state(config=config, config_path="/tmp/test.yaml", agent=None)  # noqa: S108
+
+        resp = await async_client.post(
+            "/v1/admin/peers",
+            json={"name": "unpinned-peer", "endpoint": "https://unpinned.example.com"},
+            headers=auth_headers,
+        )
+
+        assert resp.status_code < 500
+        assert resp.status_code >= 400
+        detail = resp.json()["detail"].lower()
+        assert "spiffe_id" in detail or "spiffe" in detail
+
+        # The rejected peer must never have been appended to the running config.
+        assert config.agents.peers == []
+
+        admin.set_state(config=None, config_path="", agent=None)
+
+    async def test_accepts_pinned_peer_when_agentweave_enabled(
+        self,
+        async_client: httpx.AsyncClient,
+        auth_headers: dict[str, str],
+    ) -> None:
+        from forge_config.schema import AgentWeaveConfig, SecurityConfig
+
+        config = ForgeConfig(
+            security=SecurityConfig(agentweave=AgentWeaveConfig(enabled=True)),
+        )
+        admin.set_state(config=config, config_path="/tmp/test.yaml", agent=None)  # noqa: S108
+
+        resp = await async_client.post(
+            "/v1/admin/peers",
+            json={
+                "name": "pinned-peer",
+                "endpoint": "https://pinned.example.com",
+                "spiffe_id": "spiffe://forge.local/peer/pinned-peer",
+            },
+            headers=auth_headers,
+        )
+
+        assert resp.status_code == 201
+        assert resp.json()["spiffe_id"] == "spiffe://forge.local/peer/pinned-peer"
+
+        admin.set_state(config=None, config_path="", agent=None)
+
+    async def test_returns_500_without_config(
+        self,
+        async_client: httpx.AsyncClient,
+        auth_headers: dict[str, str],
+    ) -> None:
+        admin.set_state(config=None, config_path="", agent=None)
+
+        resp = await async_client.post(
+            "/v1/admin/peers",
+            json={"name": "peer-1", "endpoint": "https://peer-1.example.com"},
+            headers=auth_headers,
+        )
+
+        assert resp.status_code == 500
+
+    async def test_rejects_duplicate_peer_name(
+        self,
+        async_client: httpx.AsyncClient,
+        auth_headers: dict[str, str],
+    ) -> None:
+        config = ForgeConfig(
+            agents=AgentsConfig(peers=[PeerAgent(name="dupe", endpoint="https://dupe.example.com")])
+        )
+        admin.set_state(config=config, config_path="/tmp/test.yaml", agent=None)  # noqa: S108
+
+        resp = await async_client.post(
+            "/v1/admin/peers",
+            json={"name": "dupe", "endpoint": "https://dupe-2.example.com"},
+            headers=auth_headers,
+        )
+
+        assert resp.status_code == 400
+        assert "dupe" in resp.json()["detail"].lower()
+
+        admin.set_state(config=None, config_path="", agent=None)
+
+
+# =========================================================================
+# 20. Ping latency (docs/user/features/peers.md "Pinging a peer")
+# =========================================================================
+
+
+@pytest.mark.usefixtures("_wire_auth", "_wire_admin_with_peers")
+class TestPingPeerLatency:
+    async def test_reachable_ping_includes_latency_ms(
+        self, async_client: httpx.AsyncClient, auth_headers: dict[str, str]
+    ) -> None:
+        import unittest.mock
+        from unittest.mock import AsyncMock
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.raise_for_status = MagicMock()
+
+        mock_http = AsyncMock()
+        mock_http.get = AsyncMock(return_value=mock_resp)
+        mock_http.__aenter__.return_value = mock_http
+        mock_http.__aexit__.return_value = None
+
+        with unittest.mock.patch("httpx.AsyncClient", return_value=mock_http):
+            resp = await async_client.post("/v1/admin/peers/peer1/ping", headers=auth_headers)
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "reachable"
+        assert "latency_ms" in data
+        assert isinstance(data["latency_ms"], int | float)
+        assert data["latency_ms"] >= 0
+
+    async def test_unreachable_ping_does_not_report_a_bogus_latency(
+        self, async_client: httpx.AsyncClient, auth_headers: dict[str, str]
+    ) -> None:
+        import unittest.mock
+        from unittest.mock import AsyncMock
+
+        mock_http = AsyncMock()
+        mock_http.get = AsyncMock(side_effect=httpx.ConnectError("Connection refused"))
+        mock_http.__aenter__ = AsyncMock(return_value=mock_http)
+        mock_http.__aexit__ = AsyncMock(return_value=None)
+
+        with unittest.mock.patch("httpx.AsyncClient", return_value=mock_http):
+            resp = await async_client.post("/v1/admin/peers/peer1/ping", headers=auth_headers)
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "unreachable"
+        assert data.get("latency_ms") is None

@@ -78,4 +78,196 @@ describe("ConfigVisualEditor field mapping (contract with ForgeConfig backend sc
     expect(updated.llm.litellm).not.toHaveProperty("config_path");
     expect(updated.llm.litellm).not.toHaveProperty("port");
   });
+
+  it("does not add a deprecated security.api_keys control -- the field is unused by the form", () => {
+    const config = baseConfig();
+    const form = configToForm(config);
+
+    expect(form.security).not.toHaveProperty("api_keys");
+
+    const updated = formToConfig(form, config);
+    expect(updated.security?.api_keys).toBeUndefined();
+  });
+
+  describe("LLM Model List (LiteLLMConfig.model_list)", () => {
+    function configWithModelList(): ForgeConfig {
+      const config = baseConfig();
+      config.llm.litellm = {
+        mode: "embedded",
+        model_list: [
+          {
+            model_name: "primary",
+            litellm_params: {
+              model: "openai/gpt-4o",
+              api_key: { source: "env", name: "OPENAI_KEY" },
+              api_base: "https://api.openai.com/v1",
+            },
+          },
+        ],
+      };
+      return config;
+    }
+
+    it("reads model_name, the litellm_params.model id, and the api_key env var name", () => {
+      const form = configToForm(configWithModelList());
+
+      expect(form.llm.litellm?.model_list?.[0]).toEqual({
+        model_name: "primary",
+        model: "openai/gpt-4o",
+        api_key_env: "OPENAI_KEY",
+      });
+    });
+
+    it("round-trips edits while preserving untouched litellm_params keys (e.g. api_base)", () => {
+      const config = configWithModelList();
+      const form = configToForm(config);
+      form.llm.litellm!.model_list![0]!.model = "openai/gpt-4o-2024-11-20";
+
+      const updated = formToConfig(form, config);
+
+      expect(updated.llm.litellm?.model_list?.[0]).toEqual({
+        model_name: "primary",
+        litellm_params: {
+          model: "openai/gpt-4o-2024-11-20",
+          api_key: { source: "env", name: "OPENAI_KEY" },
+          api_base: "https://api.openai.com/v1",
+        },
+      });
+    });
+
+    it("adds a brand new model list entry with a fresh api_key env var reference", () => {
+      const config = baseConfig();
+      config.llm.litellm = { mode: "embedded", model_list: [] };
+      const form = configToForm(config);
+      form.llm.litellm!.model_list = [
+        { model_name: "backup", model: "anthropic/claude-haiku-4-5-20251001", api_key_env: "ANTHROPIC_KEY" },
+      ];
+
+      const updated = formToConfig(form, config);
+
+      expect(updated.llm.litellm?.model_list?.[0]).toEqual({
+        model_name: "backup",
+        litellm_params: {
+          model: "anthropic/claude-haiku-4-5-20251001",
+          api_key: { source: "env", name: "ANTHROPIC_KEY" },
+        },
+      });
+    });
+  });
+
+  describe("LLM Fallback Models, Timeout, Max Retries (LiteLLMConfig)", () => {
+    it("round-trips fallback_models as a comma-separated string mapped to a string[]", () => {
+      const config = baseConfig();
+      config.llm.litellm = {
+        mode: "embedded",
+        fallback_models: ["gpt-4o-mini", "claude-haiku-4-5-20251001"],
+      };
+      const form = configToForm(config);
+
+      expect(form.llm.litellm?.fallback_models).toBe("gpt-4o-mini, claude-haiku-4-5-20251001");
+
+      form.llm.litellm!.fallback_models = "gpt-4o-mini, gemini/gemini-2.0-flash";
+      const updated = formToConfig(form, config);
+
+      expect(updated.llm.litellm?.fallback_models).toEqual([
+        "gpt-4o-mini",
+        "gemini/gemini-2.0-flash",
+      ]);
+    });
+
+    it("round-trips timeout and max_retries as flat numeric fields, not a nested retries object", () => {
+      const config = baseConfig();
+      config.llm.litellm = { mode: "embedded", timeout: 30, max_retries: 3 };
+      const form = configToForm(config);
+
+      expect(form.llm.litellm?.timeout).toBe(30);
+      expect(form.llm.litellm?.max_retries).toBe(3);
+
+      form.llm.litellm!.timeout = 45;
+      form.llm.litellm!.max_retries = 5;
+      const updated = formToConfig(form, config);
+
+      expect(updated.llm.litellm?.timeout).toBe(45);
+      expect(updated.llm.litellm?.max_retries).toBe(5);
+      expect(updated.llm.litellm).not.toHaveProperty("retries");
+    });
+  });
+
+  describe("Agent Definitions (AgentsConfig.agents)", () => {
+    function configWithAgentDefs(): ForgeConfig {
+      const config = baseConfig();
+      config.agents = {
+        default: "assistant",
+        peers: [],
+        agents: [
+          {
+            name: "researcher",
+            description: "Researches topics",
+            system_prompt: "You are a researcher.",
+            model: "gpt-4o",
+            tools: ["web_search", "summarize"],
+            max_turns: 15,
+          },
+        ],
+      };
+      return config;
+    }
+
+    it("reads each agent definition's fields, with tools as a comma-separated string", () => {
+      const form = configToForm(configWithAgentDefs());
+
+      expect(form.agents.agents?.[0]).toEqual({
+        name: "researcher",
+        description: "Researches topics",
+        system_prompt: "You are a researcher.",
+        model: "gpt-4o",
+        tools: "web_search, summarize",
+        max_turns: 15,
+      });
+    });
+
+    it("round-trips edited agent definitions back into AgentDef objects", () => {
+      const config = configWithAgentDefs();
+      const form = configToForm(config);
+      form.agents.agents![0]!.max_turns = 20;
+      form.agents.agents![0]!.tools = "web_search, summarize, translate";
+
+      const updated = formToConfig(form, config);
+
+      expect(updated.agents?.agents?.[0]).toEqual({
+        name: "researcher",
+        description: "Researches topics",
+        system_prompt: "You are a researcher.",
+        model: "gpt-4o",
+        tools: ["web_search", "summarize", "translate"],
+        max_turns: 20,
+      });
+    });
+
+    it("adds a brand new agent definition", () => {
+      const config = baseConfig();
+      const form = configToForm(config);
+      form.agents.agents = [
+        {
+          name: "coder",
+          description: "Writes code",
+          system_prompt: "",
+          model: "",
+          tools: "",
+          max_turns: 10,
+        },
+      ];
+
+      const updated = formToConfig(form, config);
+
+      expect(updated.agents?.agents?.[0]).toEqual({
+        name: "coder",
+        description: "Writes code",
+        system_prompt: undefined,
+        model: undefined,
+        tools: [],
+        max_turns: 10,
+      });
+    });
+  });
 });

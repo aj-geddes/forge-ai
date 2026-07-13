@@ -159,7 +159,18 @@ export interface PeerAgent {
   endpoint: string;
   trust_level: TrustLevel;
   capabilities?: string[];
+  spiffe_id?: string | null;
   status?: PeerStatus;
+}
+
+// --- POST /v1/admin/peers (forge_gateway.models.AdminPeerCreateRequest) ---
+
+export interface CreatePeerRequest {
+  name: string;
+  endpoint: string;
+  trust_level?: TrustLevel;
+  capabilities?: string[];
+  spiffe_id?: string | null;
 }
 
 export interface AgentDef {
@@ -212,4 +223,5 @@ export interface PingPeerResponse {
   status: "reachable" | "unreachable";
   http_status?: number;
   error?: string;
+  latency_ms?: number | null;
 }

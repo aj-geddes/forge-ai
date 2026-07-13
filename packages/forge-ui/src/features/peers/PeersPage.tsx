@@ -7,6 +7,7 @@ import {
   ShieldCheck,
   Loader2,
   Info,
+  AlertCircle,
 } from "lucide-react";
 import {
   Card,
@@ -30,7 +31,8 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
-import { usePeers, usePingPeer } from "@/api/hooks";
+import { ApiError } from "@/api/client";
+import { usePeers, usePingPeer, useCreatePeer } from "@/api/hooks";
 import type { TrustLevel } from "@/types/config";
 
 type ConnectionStatus = "reachable" | "unreachable" | "unknown";
@@ -38,6 +40,7 @@ type ConnectionStatus = "reachable" | "unreachable" | "unknown";
 interface PeerPingState {
   status: ConnectionStatus;
   loading: boolean;
+  latencyMs?: number | null;
 }
 
 function HelpText({ children }: { children: React.ReactNode }) {
@@ -123,6 +126,11 @@ function PeerCard({
                 <span className="flex items-center gap-1 text-[oklch(0.5_0.2_145)]">
                   <Activity className="h-3 w-3" />
                   Reachable
+                  {pingState.latencyMs != null && (
+                    <span className="text-muted-foreground">
+                      ({pingState.latencyMs} ms)
+                    </span>
+                  )}
                 </span>
               )}
               {pingState.status === "unreachable" && (
@@ -162,26 +170,63 @@ function AddPeerDialog() {
   const [endpoint, setEndpoint] = useState("");
   const [trustLevel, setTrustLevel] = useState<TrustLevel>("medium");
   const [capabilities, setCapabilities] = useState("");
+  const [spiffeId, setSpiffeId] = useState("");
+  const [submitError, setSubmitError] = useState<string | null>(null);
 
-  // NOTE: the gateway's admin API (forge_gateway/routes/admin.py) only exposes
-  // GET /v1/admin/peers and POST /v1/admin/peers/{name}/ping -- there is no
-  // peer-creation endpoint. Peers can only be added by editing the
-  // `agents.peers` list in forge.yaml (or the Config Builder's YAML tab) and
-  // reloading. This dialog is disabled rather than pretending to save until
-  // a POST /v1/admin/peers endpoint exists on the backend.
-  const canSubmit = false;
+  const createPeer = useCreatePeer();
 
-  const handleSubmit = useCallback(() => {
-    if (!canSubmit) return;
-    setOpen(false);
+  const canSubmit = name.trim().length > 0 && endpoint.trim().length > 0;
+
+  const resetForm = useCallback(() => {
     setName("");
     setEndpoint("");
     setTrustLevel("medium");
     setCapabilities("");
-  }, [canSubmit]);
+    setSpiffeId("");
+    setSubmitError(null);
+  }, []);
+
+  const handleSubmit = useCallback(() => {
+    if (!canSubmit) return;
+    setSubmitError(null);
+
+    createPeer.mutate(
+      {
+        name: name.trim(),
+        endpoint: endpoint.trim(),
+        trust_level: trustLevel,
+        capabilities: capabilities
+          .split(",")
+          .map((c) => c.trim())
+          .filter(Boolean),
+        spiffe_id: spiffeId.trim() || undefined,
+      },
+      {
+        onSuccess: () => {
+          setOpen(false);
+          resetForm();
+        },
+        onError: (err) => {
+          setSubmitError(
+            err instanceof ApiError
+              ? err.message
+              : err instanceof Error
+                ? err.message
+                : "Failed to add peer",
+          );
+        },
+      },
+    );
+  }, [canSubmit, createPeer, name, endpoint, trustLevel, capabilities, spiffeId, resetForm]);
 
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        setOpen(next);
+        if (!next) setSubmitError(null);
+      }}
+    >
       <DialogTrigger className="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90">
         <Plus className="h-4 w-4" />
         Add Peer
@@ -195,13 +240,13 @@ function AddPeerDialog() {
             multi-agent collaboration and specialization.
           </DialogDescription>
         </DialogHeader>
-        <div className="rounded-lg border border-yellow-500/30 bg-yellow-500/5 px-3 py-2 text-xs text-muted-foreground">
-          The gateway does not yet expose an API to create peers. Add a peer by
-          editing <code className="font-mono">agents.peers</code> in the YAML tab of
-          the Config Builder (or directly in forge.yaml) and saving. This form is
-          disabled until a peer-creation endpoint is added to the backend.
-        </div>
-        <div className="space-y-4 py-4 opacity-60">
+        {submitError && (
+          <div className="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+            <AlertCircle className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+            <span>{submitError}</span>
+          </div>
+        )}
+        <div className="space-y-4 py-4">
           <div className="space-y-2">
             <Label htmlFor="peer-name">Name</Label>
             <Input
@@ -209,7 +254,6 @@ function AddPeerDialog() {
               placeholder="my-peer-agent"
               value={name}
               onChange={(e) => setName(e.target.value)}
-              disabled={!canSubmit}
             />
             <HelpText>
               A unique identifier used when routing requests to this peer.
@@ -224,12 +268,13 @@ function AddPeerDialog() {
               placeholder="https://peer.example.com/a2a"
               value={endpoint}
               onChange={(e) => setEndpoint(e.target.value)}
-              disabled={!canSubmit}
             />
             <HelpText>
               The base URL of the peer agent's A2A interface. This is
               where your agent will send requests. Must be reachable from
-              your agent's network.
+              your agent's network -- endpoints targeting private or
+              internal networks (e.g., 127.0.0.1, 10.x.x.x, *.local) are
+              blocked by SSRF protection.
             </HelpText>
           </div>
           <div className="space-y-2">
@@ -238,7 +283,6 @@ function AddPeerDialog() {
               id="peer-trust"
               value={trustLevel}
               onChange={(e) => setTrustLevel(e.target.value as TrustLevel)}
-              disabled={!canSubmit}
             >
               <option value="high">High</option>
               <option value="medium">Medium</option>
@@ -258,7 +302,6 @@ function AddPeerDialog() {
               placeholder="search, summarize, translate"
               value={capabilities}
               onChange={(e) => setCapabilities(e.target.value)}
-              disabled={!canSubmit}
             />
             <HelpText>
               Comma-separated list of skills this peer offers (e.g., "search,
@@ -267,12 +310,33 @@ function AddPeerDialog() {
               the peer best suited to handle them.
             </HelpText>
           </div>
+          <div className="space-y-2">
+            <Label htmlFor="peer-spiffe-id">SPIFFE ID (optional)</Label>
+            <Input
+              id="peer-spiffe-id"
+              placeholder="spiffe://forge.local/peer/my-peer-agent"
+              value={spiffeId}
+              onChange={(e) => setSpiffeId(e.target.value)}
+            />
+            <HelpText>
+              The peer's expected SPIFFE ID on the workload (A2A mTLS) plane.
+              Required when AgentWeave is enabled in Security settings --
+              without it, the peer call has nothing to verify the
+              responding workload's identity against.
+            </HelpText>
+          </div>
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={() => setOpen(false)}>
             Close
           </Button>
-          <Button onClick={handleSubmit} disabled={!canSubmit} title="Not yet supported by the backend">
+          <Button
+            onClick={handleSubmit}
+            disabled={!canSubmit || createPeer.isPending}
+          >
+            {createPeer.isPending ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : null}
             Add Peer
           </Button>
         </DialogFooter>
@@ -301,10 +365,13 @@ export function PeersPage() {
             ...prev,
             [peerName]: {
               // The backend's ping response (AdminPeerStatus) returns the literal
-              // "reachable" / "unreachable" -- it never returns "ok", and it does
-              // not report latency.
+              // "reachable" / "unreachable" -- it never returns "ok". When
+              // reachable, it also reports latency_ms (the round-trip time of
+              // the /health/live check); unreachable pings never carry a
+              // meaningful latency figure.
               status: data.status,
               loading: false,
+              latencyMs: data.status === "reachable" ? (data.latency_ms ?? null) : null,
             },
           }));
         },

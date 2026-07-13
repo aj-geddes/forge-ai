@@ -8,6 +8,7 @@ import type {
   PeerAgent,
   OpenAPISource,
   PingPeerResponse,
+  CreatePeerRequest,
 } from "@/types/config";
 
 // --- Query Keys ---
@@ -136,5 +137,17 @@ export function usePingPeer() {
   return useMutation({
     mutationFn: (name: string) =>
       api.post<PingPeerResponse>(`/v1/admin/peers/${name}/ping`),
+  });
+}
+
+export function useCreatePeer() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: (peer: CreatePeerRequest) =>
+      api.post<PeerAgent>("/v1/admin/peers", peer),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.peers });
+    },
   });
 }

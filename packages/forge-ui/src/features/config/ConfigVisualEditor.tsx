@@ -1,5 +1,11 @@
 import { useEffect } from "react";
-import { useForm, Controller } from "react-hook-form";
+import {
+  useForm,
+  useFieldArray,
+  Controller,
+  type Control,
+  type UseFormRegister,
+} from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { Link } from "react-router-dom";
@@ -11,6 +17,8 @@ import {
   Users,
   Wrench,
   Sparkles,
+  Plus,
+  Trash2,
 } from "lucide-react";
 import {
   Accordion,
@@ -18,6 +26,7 @@ import {
   AccordionTrigger,
   AccordionContent,
 } from "@/components/ui/accordion";
+import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select } from "@/components/ui/select";
@@ -25,7 +34,7 @@ import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { useConfigStore } from "@/stores/configStore";
-import type { ForgeConfig, LiteLLMMode, TrustPolicy } from "@/types/config";
+import type { AgentDef, ForgeConfig, LiteLLMMode, TrustPolicy } from "@/types/config";
 
 // --- Help text component ---
 
@@ -92,9 +101,28 @@ const MODEL_OPTIONS = [
 // is no config_path or port field -- a PUT with those fields would have them
 // silently dropped by pydantic. Tracked as missing backend support if a
 // standalone LiteLLM proxy process needs to be launched from a config file.
+//
+// model_list is `list[dict[str, Any]]` on the backend -- a freeform LiteLLM
+// router entry, typically `{model_name, litellm_params: {model, api_key,
+// ...}}`. The form only exposes the documented subset (model_name, the
+// routed model id, and the api_key env var name); any other keys on an
+// existing entry's `litellm_params` (e.g. api_base) are preserved verbatim
+// by formToConfig, keyed by array index.
+const modelListEntrySchema = z.object({
+  model_name: z.string().min(1, "Model name is required"),
+  model: z.string().min(1, "Model identifier is required"),
+  api_key_env: z.string().optional(),
+});
+
 const litellmSchema = z.object({
   mode: z.enum(["embedded", "sidecar", "external"]),
   endpoint: z.string().optional(),
+  model_list: z.array(modelListEntrySchema).optional(),
+  // Comma-separated string in the form; mapped to the backend's
+  // `fallback_models: string[]` field.
+  fallback_models: z.string().optional(),
+  timeout: z.coerce.number().positive().optional(),
+  max_retries: z.coerce.number().int().nonnegative().optional(),
 });
 
 const metadataSchema = z.object({
@@ -120,10 +148,27 @@ const securitySchema = z.object({
   // Comma-separated string in the form; mapped to the backend's flat
   // `allowed_origins: string[]` field (not `cors_origins`).
   cors_origins: z.string().optional(),
+  // NOTE: `security.api_keys` (forge_config.schema.APIKeyConfig) is
+  // deliberately NOT exposed here -- it is deprecated (ADR-0001 SS11),
+  // emits a DeprecationWarning on construction, and is translated into a
+  // synthetic service token. The form neither reads nor writes it.
+});
+
+// AgentDef.tools is a `list[str]` tool-name filter on the backend; the form
+// represents it as a comma-separated string, mirroring the
+// fallback_models/cors_origins convention above.
+const agentDefSchema = z.object({
+  name: z.string().min(1, "Name is required"),
+  description: z.string().optional(),
+  system_prompt: z.string().optional(),
+  model: z.string().optional(),
+  tools: z.string().optional(),
+  max_turns: z.coerce.number().int().positive().optional(),
 });
 
 const agentsSchema = z.object({
   default_agent_name: z.string().optional(),
+  agents: z.array(agentDefSchema).optional(),
 });
 
 const formSchema = z.object({
@@ -134,6 +179,8 @@ const formSchema = z.object({
 });
 
 type FormValues = z.infer<typeof formSchema>;
+type ModelListEntryForm = z.infer<typeof modelListEntrySchema>;
+type AgentDefForm = z.infer<typeof agentDefSchema>;
 
 // --- Helpers ---
 //
@@ -150,6 +197,31 @@ type FormValues = z.infer<typeof formSchema>;
 //     object.
 // llm.litellm intentionally has no config_path/port fields in the form --
 // the backend's LiteLLMConfig does not define them (see litellmSchema above).
+
+function modelListEntryToForm(entry: Record<string, unknown>): ModelListEntryForm {
+  const litellmParams = (entry.litellm_params ?? {}) as Record<string, unknown>;
+  const apiKey = litellmParams.api_key;
+  const apiKeyEnv =
+    apiKey && typeof apiKey === "object" && "name" in (apiKey as Record<string, unknown>)
+      ? String((apiKey as Record<string, unknown>).name)
+      : "";
+  return {
+    model_name: typeof entry.model_name === "string" ? entry.model_name : "",
+    model: typeof litellmParams.model === "string" ? litellmParams.model : "",
+    api_key_env: apiKeyEnv,
+  };
+}
+
+function agentDefToForm(agent: AgentDef): AgentDefForm {
+  return {
+    name: agent.name,
+    description: agent.description ?? "",
+    system_prompt: agent.system_prompt ?? "",
+    model: agent.model ?? "",
+    tools: (agent.tools ?? []).join(", "),
+    max_turns: agent.max_turns,
+  };
+}
 
 export function configToForm(config: ForgeConfig): FormValues {
   return {
@@ -172,6 +244,10 @@ export function configToForm(config: ForgeConfig): FormValues {
         ? {
             mode: config.llm.litellm.mode,
             endpoint: config.llm.litellm.endpoint ?? undefined,
+            model_list: (config.llm.litellm.model_list ?? []).map(modelListEntryToForm),
+            fallback_models: (config.llm.litellm.fallback_models ?? []).join(", "),
+            timeout: config.llm.litellm.timeout,
+            max_retries: config.llm.litellm.max_retries,
           }
         : undefined,
     },
@@ -184,7 +260,42 @@ export function configToForm(config: ForgeConfig): FormValues {
     },
     agents: {
       default_agent_name: config.agents?.default ?? "",
+      agents: (config.agents?.agents ?? []).map(agentDefToForm),
     },
+  };
+}
+
+function modelListEntryFromForm(
+  entry: ModelListEntryForm,
+  existingEntry: Record<string, unknown> | undefined,
+): Record<string, unknown> {
+  const existingParams = (existingEntry?.litellm_params ?? {}) as Record<string, unknown>;
+  return {
+    ...existingEntry,
+    model_name: entry.model_name,
+    litellm_params: {
+      ...existingParams,
+      model: entry.model,
+      ...(entry.api_key_env
+        ? { api_key: { source: "env", name: entry.api_key_env } }
+        : {}),
+    },
+  };
+}
+
+function agentDefFromForm(agent: AgentDefForm): AgentDef {
+  return {
+    name: agent.name,
+    description: agent.description || undefined,
+    system_prompt: agent.system_prompt || undefined,
+    model: agent.model || undefined,
+    tools: agent.tools
+      ? agent.tools
+          .split(",")
+          .map((t) => t.trim())
+          .filter(Boolean)
+      : [],
+    max_turns: agent.max_turns,
   };
 }
 
@@ -212,6 +323,17 @@ export function formToConfig(
             ...existing.llm.litellm,
             mode: form.llm.litellm.mode as LiteLLMMode,
             endpoint: form.llm.litellm.endpoint || undefined,
+            model_list: (form.llm.litellm.model_list ?? []).map((entry, index) =>
+              modelListEntryFromForm(entry, existing.llm.litellm?.model_list?.[index]),
+            ),
+            fallback_models: form.llm.litellm.fallback_models
+              ? form.llm.litellm.fallback_models
+                  .split(",")
+                  .map((s) => s.trim())
+                  .filter(Boolean)
+              : [],
+            timeout: form.llm.litellm.timeout,
+            max_retries: form.llm.litellm.max_retries,
           }
         : existing.llm.litellm,
     },
@@ -234,8 +356,227 @@ export function formToConfig(
     agents: {
       ...existing.agents,
       default: form.agents.default_agent_name || existing.agents?.default,
+      agents: (form.agents.agents ?? []).map(agentDefFromForm),
     },
   };
+}
+
+// --- Repeatable list editors ---
+
+function ModelListEditor({
+  control,
+  register,
+}: {
+  control: Control<FormValues>;
+  register: UseFormRegister<FormValues>;
+}) {
+  const { fields, append, remove } = useFieldArray({
+    control,
+    name: "llm.litellm.model_list",
+  });
+
+  return (
+    <div className="sm:col-span-2 mt-4 space-y-3">
+      <div className="flex items-center justify-between">
+        <div>
+          <p className="text-sm font-medium">Model List</p>
+          <p className="text-xs text-muted-foreground">
+            Additional model routes LiteLLM can dispatch to, beyond the default model above.
+          </p>
+        </div>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          onClick={() => append({ model_name: "", model: "", api_key_env: "" })}
+        >
+          <Plus className="h-4 w-4" />
+          Add Model
+        </Button>
+      </div>
+
+      {fields.length === 0 ? (
+        <div className="flex h-16 items-center justify-center rounded-lg border border-dashed">
+          <p className="text-sm text-muted-foreground">No additional models configured.</p>
+        </div>
+      ) : (
+        <div className="space-y-3">
+          {fields.map((field, index) => (
+            <div key={field.id} className="rounded-lg border p-3 space-y-2">
+              <div className="flex items-start gap-2">
+                <div className="flex-1 grid gap-2 sm:grid-cols-3">
+                  <div>
+                    <Label className="text-xs">Model Name</Label>
+                    <Input
+                      placeholder="my-fast-model"
+                      className="h-8 text-sm"
+                      {...register(`llm.litellm.model_list.${index}.model_name` as const)}
+                    />
+                  </div>
+                  <div>
+                    <Label className="text-xs">Model ID</Label>
+                    <Input
+                      placeholder="openai/gpt-4o-mini"
+                      className="h-8 text-sm"
+                      {...register(`llm.litellm.model_list.${index}.model` as const)}
+                    />
+                  </div>
+                  <div>
+                    <Label className="text-xs">API Key Env Var</Label>
+                    <Input
+                      placeholder="OPENAI_API_KEY"
+                      className="h-8 text-sm"
+                      {...register(`llm.litellm.model_list.${index}.api_key_env` as const)}
+                    />
+                  </div>
+                </div>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="mt-4 shrink-0"
+                  onClick={() => remove(index)}
+                >
+                  <Trash2 className="h-4 w-4 text-destructive" />
+                </Button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+      <HelpText>
+        Each entry routes a friendly model name to a provider-specific model ID. The API key
+        env var names the environment variable Forge resolves the secret from at runtime --
+        the literal key value is never stored in the config.
+      </HelpText>
+    </div>
+  );
+}
+
+function AgentDefinitionsEditor({
+  control,
+  register,
+}: {
+  control: Control<FormValues>;
+  register: UseFormRegister<FormValues>;
+}) {
+  const { fields, append, remove } = useFieldArray({
+    control,
+    name: "agents.agents",
+  });
+
+  return (
+    <div className="sm:col-span-2 space-y-3">
+      <div className="flex items-center justify-between">
+        <div>
+          <p className="text-sm font-medium">Agent Definitions</p>
+          <p className="text-xs text-muted-foreground">
+            Named personas your agent can be invoked as, each with its own prompt, model, and
+            tool filter.
+          </p>
+        </div>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          onClick={() =>
+            append({
+              name: "",
+              description: "",
+              system_prompt: "",
+              model: "",
+              tools: "",
+              max_turns: 10,
+            })
+          }
+        >
+          <Plus className="h-4 w-4" />
+          Add Agent
+        </Button>
+      </div>
+
+      {fields.length === 0 ? (
+        <div className="flex h-16 items-center justify-center rounded-lg border border-dashed">
+          <p className="text-sm text-muted-foreground">No agent personas defined yet.</p>
+        </div>
+      ) : (
+        <div className="space-y-3">
+          {fields.map((field, index) => (
+            <div key={field.id} className="rounded-lg border p-3 space-y-2">
+              <div className="flex items-start gap-2">
+                <div className="flex-1 space-y-2">
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    <div>
+                      <Label className="text-xs">Name</Label>
+                      <Input
+                        placeholder="researcher"
+                        className="h-8 text-sm"
+                        {...register(`agents.agents.${index}.name` as const)}
+                      />
+                    </div>
+                    <div>
+                      <Label className="text-xs">Model Override</Label>
+                      <Input
+                        placeholder="(uses default model)"
+                        className="h-8 text-sm"
+                        {...register(`agents.agents.${index}.model` as const)}
+                      />
+                    </div>
+                  </div>
+                  <div>
+                    <Label className="text-xs">Description</Label>
+                    <Input
+                      placeholder="What this persona is for"
+                      className="h-8 text-sm"
+                      {...register(`agents.agents.${index}.description` as const)}
+                    />
+                  </div>
+                  <div>
+                    <Label className="text-xs">System Prompt</Label>
+                    <Textarea
+                      placeholder="You are a specialist in..."
+                      rows={2}
+                      className="text-sm"
+                      {...register(`agents.agents.${index}.system_prompt` as const)}
+                    />
+                  </div>
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    <div>
+                      <Label className="text-xs">Tools (comma-separated)</Label>
+                      <Input
+                        placeholder="web_search, summarize"
+                        className="h-8 text-sm"
+                        {...register(`agents.agents.${index}.tools` as const)}
+                      />
+                    </div>
+                    <div>
+                      <Label className="text-xs">Max Turns</Label>
+                      <Input
+                        type="number"
+                        min={1}
+                        placeholder="10"
+                        className="h-8 text-sm"
+                        {...register(`agents.agents.${index}.max_turns` as const)}
+                      />
+                    </div>
+                  </div>
+                </div>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="mt-4 shrink-0"
+                  onClick={() => remove(index)}
+                >
+                  <Trash2 className="h-4 w-4 text-destructive" />
+                </Button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }
 
 // --- Component ---
@@ -527,7 +868,54 @@ export function ConfigVisualEditor() {
                       </HelpText>
                     </div>
                   )}
+
+                  <div className="space-y-2">
+                    <Label htmlFor="llm.litellm.timeout">Timeout (seconds)</Label>
+                    <Input
+                      id="llm.litellm.timeout"
+                      type="number"
+                      min={0}
+                      step={0.5}
+                      placeholder="30"
+                      {...register("llm.litellm.timeout")}
+                    />
+                    <HelpText>
+                      How long to wait for an LLM response before giving up. Default is 30
+                      seconds. Increase for slower local/self-hosted models.
+                    </HelpText>
+                  </div>
+
+                  <div className="space-y-2">
+                    <Label htmlFor="llm.litellm.max_retries">Max Retries</Label>
+                    <Input
+                      id="llm.litellm.max_retries"
+                      type="number"
+                      min={0}
+                      placeholder="3"
+                      {...register("llm.litellm.max_retries")}
+                    />
+                    <HelpText>
+                      Number of retry attempts for a failed LLM request (timeouts, rate limits,
+                      transient provider errors). Default is 3.
+                    </HelpText>
+                  </div>
+
+                  <div className="space-y-2 sm:col-span-2">
+                    <Label htmlFor="llm.litellm.fallback_models">Fallback Models</Label>
+                    <Input
+                      id="llm.litellm.fallback_models"
+                      placeholder="gpt-4o-mini, claude-haiku-4-5-20251001"
+                      {...register("llm.litellm.fallback_models")}
+                    />
+                    <HelpText>
+                      Comma-separated list of models to try, in order, if the default model is
+                      unavailable or errors out. LiteLLM automatically fails over to the next
+                      entry in this list.
+                    </HelpText>
+                  </div>
                 </div>
+
+                <ModelListEditor control={control} register={register} />
               </div>
             </div>
           </AccordionContent>
@@ -736,6 +1124,8 @@ export function ConfigVisualEditor() {
                   </p>
                 </div>
               </div>
+
+              <AgentDefinitionsEditor control={control} register={register} />
             </div>
           </AccordionContent>
         </AccordionItem>
