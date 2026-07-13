@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -26,6 +28,8 @@ from forge_config.schema import (
 )
 from forge_config.secret_resolver import SecretResolver
 from pydantic import BaseModel
+from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
+from pydantic_ai.models.function import AgentInfo, DeltaToolCall, FunctionModel
 from pydantic_ai.models.test import TestModel
 
 
@@ -581,6 +585,105 @@ class TestForgeAgentStreamingDeltas:
         assert tool_records[0].arguments == {"city": "a"}
         assert tool_records[0].result == "sunny in a"
         assert "".join(text_chunks) == '{"get_weather":"sunny in a"}'
+
+
+def _make_mixed_turn_function_model() -> FunctionModel:
+    """A FunctionModel reproducing the production blank-stream bug.
+
+    The first model turn streams a small leading text chunk ("\\n") *and*
+    a tool call in the same response -- a realistic shape for real
+    tool-calling models (e.g. via LiteLLM/vLLM), where a stray leading
+    token arrives before the tool-call delta. PydanticAI's ``run_stream``
+    treats any text-capable partial output as a "final result" the moment
+    it appears, so it stops streaming after that lone "\\n", never
+    executes the tool, and never streams the real follow-up text turn --
+    reproducing the live-verified bug: a single "\\n" chunk and zero tool
+    records. The non-streaming ``function`` callable runs the same
+    two-turn conversation to completion, giving the expected reference
+    output for the streaming path to match.
+    """
+    call_count = {"n": 0}
+
+    async def stream_func(messages: list[Any], info: AgentInfo) -> Any:
+        call_count["n"] += 1
+        if call_count["n"] % 2 == 1:
+            yield "\n"
+            yield {
+                0: DeltaToolCall(
+                    name="get_weather",
+                    json_args=json.dumps({"city": "SF"}),
+                    tool_call_id="call1",
+                )
+            }
+        else:
+            yield "It is "
+            yield "sunny in SF today."
+
+    async def plain_func(messages: list[Any], info: AgentInfo) -> ModelResponse:
+        call_count["n"] += 1
+        if call_count["n"] % 2 == 1:
+            tool_call = ToolCallPart(
+                tool_name="get_weather", args={"city": "SF"}, tool_call_id="call1"
+            )
+            return ModelResponse(parts=[tool_call])
+        return ModelResponse(parts=[TextPart(content="It is sunny in SF today.")])
+
+    return FunctionModel(plain_func, stream_function=stream_func)
+
+
+class TestForgeAgentStreamingToolCallRegression:
+    """Regression test for the live-verified bug where a tool-calling turn
+    streamed as a single blank "\\n" chunk with zero tool records, while
+    ``run_conversational(..., stream=False)`` returned the full answer with
+    the tool call. Root cause: ``_make_stream`` streamed only PydanticAI's
+    *first* model turn via ``run_stream``, which stops as soon as any
+    text-capable partial output appears -- even a lone leading token mixed
+    into a tool-calling turn -- so the tool never executed within the
+    stream and the real follow-up text turn never arrived.
+    """
+
+    @pytest.mark.anyio
+    async def test_stream_yields_tool_call_and_matches_non_stream_final_text(
+        self,
+    ) -> None:
+        config = _make_config()
+        agent = ForgeAgent(config, model_override=_make_mixed_turn_function_model())
+        await agent.initialize()
+        assert agent._agent is not None
+
+        @agent._agent.tool_plain
+        def get_weather(city: str) -> str:
+            return f"sunny in {city}"
+
+        non_stream_result = await agent.run_conversational("weather?")
+        expected_text = non_stream_result.output
+        assert isinstance(expected_text, str)
+        assert len(expected_text) > 0
+
+        stream = await agent.run_conversational("weather?", stream=True)
+        items = [item async for item in stream]
+
+        tool_records = [i for i in items if isinstance(i, ToolCallRecord)]
+        text_chunks = [i for i in items if isinstance(i, str)]
+
+        assert len(tool_records) >= 1
+        assert tool_records[0].name == "get_weather"
+        assert tool_records[0].result == "sunny in SF"
+        # The fixture's first turn mixes a lone leading text token ("\n")
+        # into the same response as the tool call -- the exact shape that
+        # made PydanticAI's `run_stream` misdetect that turn as already
+        # "final" and stop before ever executing the tool or streaming the
+        # real follow-up turn. PydanticAI's own non-streaming aggregation
+        # legitimately drops that incidental pre-tool-call text from
+        # `result.output` (only the last turn's text counts as the final
+        # answer), so streaming's delta text -- which surfaces everything
+        # the model said -- contains rather than equals it. Containment
+        # still proves the real final answer text actually arrived, which
+        # is exactly what the live bug failed to do (streaming ended with
+        # only that lone "\n" and nothing else).
+        joined_text = "".join(text_chunks)
+        assert joined_text != "\n"
+        assert expected_text in joined_text
 
 
 class TestForgeAgentPersonaRouting:

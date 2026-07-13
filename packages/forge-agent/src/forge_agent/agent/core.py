@@ -24,6 +24,7 @@ from pydantic_ai.messages import (
     ToolReturnPart,
 )
 from pydantic_ai.models import Model
+from pydantic_ai.result import AgentStream
 from pydantic_ai.settings import ModelSettings
 from pydantic_ai.usage import UsageLimits
 
@@ -444,14 +445,23 @@ class ForgeAgent:
     ) -> AsyncIterator[str | ToolCallRecord]:
         """Create an async iterator that streams the agent response.
 
-        Yields ``ToolCallRecord`` items for any tools invoked during the run
-        (tool calls resolve before the final text turn streams, so these are
-        always yielded before the text deltas that follow them), then
-        incremental text DELTAS -- the new suffix since the last yielded
-        snapshot -- rather than PydanticAI's cumulative ``stream_output``
-        snapshots. Concatenating every ``str`` item yielded reconstructs the
-        final message exactly once, matching the SSE frame contract in
-        docs/developer/api-reference.md.
+        Drives the full tool-calling agent graph via ``agent.iter()`` (not
+        ``agent.run_stream()``, which only streams PydanticAI's *first*
+        model turn and stops as soon as any text-capable partial output
+        appears -- even a single leading token mixed into a tool-calling
+        turn -- leaving the tool un-executed and the real follow-up text
+        turn unstreamed). Iterating the graph node-by-node lets every
+        model-request turn stream its text and every tool-call turn
+        actually execute, regardless of how many turns the run takes.
+
+        Yields ``ToolCallRecord`` items for tools as their calls resolve
+        (each round's tool calls are yielded once the graph has advanced
+        past the node that executed them, always before the text deltas
+        of the model turn that follows), then incremental text DELTAS for
+        each model-request turn via PydanticAI's ``AgentStream.stream_text
+        (delta=True)``. Concatenating every ``str`` item yielded
+        reconstructs the final message exactly once, matching the SSE
+        frame contract in docs/developer/api-reference.md.
 
         Args:
             message: The user message.
@@ -476,23 +486,42 @@ class ForgeAgent:
             stream_kwargs["usage_limits"] = usage_limits
 
         async def _generate() -> AsyncIterator[str | ToolCallRecord]:
-            async with agent.run_stream(message, **stream_kwargs) as stream:
-                for record in _extract_tool_call_records(list(stream.all_messages())):
-                    yield record
+            tool_calls_yielded = 0
+            async with agent.iter(message, **stream_kwargs) as run:
+                async for node in run:
+                    if agent.is_model_request_node(node):
+                        request_stream: AgentStream[Any, Any]
+                        async with node.stream(run.ctx) as request_stream:
+                            # Entering this context manager already appended
+                            # any pending tool-return message resolved by the
+                            # previous round's `CallToolsNode` to the shared
+                            # message history (that happens synchronously
+                            # before the model request itself is sent), so
+                            # any newly resolved tool calls are visible now
+                            # -- before this round's text deltas stream.
+                            current_records = _extract_tool_call_records(run.all_messages())
+                            for record in current_records[tool_calls_yielded:]:
+                                yield record
+                            tool_calls_yielded = len(current_records)
 
-                last_text = ""
-                async for snapshot in stream.stream_output(debounce_by=None):
-                    if snapshot.startswith(last_text):
-                        delta = snapshot[len(last_text) :]
-                    else:
-                        delta = snapshot
-                    if delta:
-                        yield delta
-                    last_text = snapshot
+                            async for delta in request_stream.stream_text(
+                                delta=True, debounce_by=None
+                            ):
+                                if delta:
+                                    yield delta
 
-                if session_id:
-                    all_msgs = stream.all_messages()
-                    await context.add_messages(session_id, list(all_msgs))
+                if run.result is not None:
+                    # Catch-all for tool calls resolved by the final
+                    # `CallToolsNode` with no further model-request node
+                    # afterwards to surface them (e.g. exhaustive end
+                    # strategy), plus persisting the full history.
+                    final_messages = run.result.all_messages()
+                    final_records = _extract_tool_call_records(final_messages)
+                    for record in final_records[tool_calls_yielded:]:
+                        yield record
+
+                    if session_id:
+                        await context.add_messages(session_id, list(final_messages))
 
         return _generate()
 
