@@ -23,6 +23,9 @@ const PeersPage = lazy(() =>
 const SecurityPage = lazy(() =>
   import("@/features/security/SecurityPage").then((m) => ({ default: m.SecurityPage }))
 );
+const ApiKeysPage = lazy(() =>
+  import("@/features/apikeys/ApiKeysPage").then((m) => ({ default: m.ApiKeysPage }))
+);
 const GuidePage = lazy(() =>
   import("@/features/guide/GuidePage").then((m) => ({ default: m.GuidePage }))
 );
@@ -103,6 +106,7 @@ export function App() {
               </RequirePermission>
             }
           />
+          <Route path="/api-keys" element={<ApiKeysPage />} />
           <Route path="/guide" element={<GuidePage />} />
         </Route>
       </Routes>

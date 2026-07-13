@@ -21,6 +21,7 @@ export default [
         // Browser globals
         document: "readonly",
         window: "readonly",
+        navigator: "readonly",
         localStorage: "readonly",
         fetch: "readonly",
         console: "readonly",

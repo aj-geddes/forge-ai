@@ -6,6 +6,7 @@ import {
   MessageSquare,
   Network,
   Shield,
+  KeyRound,
   BookOpen,
   ChevronLeft,
   ChevronRight,
@@ -26,6 +27,9 @@ const navItems = [
   { to: "/chat", label: "Chat", icon: MessageSquare, permission: "agent:invoke" },
   { to: "/peers", label: "Peers", icon: Network, permission: "config:read" },
   { to: "/security", label: "Security", icon: Shield, permission: "config:read" },
+  // Any authenticated user may mint their own API keys -- there is no
+  // separate permission gate (ADR-0002 SS9).
+  { to: "/api-keys", label: "API Keys", icon: KeyRound, permission: null },
   { to: "/guide", label: "Guide", icon: BookOpen, permission: null },
 ] as const;
 
