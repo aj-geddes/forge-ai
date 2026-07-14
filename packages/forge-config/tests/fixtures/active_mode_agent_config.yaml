@@ -1,0 +1,13 @@
+metadata:
+  name: test-forge
+
+agents:
+  default: assistant
+  agents:
+    - name: assistant
+      description: "Reactive default persona"
+      max_turns: 5
+    - name: autonomous-analyst
+      description: "Declared active persona (ADR-0005 Phase 0: inert declaration only)"
+      mode: active
+      max_turns: 5

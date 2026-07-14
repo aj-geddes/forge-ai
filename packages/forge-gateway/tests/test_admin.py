@@ -25,6 +25,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from forge_agent.agent.store import InMemoryConversationStore
 from forge_config.schema import (
+    AgentDef,
     AgentsConfig,
     AuthorizationConfig,
     ForgeConfig,
@@ -429,6 +430,52 @@ class TestAdminValidApiKey:
         tools = resp.json()
         assert len(tools) == 1
         assert tools[0]["name"] == "test_tool"
+
+
+# =========================================================================
+# 3b. GET /v1/admin/config surfaces ADR-0005 Phase 0 ``mode`` per agent
+# =========================================================================
+
+
+@pytest.fixture()
+def config_with_agent_modes() -> ForgeConfig:
+    """A config declaring one passive (implicit) and one active persona."""
+    return ForgeConfig(
+        agents=AgentsConfig(
+            default="assistant",
+            agents=[
+                AgentDef(name="assistant", description="Reactive default"),
+                AgentDef(name="autonomous-analyst", description="Declared active", mode="active"),
+            ],
+        )
+    )
+
+
+@pytest.fixture()
+def _wire_admin_with_agent_modes(config_with_agent_modes: ForgeConfig) -> Iterator[None]:
+    admin.set_state(
+        config=config_with_agent_modes,
+        config_path="/tmp/test-forge.yaml",  # noqa: S108
+        agent=None,
+    )
+    yield
+    admin.set_state(config=None, config_path="", agent=None)
+
+
+@pytest.mark.usefixtures("_wire_auth", "_wire_admin_with_agent_modes")
+class TestAdminConfigExposesAgentMode:
+    """ADR-0005 Phase 0: ``GET /v1/admin/config`` must surface each agent's
+    ``mode`` so the UI roster can read passive/active without a new endpoint."""
+
+    async def test_config_response_includes_mode_per_agent(
+        self, async_client: httpx.AsyncClient, auth_headers: dict[str, str]
+    ) -> None:
+        resp = await async_client.get("/v1/admin/config", headers=auth_headers)
+        assert resp.status_code == 200
+        agents = resp.json()["config"]["agents"]["agents"]
+        modes_by_name = {agent["name"]: agent["mode"] for agent in agents}
+        assert modes_by_name["assistant"] == "passive"
+        assert modes_by_name["autonomous-analyst"] == "active"
 
 
 # =========================================================================

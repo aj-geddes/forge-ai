@@ -789,6 +789,18 @@ class ConversationStoreConfig(BaseModel):
 # --- Agents Configuration ---
 
 
+class AgentMode(str, Enum):
+    """ADR-0005: whether a persona is reactive (passive) or autonomous
+    (active). Phase 0 is pure declaration -- this field carries no
+    runtime behavior; it only makes an operator's intent visible/
+    auditable. ``PASSIVE`` is the default so every pre-existing config
+    (with no ``mode`` field at all) parses and behaves exactly as today.
+    """
+
+    PASSIVE = "passive"  # reactive; waits on a trigger. DEFAULT.
+    ACTIVE = "active"  # autonomous; runs known tasks + handles emergent unknown tasks.
+
+
 class PeerAgent(BaseModel):
     """A peer agent that this Forge instance can communicate with."""
 
@@ -812,6 +824,9 @@ class AgentDef(BaseModel):
     model: str | None = None  # Override default
     tools: list[str] = Field(default_factory=list)  # Tool name filter
     max_turns: int = 10
+
+    # ADR-0005 Phase 0: passive/active declaration only, no runtime effect.
+    mode: AgentMode = AgentMode.PASSIVE
 
 
 class AgentsConfig(BaseModel):

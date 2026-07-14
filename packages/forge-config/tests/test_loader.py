@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 from forge_config.exceptions import ConfigLoadError
 from forge_config.loader import load_config
+from forge_config.schema import AgentMode
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -23,6 +24,22 @@ class TestLoadConfig:
         # Defaults should fill in
         assert config.llm.default_model == "gpt-4o"
         assert config.security.rate_limit_rpm == 60
+
+    def test_load_config_omitting_mode_defaults_every_agent_to_passive(self) -> None:
+        """ADR-0005 Phase 0: an existing config with no ``mode`` field on
+        any persona must parse and behave exactly as today (default
+        passive), i.e. this is a pure backward-compatibility guarantee."""
+        config = load_config(FIXTURES / "valid_config.yaml")
+        assert all(agent.mode == AgentMode.PASSIVE for agent in config.agents.agents)
+
+    def test_load_config_with_declared_active_agent_mode(self) -> None:
+        """ADR-0005 Phase 0: a persona may declare ``mode: active`` and the
+        config loads -- this is inert metadata in Phase 0, no runtime
+        behavior change."""
+        config = load_config(FIXTURES / "active_mode_agent_config.yaml")
+        agents_by_name = {agent.name: agent for agent in config.agents.agents}
+        assert agents_by_name["assistant"].mode == AgentMode.PASSIVE
+        assert agents_by_name["autonomous-analyst"].mode == AgentMode.ACTIVE
 
     def test_config_omitting_agentweave_yields_workload_disabled(self) -> None:
         """HIGH finding fix: minimal_config.yaml has no security block at

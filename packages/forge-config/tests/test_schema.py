@@ -3,6 +3,7 @@
 import pytest
 from forge_config.schema import (
     AgentDef,
+    AgentMode,
     AgentsConfig,
     AgentWeaveConfig,
     AuthConfig,
@@ -443,6 +444,31 @@ class TestPeerAgent:
             }
         )
         assert peer.trust_level == TrustLevel.MEDIUM
+
+
+class TestAgentDefMode:
+    """ADR-0005 Phase 0: passive/active mode declaration on AgentDef.
+
+    Phase 0 is pure declaration -- no runtime behavior change. ``mode``
+    must default to ``passive`` so every existing config keeps its exact
+    current meaning.
+    """
+
+    def test_mode_defaults_to_passive_when_omitted(self) -> None:
+        agent = AgentDef(name="assistant")
+        assert agent.mode == AgentMode.PASSIVE
+
+    def test_mode_accepts_passive(self) -> None:
+        agent = AgentDef(name="assistant", mode="passive")
+        assert agent.mode == AgentMode.PASSIVE
+
+    def test_mode_accepts_active(self) -> None:
+        agent = AgentDef(name="assistant", mode="active")
+        assert agent.mode == AgentMode.ACTIVE
+
+    def test_mode_rejects_invalid_value(self) -> None:
+        with pytest.raises(ValidationError):
+            AgentDef(name="assistant", mode="hyperactive")
 
 
 class TestAgentsConfig:
