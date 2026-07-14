@@ -55,15 +55,24 @@ spec:
         app.kubernetes.io/name: postiz
         app.kubernetes.io/component: elasticsearch
     spec:
-      # Official elasticsearch image runs as uid 1000 (elasticsearch) itself.
-      # Longhorn provisions fresh volumes root-owned, so without fsGroup the
-      # elasticsearch user gets AccessDeniedException creating
-      # /usr/share/elasticsearch/data/nodes on first boot; fsGroup makes the
-      # kubelet chown the mounted volume to gid 1000 before the container
-      # starts. No further runAsNonRoot override needed (this namespace has
-      # no restricted PodSecurity label), matching the pragmatic approach
-      # postiz.yaml already takes for its own upstream image.
+      # fsGroup alone is not enough here: the official elasticsearch image's
+      # own USER is root, and its docker-entrypoint.sh -- when it detects it
+      # started as root -- does its own privilege drop to the "elasticsearch"
+      # user (uid 1000) via su-exec/setuid before exec'ing the JVM. That
+      # setuid call replaces the process's group list outright, DISCARDING
+      # the supplementary gid 1000 Kubernetes injected via fsGroup, which is
+      # what caused AccessDeniedException creating
+      # /usr/share/elasticsearch/data/nodes even with fsGroup set (verified:
+      # the Longhorn-provisioned mount was correctly chowned to group 1000 by
+      # kubelet, but the post-setuid elasticsearch process no longer carried
+      # that supplementary group). Setting runAsUser: 1000 makes Kubernetes
+      # start the container directly as the elasticsearch user -- the
+      # entrypoint sees it's already non-root and skips the setuid/su-exec
+      # step entirely, so the fsGroup-injected supplementary group is never
+      # dropped. This is the same pairing (runAsUser + fsGroup) the official
+      # elastic/helm-charts elasticsearch chart uses for exactly this reason.
       securityContext:
+        runAsUser: 1000
         fsGroup: 1000
       # No initContainers here: ES normally needs the HOST kernel's
       # vm.max_map_count raised to >=262144 (mmap-based storage), which is
