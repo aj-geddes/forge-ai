@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from forge_config.schema import AgentDef, ForgeConfig
 from pydantic import BaseModel
 
-from forge_gateway import metrics_registry, security
+from forge_gateway import activity, metrics_registry, security
 from forge_gateway.models import ErrorResponse, InvokeRequest, InvokeResponse
 from forge_gateway.routes.persona import resolve_persona
 from forge_gateway.schema import json_schema_to_model
@@ -90,6 +90,14 @@ async def invoke(request: InvokeRequest) -> InvokeResponse:
         )
         for tool_name in run_result.tools_used:
             metrics_registry.record_tool_invocation(tool_name)
+            activity.recent_activity.record(
+                tool=tool_name,
+                arguments={},
+                ok=True,
+                error=None,
+                interface="invoke",
+                session_id=request.session_id,
+            )
         return InvokeResponse(
             result=run_result.output,
             session_id=request.session_id,

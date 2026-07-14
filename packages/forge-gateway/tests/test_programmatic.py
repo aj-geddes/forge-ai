@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from unittest.mock import AsyncMock
 
 import pytest
@@ -9,6 +10,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from forge_agent.agent.core import ForgeRunResult
 from forge_config.schema import AgentDef, AgentsConfig, ForgeConfig, LLMConfig
+from forge_gateway.activity import recent_activity
 from forge_gateway.routes import programmatic
 from prometheus_client import REGISTRY
 from pydantic import BaseModel
@@ -506,3 +508,43 @@ class TestInvokeMetrics:
         assert response.status_code == 503
         assert after_success == before_success
         assert after_error == before_error
+
+
+class TestInvokeActivityFeed:
+    """POST /v1/agent/invoke records tool usage into
+    ``forge_gateway.activity.recent_activity`` with interface="invoke"."""
+
+    @pytest.fixture(autouse=True)
+    def _reset_activity(self) -> Iterator[None]:
+        recent_activity.reset()
+        yield
+        recent_activity.reset()
+
+    def test_invoke_with_tools_used_populates_activity(
+        self, client: TestClient, mock_agent: AsyncMock
+    ) -> None:
+        mock_agent.run_structured.return_value = _mock_run_result(
+            tools_used=["unit_test_activity_tool"]
+        )
+        response = client.post(
+            "/v1/agent/invoke",
+            json={"intent": "test", "session_id": "sess-invoke-activity"},
+        )
+        assert response.status_code == 200
+
+        snapshot = recent_activity.snapshot()
+        assert len(snapshot) == 1
+        entry = snapshot[0]
+        assert entry.tool == "unit_test_activity_tool"
+        assert entry.arguments == {}
+        assert entry.ok is True
+        assert entry.error is None
+        assert entry.interface == "invoke"
+        assert entry.session_id == "sess-invoke-activity"
+
+    def test_invoke_without_tools_used_leaves_activity_empty(
+        self, client: TestClient, mock_agent: AsyncMock
+    ) -> None:
+        response = client.post("/v1/agent/invoke", json={"intent": "test"})
+        assert response.status_code == 200
+        assert recent_activity.snapshot() == []

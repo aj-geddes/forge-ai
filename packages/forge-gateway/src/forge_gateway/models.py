@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from enum import Enum
 from typing import Any
 
@@ -139,6 +140,29 @@ class AdminSessionResponse(BaseModel):
     session_id: str
     message_count: int = 0
     agent: str | None = None
+
+
+class AdminActivityRecord(BaseModel):
+    """A single recorded tool invocation, as exposed by the admin activity feed.
+
+    Mirrors ``forge_gateway.activity.ActivityRecord`` -- the source of
+    truth is the in-memory ``RecentActivity`` ring buffer, not a database.
+    """
+
+    tool: str
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    ok: bool
+    error: str | None = None
+    timestamp: datetime
+    session_id: str | None = None
+    interface: str
+
+
+class AdminActivityResponse(BaseModel):
+    """Response for ``GET /v1/admin/activity``: recent tool invocations,
+    newest first."""
+
+    activity: list[AdminActivityRecord] = Field(default_factory=list)
 
 
 class AdminPeerStatus(str, Enum):

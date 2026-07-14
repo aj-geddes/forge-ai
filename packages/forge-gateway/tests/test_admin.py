@@ -35,6 +35,7 @@ from forge_config.schema import (
 )
 from forge_gateway import auth as auth_module
 from forge_gateway import security
+from forge_gateway.activity import recent_activity
 from forge_gateway.routes import admin
 from forge_security.oidc import Authorizer, ServiceTokenVerifier
 
@@ -230,6 +231,10 @@ class TestAdminNoAuthHeader:
         resp = await async_client.post("/v1/admin/peers/peer1/ping")
         assert resp.status_code == 401
 
+    async def test_admin_activity_get_requires_auth(self, async_client: httpx.AsyncClient) -> None:
+        resp = await async_client.get("/v1/admin/activity")
+        assert resp.status_code == 401
+
     async def test_no_auth_response_includes_detail(self, async_client: httpx.AsyncClient) -> None:
         """The 401 body should contain a machine-readable error code."""
         resp = await async_client.get("/v1/admin/config")
@@ -304,6 +309,12 @@ class TestAdminInvalidApiKey:
         self, async_client: httpx.AsyncClient
     ) -> None:
         resp = await async_client.post("/v1/admin/peers/peer1/ping", headers=self._bad())
+        assert resp.status_code == 401
+
+    async def test_admin_activity_get_rejects_invalid_key(
+        self, async_client: httpx.AsyncClient
+    ) -> None:
+        resp = await async_client.get("/v1/admin/activity", headers=self._bad())
         assert resp.status_code == 401
 
     async def test_invalid_key_response_includes_detail(
@@ -392,6 +403,13 @@ class TestAdminValidApiKey:
         # Unknown peer -> 404 (but NOT 401, proving auth passed)
         resp = await async_client.post("/v1/admin/peers/nonexistent/ping", headers=auth_headers)
         assert resp.status_code == 404
+
+    async def test_admin_activity_get_with_valid_key(
+        self, async_client: httpx.AsyncClient, auth_headers: dict[str, str]
+    ) -> None:
+        resp = await async_client.get("/v1/admin/activity", headers=auth_headers)
+        assert resp.status_code == 200
+        assert "activity" in resp.json()
 
     async def test_admin_tools_registry_with_valid_key(
         self, async_client: httpx.AsyncClient, auth_headers: dict[str, str]
@@ -728,6 +746,97 @@ class TestListSessions:
         resp = client.get("/v1/admin/sessions", headers=auth_headers)
         assert resp.status_code == 200
         assert resp.json() == []
+
+
+@pytest.mark.usefixtures("_wire_auth")
+class TestGetActivity:
+    """GET /v1/admin/activity returns the recent tool-invocation feed
+    backed by ``forge_gateway.activity.recent_activity``."""
+
+    @pytest.fixture(autouse=True)
+    def _reset_activity(self) -> Iterator[None]:
+        recent_activity.reset()
+        yield
+        recent_activity.reset()
+
+    async def test_returns_empty_activity_when_nothing_recorded(
+        self, async_client: httpx.AsyncClient, auth_headers: dict[str, str]
+    ) -> None:
+        resp = await async_client.get("/v1/admin/activity", headers=auth_headers)
+        assert resp.status_code == 200
+        assert resp.json() == {"activity": []}
+
+    async def test_returns_recorded_activity_newest_first_with_correct_shape(
+        self, async_client: httpx.AsyncClient, auth_headers: dict[str, str]
+    ) -> None:
+        recent_activity.record(
+            tool="test_tool_1",
+            arguments={"arg": "value1"},
+            ok=True,
+            error=None,
+            interface="chat",
+            session_id="session-1",
+        )
+        recent_activity.record(
+            tool="test_tool_2",
+            arguments={"arg": "value2"},
+            ok=False,
+            error="Something went wrong",
+            interface="invoke",
+            session_id="session-2",
+        )
+
+        resp = await async_client.get("/v1/admin/activity", headers=auth_headers)
+        assert resp.status_code == 200
+        activity = resp.json()["activity"]
+        assert len(activity) == 2
+
+        # Newest first: test_tool_2 was recorded second.
+        newest, oldest = activity
+        assert newest["tool"] == "test_tool_2"
+        assert newest["arguments"] == {"arg": "value2"}
+        assert newest["ok"] is False
+        assert newest["error"] == "Something went wrong"
+        assert newest["interface"] == "invoke"
+        assert newest["session_id"] == "session-2"
+        assert "timestamp" in newest
+
+        assert oldest["tool"] == "test_tool_1"
+        assert oldest["arguments"] == {"arg": "value1"}
+        assert oldest["ok"] is True
+        assert oldest["error"] is None
+        assert oldest["interface"] == "chat"
+        assert oldest["session_id"] == "session-1"
+
+    async def test_limit_query_param_caps_returned_entries(
+        self, async_client: httpx.AsyncClient, auth_headers: dict[str, str]
+    ) -> None:
+        for name in ("a", "b", "c"):
+            recent_activity.record(tool=name, arguments={}, ok=True, error=None, interface="chat")
+
+        resp = await async_client.get("/v1/admin/activity?limit=1", headers=auth_headers)
+        assert resp.status_code == 200
+        activity = resp.json()["activity"]
+        assert len(activity) == 1
+        assert activity[0]["tool"] == "c"  # newest of the three
+
+    async def test_default_limit_is_50(
+        self, async_client: httpx.AsyncClient, auth_headers: dict[str, str]
+    ) -> None:
+        for i in range(60):
+            recent_activity.record(
+                tool=f"tool-{i}", arguments={}, ok=True, error=None, interface="chat"
+            )
+
+        resp = await async_client.get("/v1/admin/activity", headers=auth_headers)
+        assert resp.status_code == 200
+        assert len(resp.json()["activity"]) == 50
+
+    async def test_limit_above_max_is_rejected(
+        self, async_client: httpx.AsyncClient, auth_headers: dict[str, str]
+    ) -> None:
+        resp = await async_client.get("/v1/admin/activity?limit=201", headers=auth_headers)
+        assert resp.status_code == 422
 
 
 @pytest.mark.usefixtures("_wire_admin", "_wire_auth")

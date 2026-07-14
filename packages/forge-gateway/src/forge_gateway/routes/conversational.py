@@ -14,7 +14,7 @@ from fastapi.responses import StreamingResponse
 from forge_agent.agent.core import ToolCallRecord
 from forge_config.schema import AgentDef, ForgeConfig
 
-from forge_gateway import metrics_registry, security
+from forge_gateway import activity, metrics_registry, security
 from forge_gateway.models import (
     ConversationRequest,
     ConversationResponse,
@@ -88,6 +88,15 @@ async def _sse_generator(
         async for item in chunks:
             if isinstance(item, ToolCallRecord):
                 metrics_registry.record_tool_invocation(item.name)
+                ok, error = activity.derive_ok_error(item.result)
+                activity.recent_activity.record(
+                    tool=item.name,
+                    arguments=item.arguments,
+                    ok=ok,
+                    error=error,
+                    interface="chat_stream",
+                    session_id=session_id,
+                )
                 payload = _tool_call_payload(item, session_id)
             else:
                 payload = json.dumps({"chunk": item, "session_id": session_id})
@@ -143,6 +152,15 @@ async def _handle_non_streaming(
         )
         for tc in run_result.tool_calls:
             metrics_registry.record_tool_invocation(tc.name)
+            ok, error = activity.derive_ok_error(tc.result)
+            activity.recent_activity.record(
+                tool=tc.name,
+                arguments=tc.arguments,
+                ok=ok,
+                error=error,
+                interface="chat",
+                session_id=session_id,
+            )
         return ConversationResponse(
             message=run_result.output,
             session_id=session_id,

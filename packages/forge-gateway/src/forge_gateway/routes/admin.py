@@ -17,13 +17,16 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from forge_config.schema import ForgeConfig
 from pydantic import ValidationError
 
 from forge_gateway import security
+from forge_gateway.activity import recent_activity
 from forge_gateway.auth import validate_peer_endpoint
 from forge_gateway.models import (
+    AdminActivityRecord,
+    AdminActivityResponse,
     AdminConfigResponse,
     AdminConfigUpdateRequest,
     AdminConfigUpdateResponse,
@@ -47,6 +50,9 @@ router = APIRouter(
 
 _read = Depends(security.require_permission("config:read"))
 _write = Depends(security.require_permission("config:write"))
+
+_ACTIVITY_DEFAULT_LIMIT = 50
+_ACTIVITY_MAX_LIMIT = 200
 
 # Module-level state set from app lifespan
 _config: ForgeConfig | None = None
@@ -300,6 +306,41 @@ async def delete_session(session_id: str) -> dict[str, str]:
 
     await store.clear_session(session_id)
     return {"status": "deleted", "session_id": session_id}
+
+
+# --- Activity endpoint ---
+
+
+@router.get(
+    "/activity",
+    response_model=AdminActivityResponse,
+    dependencies=[_read],
+)
+async def get_activity(
+    limit: int = Query(default=_ACTIVITY_DEFAULT_LIMIT, ge=1, le=_ACTIVITY_MAX_LIMIT),
+) -> AdminActivityResponse:
+    """Return the most recent tool invocations, newest first.
+
+    Backed by ``forge_gateway.activity.recent_activity`` -- an in-memory,
+    bounded log recorded at the same seams as the ``forge_tool_invocations_total``
+    Prometheus counter, but retaining per-call detail (arguments, outcome,
+    session) rather than just a count.
+    """
+    records = recent_activity.snapshot(limit)
+    return AdminActivityResponse(
+        activity=[
+            AdminActivityRecord(
+                tool=record.tool,
+                arguments=record.arguments,
+                ok=record.ok,
+                error=record.error,
+                timestamp=record.timestamp,
+                session_id=record.session_id,
+                interface=record.interface,
+            )
+            for record in records
+        ]
+    )
 
 
 # --- Peers endpoints ---

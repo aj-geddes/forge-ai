@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import FastAPI
 from forge_agent.agent.core import ForgeRunResult, ToolCallRecord
 from forge_config.schema import AgentDef, AgentsConfig, ForgeConfig, LLMConfig
+from forge_gateway.activity import recent_activity
 from forge_gateway.routes import conversational
 from httpx import ASGITransport, AsyncClient
 from prometheus_client import REGISTRY
@@ -1159,3 +1160,108 @@ class TestConversationalMetrics:
             {"tool": "unit_test_stream_tool"},
         )
         assert after - before == 1.0
+
+
+# ---------------------------------------------------------------------------
+# 13. Recent activity feed: real chat/tool-call seams populate the buffer
+# ---------------------------------------------------------------------------
+
+
+class TestConversationalActivityFeed:
+    """POST /v1/chat/completions records tool invocations into
+    ``forge_gateway.activity.recent_activity`` -- the detail-carrying
+    companion to the ``forge_tool_invocations_total`` Prometheus counter."""
+
+    @pytest.fixture(autouse=True)
+    def _reset_activity(self) -> Iterator[None]:
+        recent_activity.reset()
+        yield
+        recent_activity.reset()
+
+    def test_non_streaming_chat_with_tool_call_populates_activity(
+        self, client: TestClient, mock_agent: AsyncMock
+    ) -> None:
+        mock_agent.run_conversational.return_value = ForgeRunResult(
+            output="It's sunny in SF.",
+            tool_calls=[
+                ToolCallRecord(name="get_weather", arguments={"city": "SF"}, result="sunny in SF")
+            ],
+        )
+        response = client.post(
+            "/v1/chat/completions",
+            json={"message": "weather?", "session_id": "sess-activity"},
+        )
+        assert response.status_code == 200
+
+        snapshot = recent_activity.snapshot()
+        assert len(snapshot) == 1
+        entry = snapshot[0]
+        assert entry.tool == "get_weather"
+        assert entry.arguments == {"city": "SF"}
+        assert entry.ok is True
+        assert entry.error is None
+        assert entry.interface == "chat"
+        assert entry.session_id == "sess-activity"
+
+    def test_non_streaming_chat_tool_error_result_records_ok_false(
+        self, client: TestClient, mock_agent: AsyncMock
+    ) -> None:
+        """A tool result carrying a dict-shaped error envelope (the common
+        convention for a tool that failed without raising) is recorded as
+        ok=False with the error message captured."""
+        mock_agent.run_conversational.return_value = ForgeRunResult(
+            output="Something went wrong.",
+            tool_calls=[
+                ToolCallRecord(
+                    name="get_weather",
+                    arguments={"city": "SF"},
+                    result={"error": "boom"},
+                )
+            ],
+        )
+        response = client.post(
+            "/v1/chat/completions",
+            json={"message": "weather?", "session_id": "sess-error"},
+        )
+        assert response.status_code == 200
+
+        entry = recent_activity.snapshot()[0]
+        assert entry.ok is False
+        assert entry.error is not None
+        assert "boom" in entry.error
+        assert entry.session_id == "sess-error"
+
+    async def test_streaming_chat_with_tool_call_populates_activity(
+        self, async_client: AsyncClient, mock_agent: AsyncMock
+    ) -> None:
+        mock_agent.run_conversational.return_value = _async_iter_mixed(
+            ToolCallRecord(name="get_weather", arguments={"city": "SF"}, result="sunny"),
+            "chunk",
+        )
+        response = await async_client.post(
+            "/v1/chat/completions",
+            json={"message": "weather?", "stream": True, "session_id": "sess-stream-activity"},
+        )
+        assert response.status_code == 200
+
+        snapshot = recent_activity.snapshot()
+        assert len(snapshot) == 1
+        entry = snapshot[0]
+        assert entry.tool == "get_weather"
+        assert entry.arguments == {"city": "SF"}
+        assert entry.ok is True
+        assert entry.interface == "chat_stream"
+        assert entry.session_id == "sess-stream-activity"
+
+    def test_chat_without_tool_calls_leaves_activity_empty(
+        self, client: TestClient, mock_agent: AsyncMock
+    ) -> None:
+        mock_agent.run_conversational.return_value = ForgeRunResult(
+            output="Just chatting.", tool_calls=[]
+        )
+        response = client.post(
+            "/v1/chat/completions",
+            json={"message": "hi", "session_id": "sess-no-tools"},
+        )
+        assert response.status_code == 200
+        assert recent_activity.snapshot() == []
