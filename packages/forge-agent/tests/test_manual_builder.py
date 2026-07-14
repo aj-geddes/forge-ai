@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import inspect
+import re
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
 from forge_agent.active.gate import ApprovalStatus, ApprovalStore, ToolGate
+from forge_agent.builder import manual as manual_module
 from forge_agent.builder.manual import ManualToolBuilder, ToolResponseError
 from forge_config.exceptions import SecretResolutionError
 from forge_config.schema import (
@@ -704,3 +707,235 @@ class TestManualToolGating:
 
         mock_client.request.assert_called_once()
         assert result == {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Test: reserved `{{__now__}}` template token
+# ---------------------------------------------------------------------------
+#
+# `__now__` is a reserved, request-time-resolved template token (see
+# `_RESERVED_TEMPLATE_RESOLVERS` in forge_agent.builder.manual). It resolves
+# to a fresh ISO-8601 UTC timestamp with millisecond precision and a
+# trailing "Z" (e.g. "2026-07-14T10:22:04.123Z") -- the format some APIs
+# (e.g. Postiz's `POST /posts` `date` field) require. It must:
+#   - be computed fresh at request/execution time, never at build time
+#   - work in url, headers, and body_template alike
+#   - take precedence over any identically named declared param
+#   - never be forwarded as a stray query/body param
+
+
+_ISO8601_MILLIS_Z_RE = re.compile(r"\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z\Z")
+
+
+class TestReservedNowTemplateToken:
+    """Tests for the reserved `{{__now__}}` template token."""
+
+    @pytest.mark.anyio
+    async def test_now_token_resolves_to_valid_iso8601_utc_in_body_template(self) -> None:
+        config = _make_manual_tool(
+            url="https://api.example.com/posts",
+            method=HTTPMethod.POST,
+            body_template={"date": "{{__now__}}"},
+        )
+
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"ok": True}
+        mock_response.raise_for_status.return_value = None
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.request = AsyncMock(return_value=mock_response)
+
+        builder = ManualToolBuilder(config, http_client=mock_client)
+        tool = builder.build()
+
+        before = datetime.now(UTC)
+        await tool.function()
+        after = datetime.now(UTC)
+
+        call_kwargs = mock_client.request.call_args
+        date_value = call_kwargs.kwargs["json"]["date"]
+
+        assert _ISO8601_MILLIS_Z_RE.match(date_value)
+
+        parsed = datetime.fromisoformat(date_value.replace("Z", "+00:00"))
+        assert parsed.tzinfo is not None
+        assert before - timedelta(seconds=2) <= parsed <= after + timedelta(seconds=2)
+
+    @pytest.mark.anyio
+    async def test_now_token_resolves_in_url(self) -> None:
+        config = _make_manual_tool(
+            url="https://api.example.com/events/{{__now__}}",
+            method=HTTPMethod.GET,
+        )
+
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"ok": True}
+        mock_response.raise_for_status.return_value = None
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.request = AsyncMock(return_value=mock_response)
+
+        builder = ManualToolBuilder(config, http_client=mock_client)
+        tool = builder.build()
+
+        await tool.function()
+
+        call_kwargs = mock_client.request.call_args
+        url = call_kwargs.kwargs["url"]
+        assert url.startswith("https://api.example.com/events/")
+        timestamp = url.removeprefix("https://api.example.com/events/")
+        assert _ISO8601_MILLIS_Z_RE.match(timestamp)
+
+    @pytest.mark.anyio
+    async def test_now_token_resolves_in_headers_and_tolerates_whitespace(self) -> None:
+        config = ManualTool(
+            name="timestamped_header_tool",
+            description="Sends a timestamp header",
+            api=ManualToolAPI(
+                url="https://api.example.com/ping",
+                method=HTTPMethod.GET,
+                headers={"X-Requested-At": "{{ __now__ }}"},
+            ),
+        )
+
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"ok": True}
+        mock_response.raise_for_status.return_value = None
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.request = AsyncMock(return_value=mock_response)
+
+        builder = ManualToolBuilder(config, http_client=mock_client)
+        tool = builder.build()
+
+        await tool.function()
+
+        call_kwargs = mock_client.request.call_args
+        header_value = call_kwargs.kwargs["headers"]["X-Requested-At"]
+        assert _ISO8601_MILLIS_Z_RE.match(header_value)
+
+    @pytest.mark.anyio
+    async def test_now_token_is_freshly_computed_on_each_call(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Two resolutions must differ -- proving `__now__` is computed at
+        request time, not cached from build time. The clock is monkeypatched
+        (rather than sleeping) so the test is deterministic and fast."""
+        fixed_times = iter(
+            [
+                datetime(2026, 7, 14, 10, 22, 4, 123000, tzinfo=UTC),
+                datetime(2026, 7, 14, 10, 22, 9, 456000, tzinfo=UTC),
+            ]
+        )
+        monkeypatch.setattr(manual_module, "_utc_now", lambda: next(fixed_times))
+
+        config = _make_manual_tool(
+            url="https://api.example.com/posts",
+            method=HTTPMethod.POST,
+            body_template={"date": "{{__now__}}"},
+        )
+
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"ok": True}
+        mock_response.raise_for_status.return_value = None
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.request = AsyncMock(return_value=mock_response)
+
+        builder = ManualToolBuilder(config, http_client=mock_client)
+        tool = builder.build()
+
+        await tool.function()
+        first = mock_client.request.call_args.kwargs["json"]["date"]
+
+        await tool.function()
+        second = mock_client.request.call_args.kwargs["json"]["date"]
+
+        assert first == "2026-07-14T10:22:04.123Z"
+        assert second == "2026-07-14T10:22:09.456Z"
+        assert first != second
+
+    @pytest.mark.anyio
+    async def test_real_param_substitutes_normally_alongside_now_token(self) -> None:
+        config = _make_manual_tool(
+            url="https://api.example.com/posts",
+            method=HTTPMethod.POST,
+            parameters=[ParameterDef(name="content", type=ParamType.STRING)],
+            body_template={"content": "{{content}}", "date": "{{__now__}}"},
+        )
+
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"ok": True}
+        mock_response.raise_for_status.return_value = None
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.request = AsyncMock(return_value=mock_response)
+
+        builder = ManualToolBuilder(config, http_client=mock_client)
+        tool = builder.build()
+
+        await tool.function(content="hello world")
+
+        call_kwargs = mock_client.request.call_args
+        body = call_kwargs.kwargs["json"]
+        assert body["content"] == "hello world"
+        assert _ISO8601_MILLIS_Z_RE.match(body["date"])
+
+    @pytest.mark.anyio
+    async def test_now_token_not_forwarded_as_extra_query_param(self) -> None:
+        """A declared param literally named `__now__` must never leak into
+        the query string: the reserved token always wins and is never
+        treated as a forwardable declared parameter."""
+        config = _make_manual_tool(
+            url="https://api.example.com/items",
+            method=HTTPMethod.GET,
+            parameters=[
+                ParameterDef(
+                    name="__now__",
+                    type=ParamType.STRING,
+                    required=False,
+                    default="user-supplied",
+                ),
+            ],
+        )
+
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"ok": True}
+        mock_response.raise_for_status.return_value = None
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.request = AsyncMock(return_value=mock_response)
+
+        builder = ManualToolBuilder(config, http_client=mock_client)
+        tool = builder.build()
+
+        await tool.function(__now__="user-supplied")
+
+        call_kwargs = mock_client.request.call_args
+        assert not call_kwargs.kwargs["params"]
+
+    @pytest.mark.anyio
+    async def test_now_token_not_forwarded_as_extra_body_param(self) -> None:
+        """Same leak-prevention guarantee for POST/body forwarding: a
+        declared param named `__now__` must never end up as a stray body
+        field even when there is no explicit body_template."""
+        config = _make_manual_tool(
+            url="https://api.example.com/items",
+            method=HTTPMethod.POST,
+            parameters=[
+                ParameterDef(
+                    name="__now__",
+                    type=ParamType.STRING,
+                    required=False,
+                    default="user-supplied",
+                ),
+            ],
+        )
+
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"ok": True}
+        mock_response.raise_for_status.return_value = None
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.request = AsyncMock(return_value=mock_response)
+
+        builder = ManualToolBuilder(config, http_client=mock_client)
+        tool = builder.build()
+
+        await tool.function(__now__="user-supplied")
+
+        call_kwargs = mock_client.request.call_args
+        assert not call_kwargs.kwargs["json"]

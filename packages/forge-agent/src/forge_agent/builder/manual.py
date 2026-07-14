@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import inspect
 import re
+from collections.abc import Callable
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -155,8 +157,54 @@ class ManualToolBuilder:
         return Tool(final_func, name=tool_name)
 
 
+def _utc_now() -> datetime:
+    """Return the current UTC time.
+
+    A thin seam over ``datetime.now(UTC)`` so tests can monkeypatch
+    the clock to assert the ``__now__`` template token is freshly computed
+    per call, without relying on real-time sleeps.
+    """
+    return datetime.now(UTC)
+
+
+# Millisecond precision, no microseconds: matches the ISO-8601-with-Z format
+# some APIs (e.g. Postiz's `POST /posts` `date` field) require, as opposed to
+# Python's default `+00:00` UTC offset suffix.
+_ISO8601_MILLIS_PRECISION = 3
+
+
+def _now_iso8601() -> str:
+    """Format the current UTC time as ISO 8601 with milliseconds and a 'Z' suffix.
+
+    Produces e.g. ``"2026-07-14T10:22:04.123Z"``. Computed fresh on every
+    call -- never cached -- so it reflects request/execution time.
+
+    Returns:
+        The formatted timestamp string.
+    """
+    now = _utc_now()
+    millis = now.microsecond // 1000
+    return f"{now.strftime('%Y-%m-%dT%H:%M:%S')}.{millis:0{_ISO8601_MILLIS_PRECISION}d}Z"
+
+
+# Registry of reserved template tokens resolved at request/execution time
+# from a fixed resolver rather than from caller-supplied params. Reserved
+# tokens always take precedence over an identically named param and are
+# never treated as declared, forwardable tool arguments. Adding a future
+# reserved token (e.g. a date-only `__today__`) means adding an entry here;
+# no other resolution call site needs to change.
+_RESERVED_TEMPLATE_RESOLVERS: dict[str, Callable[[], str]] = {
+    "__now__": _now_iso8601,
+}
+
+
 def _resolve_template_string(template: str, params: dict[str, Any]) -> str:
     """Resolve {{param}} placeholders in a template string.
+
+    Reserved tokens (currently only ``{{__now__}}``, see
+    ``_RESERVED_TEMPLATE_RESOLVERS``) are resolved fresh on every call and
+    take precedence over any identically named param. Any other unknown
+    placeholder is left as-is.
 
     Args:
         template: String with {{param}} placeholders.
@@ -168,6 +216,9 @@ def _resolve_template_string(template: str, params: dict[str, Any]) -> str:
 
     def replacer(match: re.Match[str]) -> str:
         key = match.group(1).strip()
+        reserved_resolver = _RESERVED_TEMPLATE_RESOLVERS.get(key)
+        if reserved_resolver is not None:
+            return reserved_resolver()
         return str(params.get(key, match.group(0)))
 
     return re.sub(r"\{\{(\s*\w+\s*)\}\}", replacer, template)
@@ -176,12 +227,17 @@ def _resolve_template_string(template: str, params: dict[str, Any]) -> str:
 def _collect_template_param_names(template: Any) -> set[str]:
     """Recursively collect all {{param}} placeholder names referenced in a template.
 
+    Reserved tokens (see ``_RESERVED_TEMPLATE_RESOLVERS``) are excluded from
+    the result: they are synthetic, request-time values, not declared tool
+    parameters, so callers must not treat them as forwardable params.
+
     Args:
         template: A dict, list, string, or primitive that may contain
             {{param}} placeholders.
 
     Returns:
-        The set of parameter names referenced anywhere in the template.
+        The set of declared parameter names referenced anywhere in the
+        template, excluding reserved tokens.
     """
     names: set[str] = set()
     if isinstance(template, str):
@@ -192,7 +248,7 @@ def _collect_template_param_names(template: Any) -> set[str]:
     elif isinstance(template, list):
         for item in template:
             names.update(_collect_template_param_names(item))
-    return names
+    return names - _RESERVED_TEMPLATE_RESOLVERS.keys()
 
 
 def _resolve_template(template: Any, params: dict[str, Any]) -> Any:
@@ -231,7 +287,9 @@ async def _execute_api_call(
     URL, headers, or body_template is forwarded on the outgoing request:
     as a query string parameter for GET/DELETE, or merged into the JSON
     body for methods that carry a body (POST/PUT/PATCH) when no explicit
-    body_template already claims it.
+    body_template already claims it. Reserved template tokens (see
+    ``_RESERVED_TEMPLATE_RESOLVERS``, e.g. ``__now__``) are never forwarded
+    this way -- they are synthetic, request-time values, not tool arguments.
 
     Args:
         api_config: The API call configuration.
@@ -259,7 +317,13 @@ async def _execute_api_call(
     method = api_config.method.value
 
     # Forward any declared parameters not already consumed by a template.
-    remaining = {k: v for k, v in params.items() if k not in consumed}
+    # Reserved tokens are excluded even if a declared param happens to share
+    # their name -- the reserved resolver always wins over a same-named param.
+    remaining = {
+        k: v
+        for k, v in params.items()
+        if k not in consumed and k not in _RESERVED_TEMPLATE_RESOLVERS
+    }
     query: dict[str, Any] | None = None
     if remaining:
         if method in _QUERY_METHODS:
