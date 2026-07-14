@@ -16,6 +16,7 @@ resources:
   - externalsecret-temporal.yaml
   - postgres.yaml
   - redis.yaml
+  - elasticsearch.yaml
   - temporal-postgres.yaml
   - temporal.yaml
   - temporal-ui.yaml

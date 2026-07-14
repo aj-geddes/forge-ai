@@ -41,6 +41,18 @@ spec:
             - sh
             - -c
             - until pg_isready -h postiz-temporal-postgres -U temporal; do echo waiting for postiz-temporal-postgres; sleep 2; done
+        # Same best-effort ordering for Elasticsearch: auto-setup's own
+        # wait_for_es() will poll ES itself before running setup_es_index(),
+        # but starting the main container before ES even answers HTTP just
+        # burns through part of the startupProbe's 5-minute first-boot
+        # budget on retries. curlimages/curl is a purpose-built minimal image
+        # for exactly this kind of readiness gate.
+        - name: wait-for-elasticsearch
+          image: curlimages/curl:8.11.1
+          command:
+            - sh
+            - -c
+            - until curl --silent --fail http://postiz-elasticsearch:9200 >/dev/null; do echo waiting for postiz-elasticsearch; sleep 2; done
       containers:
         - name: temporal
           image: temporalio/auto-setup:1.28.1
@@ -68,8 +80,38 @@ spec:
             # kills a healthy server after its 5-min budget (restart loop).
             - name: BIND_ON_IP
               value: "0.0.0.0"
-            # ENABLE_ES intentionally unset -> defaults to false (SQL
-            # visibility store; see temporal-postgres.yaml comment).
+            # ADVANCED (Elasticsearch) visibility -- required by Postiz
+            # >=v2.12.0, which registers more than 3 Text-type custom search
+            # attributes on the default namespace at startup; Temporal's SQL
+            # (standard) visibility store hard-caps that at 3, so the
+            # auto-setup container was crash-looping with "Unable to create
+            # search attributes: cannot have more than 3 search attribute of
+            # type Text". This ONLY changes the visibility store -- the main
+            # persistence store (workflow history, tasks) stays on
+            # postiz-temporal-postgres/POSTGRES_SEEDS above; auto-setup skips
+            # provisioning the SQL visibility schema/DB entirely whenever
+            # ENABLE_ES=true (see temporal-postgres.yaml comment).
+            - name: ENABLE_ES
+              value: "true"
+            - name: ES_SEEDS
+              value: postiz-elasticsearch
+            - name: ES_PORT
+              value: "9200"
+            - name: ES_SCHEME
+              value: http
+            # temporalio/auto-setup:1.28.1 no longer branches on ES_VERSION
+            # (its auto-setup.sh unconditionally uses the ES7 "_template"
+            # legacy schema files as of the upstream `Remove ES_VERSION from
+            # auto-setup.sh` change) -- set anyway for self-documentation and
+            # forward/backward compat with auto-setup versions that do still
+            # read it. Must stay "v7" while postiz-elasticsearch is pinned to
+            # an ES 7.x image (see elasticsearch.yaml).
+            - name: ES_VERSION
+              value: v7
+            # Matches auto-setup.sh's own default; set explicitly so the
+            # index name is documented here rather than only implied.
+            - name: ES_VIS_INDEX
+              value: temporal_visibility_v1_dev
           envFrom:
             - secretRef:
                 name: postiz-temporal-secrets

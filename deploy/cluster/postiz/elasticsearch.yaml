@@ -1,0 +1,168 @@
+# Single-node Elasticsearch, added solely to give Temporal ADVANCED
+# visibility. Postiz >= v2.12.0 registers custom search attributes on the
+# Temporal `default` namespace at startup; Temporal's SQL (standard)
+# visibility store caps custom Text-type search attributes at 3, and Postiz
+# needs more than that, so the auto-setup container crashes with "Unable to
+# create search attributes: cannot have more than 3 search attribute of type
+# Text". Elasticsearch-backed visibility has no such cap. This does NOT
+# replace Temporal's main persistence store (still postiz-temporal-postgres /
+# Postgres) -- only the VISIBILITY store moves to ES; see temporal.yaml.
+#
+# Version pin: temporalio/auto-setup:1.28.1 still ships (and, as of the
+# upstream `Remove ES_VERSION from auto-setup.sh` change, unconditionally
+# uses) the ES 7.x "_template" legacy index-template API for its visibility
+# schema/index setup -- it does NOT speak ES8's `_index_template` API. So
+# this must stay on an ES 7.x image; do not jump to an 8.x tag without first
+# confirming the auto-setup image in use has switched to the v8 schema path.
+# 7.17.27 is the exact version gitroomhq/postiz-app's own reference
+# docker-compose.yaml pairs with auto-setup:1.28.1 -- mirrored here for
+# parity with the upstream-tested combination.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postiz-elasticsearch-data
+  labels:
+    app.kubernetes.io/name: postiz
+    app.kubernetes.io/component: elasticsearch
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: longhorn
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postiz-elasticsearch
+  labels:
+    app.kubernetes.io/name: postiz
+    app.kubernetes.io/component: elasticsearch
+spec:
+  replicas: 1
+  revisionHistoryLimit: 5
+  # RWO volume: only one pod may attach at a time.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: postiz
+      app.kubernetes.io/component: elasticsearch
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: postiz
+        app.kubernetes.io/component: elasticsearch
+    spec:
+      # Official elasticsearch image runs as uid 1000 (elasticsearch) itself;
+      # no runAsNonRoot override needed here (this namespace has no
+      # restricted PodSecurity label), matching the pragmatic approach
+      # postiz.yaml already takes for its own upstream image.
+      #
+      # No initContainers here: ES normally needs the HOST kernel's
+      # vm.max_map_count raised to >=262144 (mmap-based storage), which is
+      # not something a namespaced workload can do without a privileged
+      # initContainer plus a cluster-admin-granted unsafe-sysctl allowlist.
+      # Instead this deployment disables ES's use of mmap entirely
+      # (node.store.allow_mmap=false below) -- Elastic's own documented
+      # workaround for exactly this constraint, and sufficient for a small
+      # single-node visibility index.
+      containers:
+        - name: elasticsearch
+          image: elasticsearch:7.17.27
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 9200
+              protocol: TCP
+            - name: transport
+              containerPort: 9300
+              protocol: TCP
+          env:
+            - name: discovery.type
+              value: single-node
+            - name: xpack.security.enabled
+              value: "false"
+            # Elastic's documented alternative to raising the host's
+            # vm.max_map_count sysctl (see initContainers comment above) --
+            # avoids needing a privileged pod / unsafe-sysctl allowlist for a
+            # single small visibility index.
+            - name: node.store.allow_mmap
+              value: "false"
+            - name: ES_JAVA_OPTS
+              value: "-Xms512m -Xmx512m"
+            # Same disk-watermark settings as gitroomhq/postiz-app's reference
+            # temporal-elasticsearch service: keeps a single-node cluster out
+            # of read-only mode on a modestly sized Longhorn volume instead of
+            # tripping the (much larger, cloud-cluster-oriented) ES defaults.
+            - name: cluster.routing.allocation.disk.threshold_enabled
+              value: "true"
+            - name: cluster.routing.allocation.disk.watermark.low
+              value: 512mb
+            - name: cluster.routing.allocation.disk.watermark.high
+              value: 256mb
+            - name: cluster.routing.allocation.disk.watermark.flood_stage
+              value: 128mb
+          resources:
+            requests:
+              cpu: 250m
+              memory: 768Mi
+            limits:
+              cpu: "1"
+              memory: 1536Mi
+          # /_cluster/health returns HTTP 200 even at yellow status (expected
+          # here: single node, so the default one-replica-per-shard setting
+          # can never be assigned) -- readiness only needs the HTTP endpoint
+          # to answer, not a green cluster.
+          startupProbe:
+            httpGet:
+              path: /_cluster/health
+              port: http
+            periodSeconds: 5
+            failureThreshold: 60 # up to 5 minutes for first-boot
+          readinessProbe:
+            httpGet:
+              path: /_cluster/health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /_cluster/health
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 5
+          volumeMounts:
+            - name: data
+              mountPath: /usr/share/elasticsearch/data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: postiz-elasticsearch-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postiz-elasticsearch
+  labels:
+    app.kubernetes.io/name: postiz
+    app.kubernetes.io/component: elasticsearch
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: postiz
+    app.kubernetes.io/component: elasticsearch
+  ports:
+    - name: http
+      port: 9200
+      targetPort: http
+      protocol: TCP
+    - name: transport
+      port: 9300
+      targetPort: transport
+      protocol: TCP

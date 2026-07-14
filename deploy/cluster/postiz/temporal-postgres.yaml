@@ -1,11 +1,20 @@
-# Postgres backing Temporal's persistence AND visibility stores. No
-# Elasticsearch: since v1.21, temporalio/auto-setup defaults ENABLE_ES=false
-# (verified against its auto-setup.sh) and falls back to SQL-based visibility,
-# which is more than sufficient for a single-tenant Postiz instance's
-# scheduled-post volume and avoids running a whole Elasticsearch node just for
-# Temporal's workflow-list UI filtering. Revisit only if Temporal's advanced
-# visibility queries (complex search-attribute filtering across a very large
-# workflow history) become a real need.
+# Postgres backing Temporal's PERSISTENCE store only (workflow history,
+# tasks, the default namespace, etc). Visibility moved to Elasticsearch
+# (postiz-elasticsearch, see elasticsearch.yaml + temporal.yaml's ENABLE_ES
+# block) because Postiz >=v2.12.0 registers more than 3 Text-type custom
+# search attributes at startup, which SQL (standard) visibility hard-caps at
+# 3 and Postiz's auto-setup container was crash-looping on.
+#
+# NOTE: temporalio/auto-setup's auto-setup.sh only provisions the SQL
+# `temporal_visibility` database/schema on this instance when ENABLE_ES is
+# false. Before this change it WAS false, so an already-deployed cluster may
+# still be carrying that database from the pre-ES first boot -- it is now
+# dead weight (auto-setup will never touch it again while ENABLE_ES=true).
+# Left in place rather than dropped: harmless, small, and dropping a database
+# out from under a stateful Deployment isn't worth the risk for the couple of
+# MB it costs. Revisit (drop the DB, or drop this Deployment/PVC entirely if
+# Temporal's persistence store also migrates off SQL) if this footprint ever
+# actually matters.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
