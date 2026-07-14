@@ -1,0 +1,110 @@
+# Dedicated Postgres for the Postiz application database (posts, integrations,
+# users, orgs). Deliberately NOT shared with any other app's Postgres in this
+# namespace (apex-postgres, codemind-postgresql) -- each app owns its own
+# instance here, matching existing house convention, so a schema mistake or
+# credential leak in one app can't touch another's data.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postiz-postgres-data
+  labels:
+    app.kubernetes.io/name: postiz
+    app.kubernetes.io/component: postgres
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: longhorn
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postiz-postgres
+  labels:
+    app.kubernetes.io/name: postiz
+    app.kubernetes.io/component: postgres
+spec:
+  replicas: 1
+  revisionHistoryLimit: 5
+  # RWO volume: only one pod may attach at a time. Recreate stops the old pod
+  # (and detaches the volume) before starting the new one.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: postiz
+      app.kubernetes.io/component: postgres
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: postiz
+        app.kubernetes.io/component: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:17-alpine
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: postgres
+              containerPort: 5432
+              protocol: TCP
+          env:
+            - name: POSTGRES_USER
+              value: postiz
+            - name: POSTGRES_DB
+              value: postiz
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postiz-secrets
+                  key: POSTGRES_PASSWORD
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "postiz", "-d", "postiz"]
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "postiz", "-d", "postiz"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: postiz-postgres-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postiz-postgres
+  labels:
+    app.kubernetes.io/name: postiz
+    app.kubernetes.io/component: postgres
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: postiz
+    app.kubernetes.io/component: postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+      protocol: TCP

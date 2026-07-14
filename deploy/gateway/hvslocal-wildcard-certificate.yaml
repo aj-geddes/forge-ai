@@ -1,0 +1,82 @@
+# Adds postiz.hvslocal as an explicit SAN on the shared hvslocal-wildcard
+# Certificate.
+#
+# NOT managed by ArgoCD: this object lives in the `gateway` namespace, which
+# the dev-aj-geddes AppProject is not permitted to target (same reason
+# deploy/dex/oauth2client.yaml is applied by hand). Apply it once with
+# platform-admin credentials:
+#
+#   kubectl --context hvs-k8s apply -f deploy/gateway/hvslocal-wildcard-certificate.yaml
+#
+# This is the FULL desired-state object (fetched from the live cluster and
+# amended), not a patch -- `kubectl apply` on a Certificate replaces
+# spec.dnsNames wholesale, so every existing hostname the cert already serves
+# (forgeai.hvslocal, argocd.hvslocal, harbor.hvslocal, etc.) is preserved
+# below; only postiz.hvslocal is new. Diff against the live object before
+# applying if other hostnames may have been added since this file was last
+# synced from the cluster:
+#
+#   kubectl --context hvs-k8s get certificate hvslocal-wildcard -n gateway -o yaml
+#
+# NOTE: the cert already carries a bare `*.hvslocal` SAN, which technically
+# already matches postiz.hvslocal per RFC 6125 wildcard matching. Every other
+# app hostname on this cert (forgeai.hvslocal, borgmem.hvslocal, ...) is
+# ALSO listed explicitly despite that wildcard already covering it -- that's
+# the established house convention here (explicit per-app SAN, not reliance
+# on the wildcard), so postiz.hvslocal is added the same way for consistency
+# and to avoid being the one hostname implicitly depending on wildcard
+# matching behaving as expected across all clients.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: hvslocal-wildcard
+  namespace: gateway
+  labels:
+    app.kubernetes.io/part-of: hvslocal-gateway
+spec:
+  commonName: "*.hvslocal"
+  dnsNames:
+    - "*.hvslocal"
+    - hvslocal
+    - hvs1-k8s.hvslocal
+    - hvs2-k8s.hvslocal
+    - hvs3-k8s.hvslocal
+    - api.hvslocal
+    - whoami.hvslocal
+    - hubble.hvslocal
+    - dex.hvslocal
+    - argocd.hvslocal
+    - docs.hvslocal
+    - vsre.hvslocal
+    - grafana.hvslocal
+    - longhorn.hvslocal
+    - harbor.hvslocal
+    - "*.apps.hvslocal"
+    - localai.hvslocal
+    - "*.dev-aj-geddes.hvslocal"
+    - borgmem.hvslocal
+    - docs.onboard.hvslocal
+    - "*.onboard.hvslocal"
+    - codegen.hvslocal
+    - universe.hvslocal
+    - forgeai.hvslocal
+    - postiz.hvslocal # NEW -- added for the Postiz deployment
+  duration: 2160h
+  issuerRef:
+    group: cert-manager.io
+    kind: ClusterIssuer
+    name: hvslocal-ca
+  privateKey:
+    algorithm: ECDSA
+    encoding: PKCS8
+    rotationPolicy: Always
+    size: 256
+  renewBefore: 360h
+  secretName: hvslocal-wildcard-tls
+  secretTemplate:
+    labels:
+      app.kubernetes.io/part-of: hvslocal-gateway
+  usages:
+    - server auth
+    - digital signature
+    - key encipherment

@@ -1,0 +1,25 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: postiz
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: dev-aj-geddes
+  source:
+    repoURL: https://github.com/aj-geddes/forge-ai
+    targetRevision: main
+    path: deploy/cluster/postiz
+    # kustomization.yaml present in the path -> ArgoCD auto-detects and runs
+    # `kustomize build` (no spec.source.kustomize block needed unless
+    # overriding image tags/name prefixes at sync time).
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: dev-aj-geddes
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false

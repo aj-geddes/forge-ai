@@ -1,0 +1,89 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# All resources are namespaced (dev-aj-geddes already exists and is owned by the
+# dev-aj-geddes AppProject / ArgoCD Application forge-ai-postiz -- see
+# deploy/argocd/postiz-application.yaml). No Namespace object here: the
+# AppProject's clusterResourceWhitelist is empty, so a cluster-scoped resource
+# would fail to sync anyway.
+namespace: dev-aj-geddes
+
+commonLabels:
+  app.kubernetes.io/part-of: postiz
+
+resources:
+  - externalsecret-postiz.yaml
+  - externalsecret-temporal.yaml
+  - postgres.yaml
+  - redis.yaml
+  - temporal-postgres.yaml
+  - temporal.yaml
+  - temporal-ui.yaml
+  - postiz.yaml
+  - httproute.yaml
+
+# configMapGenerator appends a content-hash suffix to each ConfigMap's name and
+# kustomize's built-in nameReference transformer rewrites every configMapRef/
+# volume reference to match -- so a config edit (this file, or
+# files/development-sql.yaml) automatically produces a new ConfigMap name,
+# which forces a pod rollout on the next sync. No manual "bump this checksum
+# annotation" step needed (contrast with the Helm sha256sum trick in
+# deploy/helm/forge/templates/deployment.yaml, which this kustomize-native
+# app doesn't use).
+configMapGenerator:
+  - name: postiz-config
+    literals:
+      # === Required core (docs: Configuration Reference > Required core) ===
+      - MAIN_URL=https://postiz.hvslocal
+      - FRONTEND_URL=https://postiz.hvslocal
+      - NEXT_PUBLIC_BACKEND_URL=https://postiz.hvslocal/api
+      # Same container (bundled FE+BE image): the Next.js SSR process reaches
+      # the Nest backend over loopback, not through the external hostname.
+      - BACKEND_INTERNAL_URL=http://localhost:3000
+
+      # === Temporal (required since v2.12.0 -- see DEPLOY PLAN notes) ===
+      - TEMPORAL_ADDRESS=postiz-temporal:7233
+      - TEMPORAL_NAMESPACE=default
+
+      # === Application behaviour ===
+      # open-source build routes (/launches), not the hosted-cloud build
+      - IS_GENERAL=true
+      # Per docs (Configuration Reference > DISABLE_REGISTRATION): "true"
+      # allows exactly ONE user signup and then automatically disables the
+      # sign-up page (also disables OIDC/OAuth sign-in). Set true from the
+      # very first deploy: create the sole admin account on first visit to
+      # https://postiz.hvslocal, and Postiz locks registration itself from
+      # then on -- no manual flip-and-redeploy step needed. Do NOT set this
+      # to "false": the instance is reachable to anyone on the
+      # WireGuard-gated network, and open registration would let any of them
+      # create an account with access to your connected social channels.
+      - DISABLE_REGISTRATION=true
+      # Single pod runs both the API and the scheduled-task workers (no
+      # separate worker deployment) -- matches the upstream bundled-image
+      # default.
+      - RUN_CRON=true
+      # Per-hour cap on the public-API create-post endpoint (matches the
+      # value the upstream docker-compose ships and tests with). forge's tool
+      # calls must stay well under this.
+      - API_LIMIT=30
+      - NX_ADD_PLUGINS=false
+
+      # === Storage (docs: Uploads & Storage) ===
+      # Local filesystem storage on the postiz-uploads Longhorn PVC -- no
+      # Cloudflare R2 credentials needed. Revisit if upload volume outgrows a
+      # single-node RWO volume.
+      - STORAGE_PROVIDER=local
+      - UPLOAD_DIRECTORY=/uploads
+      - NEXT_PUBLIC_UPLOAD_DIRECTORY=/uploads
+    options:
+      labels:
+        app.kubernetes.io/name: postiz
+        app.kubernetes.io/component: app
+
+  - name: postiz-temporal-dynamicconfig
+    files:
+      - files/development-sql.yaml
+    options:
+      labels:
+        app.kubernetes.io/name: postiz
+        app.kubernetes.io/component: temporal

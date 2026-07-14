@@ -1,0 +1,76 @@
+# Temporal Web UI -- operational visibility into Postiz's scheduled-post
+# workflows (retries, failures, history). Deliberately ClusterIP-only, no
+# HTTPRoute: temporalio/ui ships with no built-in authentication, so exposing
+# it on the shared-gateway would put an unauthenticated admin panel on
+# https://*.hvslocal for anyone on the WireGuard network. Reach it with:
+#   kubectl --context hvs-k8s -n dev-aj-geddes port-forward svc/postiz-temporal-ui 8080:8080
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postiz-temporal-ui
+  labels:
+    app.kubernetes.io/name: postiz
+    app.kubernetes.io/component: temporal-ui
+spec:
+  replicas: 1
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: postiz
+      app.kubernetes.io/component: temporal-ui
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: postiz
+        app.kubernetes.io/component: temporal-ui
+    spec:
+      containers:
+        - name: temporal-ui
+          image: temporalio/ui:2.34.0
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: TEMPORAL_ADDRESS
+              value: postiz-temporal:7233
+            - name: TEMPORAL_CORS_ORIGINS
+              value: http://localhost:8080
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postiz-temporal-ui
+  labels:
+    app.kubernetes.io/name: postiz
+    app.kubernetes.io/component: temporal-ui
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: postiz
+    app.kubernetes.io/component: temporal-ui
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+      protocol: TCP

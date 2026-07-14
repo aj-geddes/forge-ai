@@ -1,0 +1,123 @@
+# Temporal server (auto-setup image: runs schema setup + default-namespace
+# creation on first boot, then serves the frontend gRPC on :7233). Required by
+# Postiz since v2.12.0 for scheduled posts and background workflows --
+# see https://docs.postiz.com/installation/system-requirements.
+#
+# Not exposed via HTTPRoute: :7233 is Temporal's internal gRPC frontend, only
+# ever called by the Postiz app container (TEMPORAL_ADDRESS) and the internal
+# postiz-temporal-ui Deployment.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postiz-temporal
+  labels:
+    app.kubernetes.io/name: postiz
+    app.kubernetes.io/component: temporal
+spec:
+  replicas: 1
+  revisionHistoryLimit: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: postiz
+      app.kubernetes.io/component: temporal
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: postiz
+        app.kubernetes.io/component: temporal
+    spec:
+      # Best-effort ordering only: auto-setup's own entrypoint polls the DB
+      # with `nc -z` before running schema setup, so a slightly-not-ready
+      # postiz-temporal-postgres pod does not crash-loop this container.
+      initContainers:
+        - name: wait-for-postgres
+          image: postgres:16-alpine
+          command:
+            - sh
+            - -c
+            - until pg_isready -h postiz-temporal-postgres -U temporal; do echo waiting for postiz-temporal-postgres; sleep 2; done
+      containers:
+        - name: temporal
+          image: temporalio/auto-setup:1.28.1
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: grpc
+              containerPort: 7233
+              protocol: TCP
+          env:
+            - name: DB
+              value: postgres12
+            - name: DB_PORT
+              value: "5432"
+            - name: POSTGRES_SEEDS
+              value: postiz-temporal-postgres
+            - name: POSTGRES_USER
+              value: temporal
+            - name: DYNAMIC_CONFIG_FILE_PATH
+              value: config/dynamicconfig/development-sql.yaml
+            - name: TEMPORAL_NAMESPACE
+              value: default
+            # ENABLE_ES intentionally unset -> defaults to false (SQL
+            # visibility store; see temporal-postgres.yaml comment).
+          envFrom:
+            - secretRef:
+                name: postiz-temporal-secrets
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          # temporalio/auto-setup ships a `temporal` CLI; the official
+          # docker-compose healthcheck runs the same command.
+          livenessProbe:
+            exec:
+              command: ["temporal", "operator", "cluster", "health", "--address", "localhost:7233"]
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command: ["temporal", "operator", "cluster", "health", "--address", "localhost:7233"]
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          startupProbe:
+            exec:
+              command: ["temporal", "operator", "cluster", "health", "--address", "localhost:7233"]
+            periodSeconds: 5
+            failureThreshold: 60 # up to 5 minutes for first-boot schema setup
+          volumeMounts:
+            - name: dynamicconfig
+              mountPath: /etc/temporal/config/dynamicconfig
+              readOnly: true
+      volumes:
+        - name: dynamicconfig
+          configMap:
+            name: postiz-temporal-dynamicconfig
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postiz-temporal
+  labels:
+    app.kubernetes.io/name: postiz
+    app.kubernetes.io/component: temporal
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: postiz
+    app.kubernetes.io/component: temporal
+  ports:
+    - name: grpc
+      port: 7233
+      targetPort: grpc
+      protocol: TCP

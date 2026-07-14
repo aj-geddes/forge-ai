@@ -1,0 +1,165 @@
+# Postiz application (bundled frontend+backend image). Runs the Next.js
+# frontend and Nest backend behind the image's own nginx+pm2 supervisor,
+# listening on :5000.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postiz-uploads
+  labels:
+    app.kubernetes.io/name: postiz
+    app.kubernetes.io/component: app
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: longhorn
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postiz-config
+  labels:
+    app.kubernetes.io/name: postiz
+    app.kubernetes.io/component: app
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: longhorn
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postiz
+  labels:
+    app.kubernetes.io/name: postiz
+    app.kubernetes.io/component: app
+spec:
+  replicas: 1
+  revisionHistoryLimit: 5
+  # RWO volumes (uploads, config): only one pod may attach at a time.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: postiz
+      app.kubernetes.io/component: app
+  template:
+    metadata:
+      annotations:
+        # No manual checksum bump needed here: kustomization.yaml's
+        # configMapGenerator hash-suffixes postiz-config on every content
+        # change and rewrites this Deployment's configMapRef to match, which
+        # forces a rollout by itself.
+        prometheus.io/scrape: "false" # Postiz does not expose a Prometheus /metrics endpoint
+      labels:
+        app.kubernetes.io/name: postiz
+        app.kubernetes.io/component: app
+    spec:
+      # Upstream image's entrypoint (nginx + pm2 supervisor, see
+      # var/docker/nginx.conf and Dockerfile.dev in gitroomhq/postiz-app) is
+      # not published with a documented non-root runtime user, so we don't
+      # force runAsNonRoot here (doing so against an image not built for it
+      # risks breaking nginx startup / file ownership on /uploads and
+      # /config). This deliberately deviates from this repo's forge-ai/OPA
+      # pattern -- flag for re-review if Postiz ever publishes a hardened,
+      # non-root image variant.
+      initContainers:
+        - name: wait-for-deps
+          image: postgres:17-alpine
+          command:
+            - sh
+            - -c
+            - |
+              until pg_isready -h postiz-postgres -U postiz; do echo waiting for postiz-postgres; sleep 2; done
+              until nc -z postiz-redis 6379; do echo waiting for postiz-redis; sleep 2; done
+              until nc -z postiz-temporal 7233; do echo waiting for postiz-temporal; sleep 2; done
+      containers:
+        - name: postiz
+          image: ghcr.io/gitroomhq/postiz-app:v2.21.9
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 5000
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: postiz-config
+            - secretRef:
+                name: postiz-secrets
+          env:
+            # Composed here (not stored pre-assembled in OpenBao) using
+            # Kubernetes' native dependent-env-var $(VAR) expansion, so
+            # POSTGRES_PASSWORD / REDIS_PASSWORD above stay the single source
+            # of truth. See externalsecret-postiz.yaml.
+            - name: DATABASE_URL
+              value: "postgresql://postiz:$(POSTGRES_PASSWORD)@postiz-postgres:5432/postiz"
+            - name: REDIS_URL
+              value: "redis://:$(REDIS_PASSWORD)@postiz-redis:6379"
+          resources:
+            requests:
+              cpu: 500m
+              memory: 768Mi
+            limits:
+              cpu: "1500m"
+              memory: 2Gi
+          # No dedicated health endpoint documented; mirrors the upstream
+          # docker-compose healthcheck (GET / expecting a non-5xx response).
+          # Generous startupProbe budget: first boot runs Prisma migrations
+          # against postiz-postgres before the app is reachable.
+          startupProbe:
+            httpGet:
+              path: /
+              port: http
+            periodSeconds: 5
+            failureThreshold: 60 # 5 minutes
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 5
+          volumeMounts:
+            - name: uploads
+              mountPath: /uploads
+            - name: config
+              mountPath: /config
+      volumes:
+        - name: uploads
+          persistentVolumeClaim:
+            claimName: postiz-uploads
+        - name: config
+          persistentVolumeClaim:
+            claimName: postiz-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postiz
+  labels:
+    app.kubernetes.io/name: postiz
+    app.kubernetes.io/component: app
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: postiz
+    app.kubernetes.io/component: app
+  ports:
+    - name: http
+      port: 5000
+      targetPort: http
+      protocol: TCP

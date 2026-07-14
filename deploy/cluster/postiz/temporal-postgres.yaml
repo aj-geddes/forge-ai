@@ -1,0 +1,109 @@
+# Postgres backing Temporal's persistence AND visibility stores. No
+# Elasticsearch: since v1.21, temporalio/auto-setup defaults ENABLE_ES=false
+# (verified against its auto-setup.sh) and falls back to SQL-based visibility,
+# which is more than sufficient for a single-tenant Postiz instance's
+# scheduled-post volume and avoids running a whole Elasticsearch node just for
+# Temporal's workflow-list UI filtering. Revisit only if Temporal's advanced
+# visibility queries (complex search-attribute filtering across a very large
+# workflow history) become a real need.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postiz-temporal-postgres-data
+  labels:
+    app.kubernetes.io/name: postiz
+    app.kubernetes.io/component: temporal-postgres
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: longhorn
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postiz-temporal-postgres
+  labels:
+    app.kubernetes.io/name: postiz
+    app.kubernetes.io/component: temporal-postgres
+spec:
+  replicas: 1
+  revisionHistoryLimit: 5
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: postiz
+      app.kubernetes.io/component: temporal-postgres
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: postiz
+        app.kubernetes.io/component: temporal-postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: postgres
+              containerPort: 5432
+              protocol: TCP
+          env:
+            - name: POSTGRES_USER
+              value: temporal
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postiz-temporal-secrets
+                  key: POSTGRES_PASSWORD
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "temporal"]
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "temporal"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: postiz-temporal-postgres-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postiz-temporal-postgres
+  labels:
+    app.kubernetes.io/name: postiz
+    app.kubernetes.io/component: temporal-postgres
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: postiz
+    app.kubernetes.io/component: temporal-postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+      protocol: TCP

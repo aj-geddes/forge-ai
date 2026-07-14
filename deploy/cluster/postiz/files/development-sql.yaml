@@ -1,0 +1,17 @@
+# Verbatim copy of gitroomhq/postiz-docker-compose's dynamicconfig/development-sql.yaml
+# (the file the canonical Postiz Temporal deployment mounts at
+# /etc/temporal/config/dynamicconfig/development-sql.yaml). Source:
+# https://github.com/gitroomhq/postiz-docker-compose/blob/main/dynamicconfig/development-sql.yaml
+#
+# NOTE: system.forceSearchAttributesCacheRefreshOnRead is upstream-labeled
+# "Dev setup only. Please don't turn this on in production." Kept as-shipped
+# because this is a personal single-tenant instance at the scale Postiz's own
+# reference deployment targets, not a multi-tenant production Temporal
+# cluster -- revisit if Postiz's scheduling volume ever grows large enough to
+# matter.
+limit.maxIDLength:
+  - value: 255
+    constraints: {}
+system.forceSearchAttributesCacheRefreshOnRead:
+  - value: true # Dev setup only. Please don't turn this on in production.
+    constraints: {}
