@@ -62,6 +62,12 @@ spec:
               value: config/dynamicconfig/development-sql.yaml
             - name: TEMPORAL_NAMESPACE
               value: default
+            # Bind the frontend/history/matching gRPC listeners to all
+            # interfaces. Without this, temporal binds only the pod IP, so the
+            # localhost:7233 health probes never connect and the startup probe
+            # kills a healthy server after its 5-min budget (restart loop).
+            - name: BIND_ON_IP
+              value: "0.0.0.0"
             # ENABLE_ES intentionally unset -> defaults to false (SQL
             # visibility store; see temporal-postgres.yaml comment).
           envFrom:
