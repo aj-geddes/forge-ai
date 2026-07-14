@@ -48,6 +48,66 @@ function stubFetchForSessionsAndChat(chatEvents: string[]) {
           json: async () => [],
         });
       }
+      // The Agent selector queries config + tools too (useConfig/useTools);
+      // these tests don't configure multiple agents, so a minimal,
+      // single-agent-free config is enough to keep the selector hidden
+      // (see AgentSelector -- it renders nothing for an empty roster).
+      if (url.includes("/v1/admin/config")) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            path: "forge.yaml",
+            config: {
+              metadata: { name: "forge", version: "0.1.0" },
+              llm: { default_model: "gpt-4o" },
+              tools: {},
+              agents: { agents: [] },
+            },
+          }),
+        });
+      }
+      if (url.includes("/v1/admin/tools")) {
+        return Promise.resolve({ ok: true, status: 200, json: async () => [] });
+      }
+      return Promise.resolve(sseResponse(chatEvents));
+    }),
+  );
+}
+
+function stubFetchSessionsConfigToolsAndChat({
+  chatEvents,
+  agentsConfig,
+  tools,
+}: {
+  chatEvents: string[];
+  agentsConfig: unknown;
+  tools: unknown[];
+}) {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn().mockImplementation((url: string) => {
+      if (url.includes("/v1/admin/sessions")) {
+        return Promise.resolve({ ok: true, status: 200, json: async () => [] });
+      }
+      if (url.includes("/v1/admin/config")) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            path: "forge.yaml",
+            config: {
+              metadata: { name: "forge", version: "0.1.0" },
+              llm: { default_model: "gpt-4o" },
+              tools: {},
+              agents: agentsConfig,
+            },
+          }),
+        });
+      }
+      if (url.includes("/v1/admin/tools")) {
+        return Promise.resolve({ ok: true, status: 200, json: async () => tools });
+      }
       return Promise.resolve(sseResponse(chatEvents));
     }),
   );
@@ -143,9 +203,7 @@ describe("ChatPage", () => {
     });
 
     const fetchMock = vi.mocked(fetch);
-    const chatCall = fetchMock.mock.calls.find(
-      (call) => !(call[0] as string).includes("/v1/admin/sessions"),
-    );
+    const chatCall = fetchMock.mock.calls.find((call) => call[0] === "/v1/chat/completions");
     expect(chatCall).toBeDefined();
     const [, init] = chatCall as [string, RequestInit];
     const body = JSON.parse(init.body as string) as Record<string, unknown>;
@@ -239,5 +297,101 @@ describe("ChatPage", () => {
       expect(screen.getByText("Actual reply")).toBeInTheDocument();
     });
     expect(screen.queryByText(/\(no response\)/i)).not.toBeInTheDocument();
+  });
+});
+
+describe("ChatPage agent selection", () => {
+  beforeEach(() => {
+    window.HTMLElement.prototype.scrollIntoView = vi.fn();
+    useChatStore.setState({
+      sessions: [],
+      activeSessionId: null,
+      isLoading: false,
+    });
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  const AGENTS_CONFIG = {
+    default: "assistant",
+    agents: [
+      { name: "assistant", description: "General helper" },
+      { name: "researcher", description: "Digs up facts", tools: ["search_web"] },
+    ],
+  };
+  const TOOLS = [{ name: "search_web", description: "Searches the web" }];
+
+  it("passes the selected agent through to the chat request after choosing it from the selector", async () => {
+    stubFetchSessionsConfigToolsAndChat({
+      chatEvents: [JSON.stringify({ chunk: "hi", session_id: "session-1" }), "[DONE]"],
+      agentsConfig: AGENTS_CONFIG,
+      tools: TOOLS,
+    });
+
+    const user = userEvent.setup();
+    renderChatPage();
+
+    await user.click(screen.getByRole("button", { name: /new session/i }));
+
+    const select = await screen.findByRole("combobox", { name: /agent/i });
+    await user.selectOptions(select, "researcher");
+
+    const textbox = screen.getByPlaceholderText(/ask the agent anything/i);
+    await user.type(textbox, "Hi there{Enter}");
+
+    await waitFor(() => {
+      expect(screen.getByText("hi")).toBeInTheDocument();
+    });
+
+    const fetchMock = vi.mocked(fetch);
+    const chatCall = fetchMock.mock.calls.find((call) => call[0] === "/v1/chat/completions");
+    expect(chatCall).toBeDefined();
+    const [, init] = chatCall as [string, RequestInit];
+    const body = JSON.parse(init.body as string) as Record<string, unknown>;
+    expect(body.agent).toBe("researcher");
+  });
+
+  it("persists the session's agent selection in chatStore", async () => {
+    stubFetchSessionsConfigToolsAndChat({
+      chatEvents: ["[DONE]"],
+      agentsConfig: AGENTS_CONFIG,
+      tools: TOOLS,
+    });
+
+    const user = userEvent.setup();
+    renderChatPage();
+
+    await user.click(screen.getByRole("button", { name: /new session/i }));
+
+    const select = await screen.findByRole("combobox", { name: /agent/i });
+    await user.selectOptions(select, "researcher");
+
+    await waitFor(() => {
+      const state = useChatStore.getState();
+      const active = state.sessions.find((s) => s.id === state.activeSessionId);
+      expect(active?.agent).toBe("researcher");
+    });
+  });
+
+  it("defaults the selector to config.agents.default without requiring a choice", async () => {
+    stubFetchSessionsConfigToolsAndChat({
+      chatEvents: ["[DONE]"],
+      agentsConfig: AGENTS_CONFIG,
+      tools: TOOLS,
+    });
+
+    const user = userEvent.setup();
+    renderChatPage();
+
+    await user.click(screen.getByRole("button", { name: /new session/i }));
+
+    const select = await screen.findByRole("combobox", { name: /agent/i });
+    await waitFor(() => {
+      expect(select).toHaveValue("assistant");
+    });
   });
 });

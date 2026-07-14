@@ -173,13 +173,20 @@ export interface CreatePeerRequest {
   spiffe_id?: string | null;
 }
 
+export type AgentMode = "passive" | "active";
+
 export interface AgentDef {
   name: string;
   description?: string;
   system_prompt?: string | null;
   model?: string | null;
+  /** This agent's least-privilege tool scope. Undefined or empty means full
+   * (unscoped) access to every configured tool -- enforced server-side. */
   tools?: string[];
   max_turns?: number;
+  /** Governance mode; the backend field may not exist on every deployment
+   * yet, so callers must tolerate its absence and treat it as "passive". */
+  mode?: AgentMode;
 }
 
 export interface AgentsConfig {

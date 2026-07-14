@@ -20,7 +20,7 @@ export function DashboardPage() {
           Dashboard
         </h1>
         <p className="text-sm text-muted-foreground">
-          Your Forge agent, what it can do, and what it's been doing.
+          Your Forge agents, what each can do, and what they've been doing.
         </p>
       </div>
 

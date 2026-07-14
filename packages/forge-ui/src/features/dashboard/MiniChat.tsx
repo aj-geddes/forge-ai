@@ -4,6 +4,9 @@ import { streamChatCompletion } from "@/api/chat";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
+import { useConfig, useTools } from "@/api/hooks";
+import { resolveDefaultAgentName } from "@/lib/agents";
+import { AgentSelector } from "@/components/agent/AgentSelector";
 import { Eyebrow, HelpText } from "./shared";
 
 const EPHEMERAL_SESSION_PREFIX = "dashboard-mini";
@@ -39,6 +42,13 @@ export function MiniChat() {
   const [input, setInput] = useState("");
   const [messages, setMessages] = useState<MiniMessage[]>([]);
   const [isLoading, setIsLoading] = useState(false);
+  const [selectedAgent, setSelectedAgent] = useState("");
+  const { data: config } = useConfig();
+  const { data: tools } = useTools();
+
+  const agentRoster = config?.agents?.agents ?? [];
+  const defaultAgentName = config ? resolveDefaultAgentName(config) : undefined;
+  const effectiveAgent = selectedAgent || defaultAgentName || "";
 
   const handleSend = useCallback(async () => {
     const text = input.trim();
@@ -54,7 +64,7 @@ export function MiniChat() {
 
     try {
       await streamChatCompletion(
-        { message: text, sessionId },
+        { message: text, sessionId, agent: effectiveAgent || undefined },
         {
           onChunk: (delta) => {
             setMessages((prev) =>
@@ -79,7 +89,7 @@ export function MiniChat() {
     } finally {
       setIsLoading(false);
     }
-  }, [input, isLoading, sessionId]);
+  }, [input, isLoading, sessionId, effectiveAgent]);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -92,6 +102,13 @@ export function MiniChat() {
     <section className="space-y-2">
       <Eyebrow icon={MessageCircle}>Quick chat</Eyebrow>
       <HelpText>Ask the agent something right here -- this is a throwaway session, not saved to Chat history.</HelpText>
+      <AgentSelector
+        id="mini-chat-agent-selector"
+        agents={agentRoster}
+        value={effectiveAgent}
+        onChange={setSelectedAgent}
+        tools={tools}
+      />
 
       <div className="rounded-lg border bg-card">
         {messages.length > 0 && (

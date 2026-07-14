@@ -19,6 +19,11 @@ export interface Message {
 export interface ChatSession {
   id: string;
   messages: Message[];
+  /** The persona this session talks to (`AgentDef.name`). Undefined means
+   * "no explicit choice made" -- the server applies its own default, so
+   * existing sessions from before multi-agent selection keep working
+   * unchanged. */
+  agent?: string;
 }
 
 interface ChatState {
@@ -46,6 +51,9 @@ interface ChatState {
   setLoading: (loading: boolean) => void;
   /** Queue (or clear, with `null`) a prompt for the chat page to prefill. */
   setPendingPrompt: (prompt: string | null) => void;
+  /** Persist which agent persona a session talks to (see the Agent
+   * selector in ChatPage). */
+  setSessionAgent: (sessionId: string, agent: string) => void;
 }
 
 function generateId(): string {
@@ -126,6 +134,11 @@ export const useChatStore = create<ChatState>()(
       setLoading: (loading: boolean) => set({ isLoading: loading }),
 
       setPendingPrompt: (prompt: string | null) => set({ pendingPrompt: prompt }),
+
+      setSessionAgent: (sessionId: string, agent: string) =>
+        set((state) => ({
+          sessions: state.sessions.map((s) => (s.id === sessionId ? { ...s, agent } : s)),
+        })),
     }),
     {
       name: CHAT_STORE_KEY,

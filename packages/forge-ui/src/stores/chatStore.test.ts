@@ -156,3 +156,59 @@ describe("chatStore pendingPrompt", () => {
     expect(secondInstance.getState().pendingPrompt).toBeNull();
   });
 });
+
+describe("chatStore session agent selection", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    window.localStorage.clear();
+  });
+
+  afterEach(() => {
+    window.localStorage.clear();
+    vi.restoreAllMocks();
+  });
+
+  it("a new session starts with no agent selected", async () => {
+    const { useChatStore } = await import("./chatStore");
+
+    const sessionId = useChatStore.getState().createSession();
+    const session = useChatStore.getState().sessions.find((s) => s.id === sessionId);
+
+    expect(session?.agent).toBeUndefined();
+  });
+
+  it("setSessionAgent sets the session's agent field", async () => {
+    const { useChatStore } = await import("./chatStore");
+
+    const sessionId = useChatStore.getState().createSession();
+    useChatStore.getState().setSessionAgent(sessionId, "researcher");
+
+    const session = useChatStore.getState().sessions.find((s) => s.id === sessionId);
+    expect(session?.agent).toBe("researcher");
+  });
+
+  it("persists the session's agent selection across a simulated reload", async () => {
+    const { useChatStore: firstInstance } = await import("./chatStore");
+
+    const sessionId = firstInstance.getState().createSession();
+    firstInstance.getState().setSessionAgent(sessionId, "researcher");
+
+    vi.resetModules();
+    const { useChatStore: secondInstance } = await import("./chatStore");
+
+    const session = secondInstance.getState().sessions.find((s) => s.id === sessionId);
+    expect(session?.agent).toBe("researcher");
+  });
+
+  it("does not affect other sessions' agent selection", async () => {
+    const { useChatStore } = await import("./chatStore");
+
+    const sessionA = useChatStore.getState().createSession();
+    const sessionB = useChatStore.getState().createSession();
+    useChatStore.getState().setSessionAgent(sessionA, "researcher");
+
+    const state = useChatStore.getState();
+    expect(state.sessions.find((s) => s.id === sessionA)?.agent).toBe("researcher");
+    expect(state.sessions.find((s) => s.id === sessionB)?.agent).toBeUndefined();
+  });
+});

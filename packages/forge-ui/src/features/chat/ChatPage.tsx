@@ -24,7 +24,9 @@ import { useChatStore } from "@/stores/chatStore";
 import type { Message } from "@/stores/chatStore";
 import { streamChatCompletion } from "@/api/chat";
 import type { ToolCallRecord } from "@/api/chat";
-import { useSessions, useDeleteSession } from "@/api/hooks";
+import { useSessions, useDeleteSession, useConfig, useTools } from "@/api/hooks";
+import { resolveDefaultAgentName } from "@/lib/agents";
+import { AgentSelector } from "@/components/agent/AgentSelector";
 
 function ToolCallDetails({ toolCalls }: { toolCalls: ToolCallRecord[] }) {
   const [expanded, setExpanded] = useState(false);
@@ -248,11 +250,17 @@ function ChatArea() {
     addToolCallToMessage,
     setLoading,
     setPendingPrompt,
+    setSessionAgent,
   } = useChatStore();
   const [input, setInput] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const { data: config } = useConfig();
+  const { data: tools } = useTools();
 
   const activeSession = sessions.find((s) => s.id === activeSessionId);
+  const agentRoster = config?.agents?.agents ?? [];
+  const defaultAgentName = config ? resolveDefaultAgentName(config) : undefined;
+  const selectedAgent = activeSession?.agent ?? defaultAgentName ?? "";
 
   const scrollToBottom = useCallback(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -302,7 +310,7 @@ function ChatArea() {
 
     try {
       await streamChatCompletion(
-        { message: userMessage.content, sessionId },
+        { message: userMessage.content, sessionId, agent: activeSession?.agent },
         {
           onChunk: (delta) => appendMessageContent(sessionId, assistantMessageId, delta),
           onToolCall: (toolCall) =>
@@ -320,6 +328,7 @@ function ChatArea() {
     input,
     activeSessionId,
     isLoading,
+    activeSession?.agent,
     addMessage,
     appendMessageContent,
     addToolCallToMessage,
@@ -377,17 +386,28 @@ function ChatArea() {
   return (
     <div className="flex flex-1 flex-col">
       {/* Header */}
-      <div className="flex items-center gap-3 border-b px-4 py-3">
-        <MessageSquare className="h-5 w-5 text-muted-foreground" />
-        <div>
-          <h2 className="text-sm font-medium">Session</h2>
-          <p className="text-xs text-muted-foreground">
-            {activeSession.id}
-          </p>
+      <div className="border-b px-4 py-3">
+        <div className="flex items-center gap-3">
+          <MessageSquare className="h-5 w-5 text-muted-foreground" />
+          <div className="min-w-0 flex-1">
+            <h2 className="text-sm font-medium">Session</h2>
+            <p className="truncate text-xs text-muted-foreground">
+              {activeSession.id}
+            </p>
+          </div>
+          <Badge variant="secondary">
+            {activeSession.messages.length} messages
+          </Badge>
         </div>
-        <Badge variant="secondary" className="ml-auto">
-          {activeSession.messages.length} messages
-        </Badge>
+        <div className="mt-3 max-w-sm">
+          <AgentSelector
+            id="chat-agent-selector"
+            agents={agentRoster}
+            value={selectedAgent}
+            onChange={(name) => setSessionAgent(activeSession.id, name)}
+            tools={tools}
+          />
+        </div>
       </div>
 
       {/* Messages */}
