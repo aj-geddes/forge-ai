@@ -17,6 +17,7 @@ from forge_config.secret_resolver import SecretResolver
 from forge_config.versioning import compute_surface_version
 from pydantic_ai.tools import Tool
 
+from forge_agent.active.gate import ApprovalStore, ToolGate
 from forge_agent.agent.peers import PeerCaller
 from forge_agent.builder.manual import ManualToolBuilder
 from forge_agent.builder.openapi import OpenAPIToolBuilder
@@ -38,6 +39,7 @@ class ToolSurfaceRegistry:
         secret_resolver: SecretResolver | None = None,
         *,
         workload_identity: Any | None = None,
+        tool_gate: ToolGate | None = None,
     ) -> None:
         self._tools: list[Tool[None]] = []
         self._version: str = ""
@@ -48,11 +50,25 @@ class ToolSurfaceRegistry:
         # outbound peer calls use mTLS. ``None`` (the default) preserves
         # the pre-ADR-0004 plain-httpx behavior.
         self._workload_identity = workload_identity
+        # ADR-0005 SS6.2: a single ToolGate is shared by every manual tool
+        # this registry builds, so gated tools (``ManualTool.requires_approval``)
+        # draft-instead-of-execute through the real tool surface. Always
+        # present (built with a fresh in-memory ApprovalStore when the
+        # caller doesn't supply one) so ManualToolBuilder can always thread
+        # it through -- it is simply unused by tools that don't opt in.
+        self._tool_gate = tool_gate or ToolGate(ApprovalStore())
 
     @property
     def tools(self) -> list[Tool[None]]:
         """The current set of registered tools."""
         return list(self._tools)
+
+    @property
+    def tool_gate(self) -> ToolGate:
+        """The shared ToolGate used to gate approval-required manual tools
+        (ADR-0005 SS6.2). Exposed so the gateway's admin approvals routes
+        can list/approve/reject requests drafted through this registry."""
+        return self._tool_gate
 
     @property
     def version(self) -> str:
@@ -116,18 +132,26 @@ class ToolSurfaceRegistry:
         resolver = self._secret_resolver
 
         # Build OpenAPI tools (async since specs may be fetched remotely).
+        # Every source is built with the shared ToolGate (ADR-0005 SS6.2,
+        # security review finding #1) -- mirrors manual tools below; only
+        # operations opted into `requires_approval`/`approval_operations`
+        # are actually wrapped by it (see OpenAPIToolBuilder._build_tools).
         for source in config.tools.openapi_sources:
             openapi_builder = OpenAPIToolBuilder(
                 source,
                 secret_resolver=resolver,
+                tool_gate=self._tool_gate,
             )
             tools.extend(await openapi_builder.build())
 
-        # Build manual tools.
+        # Build manual tools. Every manual tool is built with the shared
+        # ToolGate (ADR-0005 SS6.2); only tools with `requires_approval:
+        # true` are actually wrapped by it (see ManualToolBuilder.build).
         for manual in config.tools.manual_tools:
             manual_builder = ManualToolBuilder(
                 manual,
                 secret_resolver=resolver,
+                tool_gate=self._tool_gate,
             )
             tools.append(manual_builder.build())
 

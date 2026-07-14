@@ -266,6 +266,7 @@ class TestPermissionEnum:
             "agent:invoke",
             "tools:invoke",
             "agent:peer",
+            "agent:approve",
             "config:read",
             "config:write",
             "metrics:read",

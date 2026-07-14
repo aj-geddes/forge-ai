@@ -25,7 +25,7 @@ from forge_config.schema import (
 )
 from forge_gateway import app as app_module
 from forge_gateway import security
-from forge_gateway.routes import health
+from forge_gateway.routes import approvals, health
 from forge_security.oidc import Authorizer
 from forge_security.workload.errors import WorkloadUnavailable
 
@@ -148,6 +148,36 @@ class TestSpireUnreachableFailsClosedWorkloadOnly:
         assert response.status_code == 200
         assert response.json()["status"] == "ready"
         assert response.json()["workload"]["status"] == "unavailable"
+
+
+class TestWorkloadAuditTrailWiring:
+    """ADR-0005 SS6.3 (security review finding #3): approve/reject
+    decisions route to the AgentWeave AuditTrail once the WorkloadPlane is
+    built -- independent of whether the :8443 listener itself binds."""
+
+    @pytest.fixture(autouse=True)
+    def _reset_approvals_audit(self) -> Iterator[None]:
+        yield
+        approvals.set_audit_trail(None)
+
+    async def test_audit_trail_wired_when_workload_plane_builds(self) -> None:
+        config = _no_oidc_config(agentweave_enabled=True, workload_port=0)
+
+        with patch.dict("os.environ", {"FORGE_WORKLOAD_TEST_MODE": "1"}):
+            handle = await app_module._init_workload_plane(config, agent=None)
+
+        try:
+            assert approvals._audit_trail is not None
+        finally:
+            if handle is not None:
+                await handle.stop()
+
+    async def test_audit_trail_absent_when_agentweave_disabled(self) -> None:
+        config = _no_oidc_config(agentweave_enabled=False)
+
+        await app_module._init_workload_plane(config, agent=None)
+
+        assert approvals._audit_trail is None
 
 
 class TestListenerStartupFailureDoesNotGateHumanPlane:

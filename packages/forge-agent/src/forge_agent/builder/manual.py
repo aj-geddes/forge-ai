@@ -15,6 +15,7 @@ from forge_config.schema import HTTPMethod, ManualTool, ManualToolAPI, ParamType
 from forge_config.secret_resolver import SecretResolver
 from pydantic_ai.tools import Tool
 
+from forge_agent.active.gate import ToolGate
 from forge_agent.builder.openapi import _resolve_auth_headers
 
 
@@ -61,10 +62,17 @@ class ManualToolBuilder:
         tool_config: ManualTool,
         http_client: httpx.AsyncClient | None = None,
         secret_resolver: SecretResolver | None = None,
+        tool_gate: ToolGate | None = None,
+        *,
+        requested_by: str | None = None,
+        run_id: str | None = None,
     ) -> None:
         self._config = tool_config
         self._http_client = http_client
         self._secret_resolver = secret_resolver
+        self._tool_gate = tool_gate
+        self._requested_by = requested_by
+        self._run_id = run_id
 
     def build(self) -> Tool[None]:
         """Build a PydanticAI Tool from the manual tool configuration.
@@ -119,7 +127,32 @@ class ManualToolBuilder:
         tool_func.__doc__ = tool_description
         tool_func.__annotations__ = annotations
 
-        return Tool(tool_func, name=tool_name)
+        final_func: Any = tool_func
+        if self._config.requires_approval:
+            # ADR-0005 SS6.2: gated tools must never be buildable without a
+            # gate to draft/approve them -- fail fast at build time rather
+            # than silently executing the real side effect ungated.
+            if self._tool_gate is None:
+                msg = (
+                    f"Manual tool {tool_name!r} has requires_approval=True but no "
+                    "ToolGate was supplied to ManualToolBuilder; refusing to build "
+                    "it as an ungated tool."
+                )
+                raise ValueError(msg)
+            gated_func = self._tool_gate.wrap(
+                tool_name,
+                tool_func,
+                requested_by=self._requested_by,
+                run_id=self._run_id,
+            )
+            gated_func.__signature__ = sig  # type: ignore[attr-defined]
+            gated_func.__name__ = tool_name
+            gated_func.__qualname__ = tool_name
+            gated_func.__doc__ = tool_description
+            gated_func.__annotations__ = annotations
+            final_func = gated_func
+
+        return Tool(final_func, name=tool_name)
 
 
 def _resolve_template_string(template: str, params: dict[str, Any]) -> str:

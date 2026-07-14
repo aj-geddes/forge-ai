@@ -218,6 +218,17 @@ class ManualTool(BaseModel):
     description: str
     parameters: list[ParameterDef] = Field(default_factory=list)
     api: ManualToolAPI
+    requires_approval: bool = False
+    """ADR-0005 SS6.2: when true, invoking this tool never executes the
+    real side effect immediately. Instead it drafts an ``ApprovalRequest``
+    (see ``forge_agent.active.gate.ToolGate``) and returns a "pending
+    approval" result; the real call only fires once a human approves it
+    via ``POST /v1/admin/approvals/{id}/approve``. Default-safe: existing
+    configs (no field set) keep executing exactly as before. This is the
+    minimal per-tool opt-in for the human-approval gate -- fail-safe,
+    default-OFF classification (an explicit ``ApprovalPolicy`` with
+    default-gate-by-side-effect semantics, per the ADR, is a broader
+    follow-up)."""
 
 
 class OpenAPISource(BaseModel):
@@ -233,6 +244,13 @@ class OpenAPISource(BaseModel):
     namespace: str | None = None
     include_tags: list[str] = Field(default_factory=list)
     include_operations: list[str] = Field(default_factory=list)
+    requires_approval: bool = False
+    """ADR-0005 SS6.2 (finding #1): when true, EVERY operation built from
+    this source is gated (draft-instead-of-execute). Default-safe."""
+    approval_operations: list[str] = Field(default_factory=list)
+    """Gate only these operations (by ``operationId`` or the legacy
+    ``"METHOD /path"`` key form -- same dual-key convention as
+    ``route_map``), leaving the rest of the source ungated."""
 
     @model_validator(mode="after")
     def validate_source(self) -> OpenAPISource:
@@ -323,6 +341,12 @@ class Permission(str, Enum):
     AGENT_INVOKE = "agent:invoke"
     TOOLS_INVOKE = "tools:invoke"
     AGENT_PEER = "agent:peer"
+    AGENT_APPROVE = "agent:approve"
+    """ADR-0005 SS6.2: required to list/approve/reject parked
+    ``ApprovalRequest``s (``GET/POST /v1/admin/approvals...``). Granted to
+    the built-in ``admin`` role via its ``"*"`` wildcard; not granted to
+    any other built-in role -- approving irreversible/outward-facing
+    actions is deliberately not part of the default ``user`` role."""
     CONFIG_READ = "config:read"
     CONFIG_WRITE = "config:write"
     METRICS_READ = "metrics:read"

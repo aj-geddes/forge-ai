@@ -9,6 +9,34 @@ rather than let a future replica/HPA bump quietly break it.
 {{- fail "persistence.enabled is set (RWO user-token store), which requires a single writer: set agent.replicaCount to 1 and autoscaling.enabled to false, or move the token store off the file backend before scaling out." }}
 {{- end }}
 {{- end }}
+{{- /*
+ADR-0005 SS6.2/SS11 (security review finding #5): the human-approval gate's
+ApprovalStore (forge_agent.active.gate) is in-memory per replica -- "exactly
+once" approval only holds within a single process. Running more than one
+replica with a gated tool configured risks the same drafted action being
+independently approved on two different pods (a duplicate outward-facing
+side effect, e.g. a duplicate social-media publish). Fail the render loudly
+rather than let a future replica/HPA bump quietly reintroduce that risk. A
+Redis-backed ApprovalStore (mirroring RedisConversationStore, ADR-0003) is
+the real cross-replica fix and is tracked as a follow-up, not implemented.
+*/ -}}
+{{- $forgeGatedTool := false }}
+{{- if .Values.forgeConfig }}
+{{- if .Values.forgeConfig.tools }}
+{{- range .Values.forgeConfig.tools.manual_tools }}
+{{- if .requires_approval }}{{ $forgeGatedTool = true }}{{- end }}
+{{- end }}
+{{- range .Values.forgeConfig.tools.openapi_sources }}
+{{- if .requires_approval }}{{ $forgeGatedTool = true }}{{- end }}
+{{- if .approval_operations }}{{ $forgeGatedTool = true }}{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- if $forgeGatedTool }}
+{{- if or (gt (int .Values.agent.replicaCount) 1) .Values.autoscaling.enabled }}
+{{- fail "forgeConfig declares a human-approval-gated tool (ManualTool.requires_approval, OpenAPISource.requires_approval, or OpenAPISource.approval_operations), which requires a single writer: the in-memory ApprovalStore does not synchronize across replicas (ADR-0005 SS6.2/SS11). Set agent.replicaCount to 1 and autoscaling.enabled to false, or remove the gated tool, until a durable cross-replica ApprovalStore exists." }}
+{{- end }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:

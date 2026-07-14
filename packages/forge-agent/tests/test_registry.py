@@ -6,6 +6,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from forge_agent.active.gate import ApprovalStatus, ApprovalStore, ToolGate
 from forge_agent.builder.registry import ToolSurfaceRegistry
 from forge_config.schema import (
     ForgeConfig,
@@ -47,12 +48,18 @@ def _make_config_with_manual_tools(tools: list[ManualTool]) -> ForgeConfig:
     return ForgeConfig(tools=ToolsConfig(manual_tools=tools))
 
 
-def _make_manual_tool(name: str, url: str = "https://api.example.com") -> ManualTool:
+def _make_manual_tool(
+    name: str,
+    url: str = "https://api.example.com",
+    *,
+    requires_approval: bool = False,
+) -> ManualTool:
     """Create a simple ManualTool."""
     return ManualTool(
         name=name,
         description=f"Tool {name}",
         api=ManualToolAPI(url=url, method=HTTPMethod.GET),
+        requires_approval=requires_approval,
     )
 
 
@@ -273,3 +280,117 @@ class TestToolSurfaceRegistry:
             assert executor is not None, (
                 "_build_tools must pass a non-None tool_executor to WorkflowBuilder"
             )
+
+
+class TestToolSurfaceRegistryGating:
+    """ADR-0005 SS6.2: the registry owns a ToolGate shared by every manual
+    tool it builds, so a ``requires_approval: true`` manual tool drafts
+    instead of executing through the real tool surface."""
+
+    @pytest.mark.anyio
+    async def test_registry_exposes_a_tool_gate_by_default(self) -> None:
+        registry = ToolSurfaceRegistry()
+        assert isinstance(registry.tool_gate, ToolGate)
+
+    @pytest.mark.anyio
+    async def test_registry_accepts_an_explicit_tool_gate(self) -> None:
+        gate = ToolGate(ApprovalStore())
+        registry = ToolSurfaceRegistry(tool_gate=gate)
+        assert registry.tool_gate is gate
+
+    @pytest.mark.anyio
+    async def test_gated_manual_tool_drafts_through_the_built_surface(self) -> None:
+        gate = ToolGate(ApprovalStore())
+        registry = ToolSurfaceRegistry(tool_gate=gate)
+        config = _make_config_with_manual_tools(
+            [_make_manual_tool("publish_post", requires_approval=True)]
+        )
+
+        await registry.build_and_swap(config)
+        tool = next(t for t in registry.tools if t.name == "publish_post")
+
+        result = await tool.function()
+
+        assert result["status"] == "drafted"
+        approval = await gate.get_approval(result["approval_id"])
+        assert approval is not None
+        assert approval.status == ApprovalStatus.PENDING
+        assert approval.tool_name == "publish_post"
+
+    @pytest.mark.anyio
+    async def test_ungated_manual_tool_is_unaffected_by_the_shared_gate(self) -> None:
+        registry = ToolSurfaceRegistry()
+        config = _make_config_with_manual_tools([_make_manual_tool("plain_tool")])
+
+        await registry.build_and_swap(config)
+        tool = next(t for t in registry.tools if t.name == "plain_tool")
+
+        # Not gated: build() never wraps it, so calling it attempts the
+        # real HTTP call (and fails against the fake example.com host --
+        # what matters here is that it is NOT a "drafted" dict).
+        with pytest.raises(Exception):  # noqa: B017, PT011 -- real network call, any failure is fine
+            await tool.function()
+
+    @pytest.mark.anyio
+    async def test_gated_openapi_tool_drafts_through_the_built_surface(self) -> None:
+        """ADR-0005 SS6.2, security review finding #1: the registry must
+        thread its shared ToolGate into OpenAPIToolBuilder exactly as it
+        does for ManualToolBuilder, so a gated OpenAPI-sourced operation
+        (e.g. a Postiz ``POST /publish``) drafts instead of executing."""
+        gate = ToolGate(ApprovalStore())
+        registry = ToolSurfaceRegistry(tool_gate=gate)
+        config = ForgeConfig(
+            tools=ToolsConfig(
+                openapi_sources=[
+                    OpenAPISource(
+                        name="example",
+                        url="https://api.example.com/openapi.json",
+                        approval_operations=["create_user"],
+                    )
+                ]
+            )
+        )
+
+        with patch(
+            "forge_agent.builder.openapi.OpenAPIToolBuilder._fetch_remote_spec",
+            new_callable=AsyncMock,
+            return_value=_MINIMAL_SPEC,
+        ):
+            await registry.build_and_swap(config)
+
+        tool = next(t for t in registry.tools if t.name == "create_user")
+        result = await tool.function()
+
+        assert result["status"] == "drafted"
+        approval = await gate.get_approval(result["approval_id"])
+        assert approval is not None
+        assert approval.tool_name == "create_user"
+
+    @pytest.mark.anyio
+    async def test_ungated_openapi_tool_is_unaffected_by_the_shared_gate(self) -> None:
+        gate = ToolGate(ApprovalStore())
+        registry = ToolSurfaceRegistry(tool_gate=gate)
+        config = ForgeConfig(
+            tools=ToolsConfig(
+                openapi_sources=[
+                    OpenAPISource(
+                        name="example",
+                        url="https://api.example.com/openapi.json",
+                    )
+                ]
+            )
+        )
+
+        with patch(
+            "forge_agent.builder.openapi.OpenAPIToolBuilder._fetch_remote_spec",
+            new_callable=AsyncMock,
+            return_value=_MINIMAL_SPEC,
+        ):
+            await registry.build_and_swap(config)
+
+        tool = next(t for t in registry.tools if t.name == "list_users")
+
+        # Not gated: calling it attempts the real HTTP call against the
+        # fake example.com host -- what matters is it is NOT a drafted dict.
+        with pytest.raises(Exception):  # noqa: B017, PT011 -- real network call, any failure is fine
+            await tool.function()

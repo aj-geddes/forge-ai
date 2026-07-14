@@ -177,6 +177,28 @@ class TestManualTool:
         assert len(tool.parameters) == 2
         assert tool.parameters[1].default == 10
 
+    def test_requires_approval_defaults_false(self) -> None:
+        """ADR-0005 SS6.2: unlisted tools are NOT gated by default -- a tool
+        must opt in explicitly. Existing configs (no ``requires_approval``
+        field) must keep executing immediately, unchanged."""
+        tool = ManualTool(
+            name="test",
+            description="A test tool",
+            api=ManualToolAPI(url="https://example.com/api"),
+        )
+        assert tool.requires_approval is False
+
+    def test_requires_approval_can_be_enabled(self) -> None:
+        """A tool opts into the human-approval gate via `requires_approval:
+        true` in its config -- the minimal config seam for ADR-0005 SS6.2."""
+        tool = ManualTool(
+            name="publish_post",
+            description="Publishes a social media post",
+            api=ManualToolAPI(url="https://example.com/publish", method=HTTPMethod.POST),
+            requires_approval=True,
+        )
+        assert tool.requires_approval is True
+
 
 class TestManualToolAPI:
     def test_url_only(self) -> None:
@@ -246,6 +268,12 @@ class TestResponseMapping:
         )
         assert mapping.result_path == "$.data"
         assert mapping.field_map["name"] == "$.data.name"
+
+
+def _make_gated_source(ops: list[str]) -> OpenAPISource:
+    return OpenAPISource(
+        name="postiz", url="https://example.com/openapi.json", approval_operations=ops
+    )
 
 
 class TestOpenAPISource:
@@ -321,6 +349,30 @@ class TestOpenAPISource:
         src = OpenAPISource(name="test", url="https://example.com/openapi.json")
         assert src.include_tags == []
         assert src.include_operations == []
+
+    def test_requires_approval_defaults_false(self) -> None:
+        """ADR-0005 SS6.2 (finding #1): an OpenAPI source must opt in
+        explicitly to gating -- existing configs keep executing unchanged."""
+        src = OpenAPISource(name="test", url="https://example.com/openapi.json")
+        assert src.requires_approval is False
+
+    def test_requires_approval_can_be_enabled(self) -> None:
+        """Gates EVERY operation built from this source (e.g. a Postiz spec)."""
+        src = OpenAPISource(
+            name="postiz", url="https://example.com/openapi.json", requires_approval=True
+        )
+        assert src.requires_approval is True
+
+    def test_approval_operations_defaults_to_empty(self) -> None:
+        src = OpenAPISource(name="test", url="https://example.com/openapi.json")
+        assert src.approval_operations == []
+
+    def test_approval_operations_can_be_set(self) -> None:
+        """Gates only the listed ops (operationId, or legacy 'METHOD /path'
+        -- same dual-key form as route_map)."""
+        ops = ["publishPost", "POST /publish"]
+        src = _make_gated_source(ops)
+        assert src.approval_operations == ops
 
     def test_route_map_preserved(self) -> None:
         src = OpenAPISource(

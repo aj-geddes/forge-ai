@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
+from forge_agent.active.gate import ApprovalStatus, ApprovalStore, ToolGate
 from forge_agent.builder.manual import ManualToolBuilder, ToolResponseError
 from forge_config.exceptions import SecretResolutionError
 from forge_config.schema import (
@@ -32,6 +33,7 @@ def _make_manual_tool(
     parameters: list[ParameterDef] | None = None,
     body_template: dict[str, Any] | None = None,
     response_mapping: ResponseMapping | None = None,
+    requires_approval: bool = False,
 ) -> ManualTool:
     """Helper to create a ManualTool config for testing."""
     return ManualTool(
@@ -44,6 +46,7 @@ def _make_manual_tool(
             body_template=body_template,
             response_mapping=response_mapping or ResponseMapping(),
         ),
+        requires_approval=requires_approval,
     )
 
 
@@ -599,3 +602,105 @@ class TestResponseMappingStatusFieldAndErrorPath:
 
         result = await tool.function()
         assert result == {"id": 7}
+
+
+class TestManualToolGating:
+    """ADR-0005 SS6.2: a manual tool opts into the human-approval gate via
+    ``requires_approval: true``. Wiring a ``ToolGate`` into the builder
+    makes the built tool draft-instead-of-execute; the real HTTP call
+    only fires once a human approves the draft."""
+
+    @pytest.mark.anyio
+    async def test_gated_tool_drafts_instead_of_calling_http(self) -> None:
+        config = _make_manual_tool(
+            url="https://api.example.com/publish",
+            method=HTTPMethod.POST,
+            parameters=[ParameterDef(name="text", type=ParamType.STRING)],
+            requires_approval=True,
+        )
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.request = AsyncMock()
+        gate = ToolGate(ApprovalStore())
+
+        builder = ManualToolBuilder(config, http_client=mock_client, tool_gate=gate)
+        tool = builder.build()
+
+        result = await tool.function(text="hello world")
+
+        mock_client.request.assert_not_called()
+        assert result["status"] == "drafted"
+        assert "approval_id" in result
+
+    @pytest.mark.anyio
+    async def test_gated_tool_executes_real_call_exactly_once_on_approve(self) -> None:
+        config = _make_manual_tool(
+            url="https://api.example.com/publish",
+            method=HTTPMethod.POST,
+            parameters=[ParameterDef(name="text", type=ParamType.STRING)],
+            requires_approval=True,
+        )
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"published": True}
+        mock_response.raise_for_status.return_value = None
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.request = AsyncMock(return_value=mock_response)
+        gate = ToolGate(ApprovalStore())
+
+        builder = ManualToolBuilder(config, http_client=mock_client, tool_gate=gate)
+        tool = builder.build()
+
+        draft = await tool.function(text="hello world")
+        result = await gate.approve(draft["approval_id"])
+
+        mock_client.request.assert_called_once()
+        assert result == {"published": True}
+
+        approval = await gate.get_approval(draft["approval_id"])
+        assert approval is not None
+        assert approval.status == ApprovalStatus.APPROVED
+
+    @pytest.mark.anyio
+    async def test_gated_tool_never_calls_http_on_reject(self) -> None:
+        config = _make_manual_tool(requires_approval=True)
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.request = AsyncMock()
+        gate = ToolGate(ApprovalStore())
+
+        builder = ManualToolBuilder(config, http_client=mock_client, tool_gate=gate)
+        tool = builder.build()
+
+        draft = await tool.function()
+        await gate.reject(draft["approval_id"])
+
+        mock_client.request.assert_not_called()
+
+    def test_requires_approval_without_gate_raises_at_build_time(self) -> None:
+        """Fail-fast (matching the secret-resolution fail-fast convention
+        in this module): a gated tool built with no ``ToolGate`` supplied
+        cannot silently execute ungated -- it must not be buildable."""
+        config = _make_manual_tool(requires_approval=True)
+        builder = ManualToolBuilder(config)
+
+        with pytest.raises(ValueError, match="requires_approval"):
+            builder.build()
+
+    @pytest.mark.anyio
+    async def test_non_gated_tool_ignores_a_supplied_tool_gate(self) -> None:
+        """A tool_gate may always be threaded through (e.g. by the
+        registry, for every manual tool); tools that don't opt in via
+        ``requires_approval`` execute immediately, unaffected."""
+        config = _make_manual_tool(requires_approval=False)
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"ok": True}
+        mock_response.raise_for_status.return_value = None
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.request = AsyncMock(return_value=mock_response)
+        gate = ToolGate(ApprovalStore())
+
+        builder = ManualToolBuilder(config, http_client=mock_client, tool_gate=gate)
+        tool = builder.build()
+
+        result = await tool.function()
+
+        mock_client.request.assert_called_once()
+        assert result == {"ok": True}

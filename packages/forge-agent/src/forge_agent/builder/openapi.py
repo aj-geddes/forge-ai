@@ -20,6 +20,8 @@ from forge_config.schema import AuthConfig, AuthType, OpenAPISource
 from forge_config.secret_resolver import SecretResolver
 from pydantic_ai.tools import Tool
 
+from forge_agent.active.gate import ToolGate
+
 logger = logging.getLogger(__name__)
 
 # Mapping from OpenAPI/JSON Schema types to Python types.
@@ -46,10 +48,22 @@ class OpenAPIToolBuilder:
         source: OpenAPISource,
         http_client: httpx.AsyncClient | None = None,
         secret_resolver: SecretResolver | None = None,
+        tool_gate: ToolGate | None = None,
+        *,
+        requested_by: str | None = None,
+        run_id: str | None = None,
     ) -> None:
         self._source = source
         self._http_client = http_client
         self._secret_resolver = secret_resolver
+        # ADR-0005 SS6.2 (security review finding #1): OpenAPI-sourced
+        # tools must be gate-able exactly like manual tools. ``tool_gate``
+        # is the shared gate the registry threads through (mirrors
+        # ManualToolBuilder); ``requested_by``/``run_id`` are recorded on
+        # any draft this source's gated operations create.
+        self._tool_gate = tool_gate
+        self._requested_by = requested_by
+        self._run_id = run_id
 
     async def build(self) -> list[Tool[None]]:
         """Build tool definitions from the OpenAPI spec.
@@ -279,6 +293,11 @@ class OpenAPIToolBuilder:
         route_map = self._source.route_map
         prefix = self._source.prefix
         http_client = self._http_client
+        # ADR-0005 SS6.2 (finding #1): operations named in
+        # `approval_operations` are gated individually (matched by
+        # operationId or the legacy "METHOD /path" key -- same dual-key
+        # convention as `route_map`), regardless of `requires_approval`.
+        approval_ops = set(self._source.approval_operations)
 
         for op in operations:
             # Determine the tool name. route_map is documented and canonically
@@ -301,6 +320,24 @@ class OpenAPIToolBuilder:
             # Build description.
             description = op["summary"] or op["description"] or f"{op['method']} {op['path']}"
 
+            gated = (
+                self._source.requires_approval
+                or op["operation_id"] in approval_ops
+                or route_key in approval_ops
+            )
+            if gated and self._tool_gate is None:
+                # Fail-closed (mirrors ManualToolBuilder): a gated operation
+                # must never be built as an ungated tool just because no
+                # ToolGate was supplied to this builder.
+                msg = (
+                    f"OpenAPI source {self._source.name!r} operation "
+                    f"{op['operation_id']!r} (tool {tool_name!r}) has "
+                    "requires_approval/approval_operations set but no "
+                    "ToolGate was supplied to OpenAPIToolBuilder; refusing "
+                    "to build it as an ungated tool."
+                )
+                raise ValueError(msg)
+
             # Build the tool function.
             tool = _build_tool_function(
                 name=tool_name,
@@ -312,6 +349,9 @@ class OpenAPIToolBuilder:
                 request_body=op["request_body"],
                 auth_headers=auth_headers,
                 http_client=http_client,
+                tool_gate=self._tool_gate if gated else None,
+                requested_by=self._requested_by,
+                run_id=self._run_id,
             )
             tools.append(tool)
 
@@ -484,11 +524,16 @@ def _build_tool_function(
     request_body: dict[str, Any] | None,
     auth_headers: dict[str, str],
     http_client: httpx.AsyncClient | None,
+    tool_gate: ToolGate | None = None,
+    requested_by: str | None = None,
+    run_id: str | None = None,
 ) -> Tool[None]:
     """Build a single PydanticAI Tool for an OpenAPI operation.
 
     Creates a dynamic async function with proper signature that
-    makes real HTTP calls when invoked.
+    makes real HTTP calls when invoked -- unless `tool_gate` is given
+    (ADR-0005 SS6.2, finding #1), in which case the returned tool drafts
+    an approval instead of executing, exactly like a gated manual tool.
 
     Args:
         name: The tool name.
@@ -500,6 +545,11 @@ def _build_tool_function(
         request_body: OpenAPI requestBody definition or None.
         auth_headers: Pre-resolved authentication headers.
         http_client: Optional pre-configured httpx client.
+        tool_gate: When given, the built tool is gated: invoking it drafts
+            an :class:`~forge_agent.active.gate.ApprovalRequest` instead of
+            making the real HTTP call.
+        requested_by: The requesting agent/persona, recorded on the draft.
+        run_id: The autonomous run or session id, when known.
 
     Returns:
         A PydanticAI Tool wrapping an async HTTP-calling function.
@@ -586,7 +636,25 @@ def _build_tool_function(
     tool_func.__doc__ = description
     tool_func.__annotations__ = annotations
 
-    return Tool(tool_func, name=name)
+    final_func: Any = tool_func
+    if tool_gate is not None:
+        # ADR-0005 SS6.2 (finding #1): wrap exactly like a gated manual
+        # tool -- invoking it drafts an ApprovalRequest instead of making
+        # the real HTTP call; the real call only fires on approve.
+        gated_func = tool_gate.wrap(
+            name,
+            tool_func,
+            requested_by=requested_by,
+            run_id=run_id,
+        )
+        gated_func.__signature__ = sig  # type: ignore[attr-defined]
+        gated_func.__name__ = name
+        gated_func.__qualname__ = name
+        gated_func.__doc__ = description
+        gated_func.__annotations__ = annotations
+        final_func = gated_func
+
+    return Tool(final_func, name=name)
 
 
 def _resolve_auth_headers(

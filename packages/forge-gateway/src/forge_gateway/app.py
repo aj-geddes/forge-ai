@@ -37,6 +37,7 @@ from forge_gateway.middleware.metrics import PrometheusMetricsMiddleware
 from forge_gateway.routes import (
     a2a,
     admin,
+    approvals,
     conversational,
     health,
     mcp,
@@ -523,11 +524,13 @@ async def _init_workload_plane(
 
     if config is None or not isinstance(config, ForgeConfig):
         health.set_workload_health(None)
+        approvals.set_audit_trail(None)
         return None
 
     agentweave_config = config.security.agentweave
     if not agentweave_config.enabled:
         health.set_workload_health(None)
+        approvals.set_audit_trail(None)
         return None
 
     test_mode = _workload_test_mode()
@@ -545,7 +548,14 @@ async def _init_workload_plane(
             exc.code,
         )
         health.set_workload_health({"status": "unavailable", "reason": exc.code})
+        approvals.set_audit_trail(None)
         return None
+
+    # ADR-0005 SS6.3 (security review finding #3): once the WorkloadPlane
+    # (identity + authz + audit) is built, its AuditTrail is available for
+    # approve/reject decisions regardless of whether the :8443 mTLS
+    # listener itself comes up -- they are independent concerns.
+    approvals.set_audit_trail(plane.audit)
 
     try:
         handle = await start_workload_listener(plane, agent, config)
@@ -658,6 +668,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 conversational.set_agent(agent)
                 conversational.set_config(config)
                 a2a.set_agent(agent)
+
+                # ADR-0005 SS6.2: wire the agent's shared ToolGate so the
+                # admin approvals routes can list/approve/reject the
+                # ApprovalRequests drafted by gated tools on this registry.
+                approvals.set_state(agent.registry.tool_gate)
 
                 # Build MCP server from the agent's tool registry and
                 # activate it at the persistent /mcp mount.
@@ -934,6 +949,7 @@ def create_app() -> FastAPI:
     app.include_router(a2a.router)
     app.include_router(metrics.router)
     app.include_router(admin.router)
+    app.include_router(approvals.router)
 
     # MCP tool surface — mounted once, for the process lifetime. It starts
     # out dispatching to nothing (503) until the lifespan activates a real

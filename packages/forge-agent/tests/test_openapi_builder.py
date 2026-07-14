@@ -8,6 +8,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from forge_agent.active.gate import ApprovalStore, ToolGate
 from forge_agent.builder.openapi import (
     OpenAPIToolBuilder,
     _resolve_auth_headers,
@@ -123,6 +124,8 @@ def _make_source(
     include_operations: list[str] | None = None,
     route_map: dict[str, str] | None = None,
     auth: AuthConfig | None = None,
+    requires_approval: bool = False,
+    approval_operations: list[str] | None = None,
 ) -> OpenAPISource:
     """Create an OpenAPISource for testing."""
     return OpenAPISource(
@@ -134,6 +137,8 @@ def _make_source(
         include_operations=include_operations or [],
         route_map=route_map or {},
         auth=auth or AuthConfig(),
+        requires_approval=requires_approval,
+        approval_operations=approval_operations or [],
     )
 
 
@@ -1494,3 +1499,195 @@ class TestOpenAPIToolBuilderSpecFormats:
         loaded = await builder._load_spec()
 
         assert loaded["paths"]
+
+
+# ---------------------------------------------------------------------------
+# Test: human-approval gate (ADR-0005 SS6.2, security review finding #1)
+# ---------------------------------------------------------------------------
+
+
+class TestOpenAPIToolBuilderGating:
+    """OpenAPI-sourced tools must be gate-able exactly like manual tools:
+    a gated operation drafts-instead-of-executes on first call and only
+    fires once approved; an ungated operation is unaffected."""
+
+    @pytest.mark.anyio
+    async def test_source_level_requires_approval_drafts_instead_of_executes(self) -> None:
+        source = _make_source(requires_approval=True)
+        gate = ToolGate(ApprovalStore())
+        builder = OpenAPIToolBuilder(source, tool_gate=gate)
+
+        with (
+            patch.object(
+                builder,
+                "_fetch_remote_spec",
+                new_callable=AsyncMock,
+                return_value=_make_petstore_spec(),
+            ),
+            patch("forge_agent.builder.openapi.httpx.AsyncClient") as mock_client_cls,
+        ):
+            tools = await builder.build()
+            tools_by_name = {t.name: t for t in tools}
+            result = await tools_by_name["createPet"].function(body={"name": "Rex"})
+
+            assert isinstance(result, dict)
+            assert result["status"] == "drafted"
+            assert "approval_id" in result
+            mock_client_cls.assert_not_called()
+
+    @pytest.mark.anyio
+    async def test_gated_operation_executes_on_approve(self) -> None:
+        source = _make_source(requires_approval=True)
+        gate = ToolGate(ApprovalStore())
+        builder = OpenAPIToolBuilder(source, tool_gate=gate)
+
+        with (
+            patch.object(
+                builder,
+                "_fetch_remote_spec",
+                new_callable=AsyncMock,
+                return_value=_make_petstore_spec(),
+            ),
+            patch("forge_agent.builder.openapi.httpx.AsyncClient"),
+        ):
+            tools = await builder.build()
+            tools_by_name = {t.name: t for t in tools}
+            draft = await tools_by_name["createPet"].function(body={"name": "Rex"})
+            assert draft["status"] == "drafted"
+
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"id": 1, "name": "Rex"}
+        mock_response.raise_for_status = MagicMock()
+        mock_client = AsyncMock()
+        mock_client.request.return_value = mock_response
+        mock_client.aclose.return_value = None
+
+        with patch("forge_agent.builder.openapi.httpx.AsyncClient", return_value=mock_client):
+            result = await gate.approve(draft["approval_id"])
+
+        mock_client.request.assert_called_once()
+        assert result == {"id": 1, "name": "Rex"}
+
+    @pytest.mark.anyio
+    async def test_ungated_operation_in_same_source_is_unchanged(self) -> None:
+        source = _make_source(requires_approval=False)
+        gate = ToolGate(ApprovalStore())
+        builder = OpenAPIToolBuilder(source, tool_gate=gate)
+
+        mock_response = MagicMock()
+        mock_response.json.return_value = [{"id": 1, "name": "Fluffy"}]
+        mock_response.raise_for_status = MagicMock()
+        mock_client = AsyncMock()
+        mock_client.request.return_value = mock_response
+        mock_client.aclose.return_value = None
+
+        with (
+            patch.object(
+                builder,
+                "_fetch_remote_spec",
+                new_callable=AsyncMock,
+                return_value=_make_petstore_spec(),
+            ),
+            patch("forge_agent.builder.openapi.httpx.AsyncClient", return_value=mock_client),
+        ):
+            tools = await builder.build()
+            tools_by_name = {t.name: t for t in tools}
+            result = await tools_by_name["listPets"].function()
+
+        mock_client.request.assert_called_once()
+        assert result == [{"id": 1, "name": "Fluffy"}]
+
+    @pytest.mark.anyio
+    async def test_approval_operations_gates_only_listed_operation(self) -> None:
+        source = _make_source(approval_operations=["createPet"])
+        gate = ToolGate(ApprovalStore())
+        builder = OpenAPIToolBuilder(source, tool_gate=gate)
+
+        with (
+            patch.object(
+                builder,
+                "_fetch_remote_spec",
+                new_callable=AsyncMock,
+                return_value=_make_petstore_spec(),
+            ),
+            patch("forge_agent.builder.openapi.httpx.AsyncClient") as mock_client_cls,
+        ):
+            tools = await builder.build()
+            tools_by_name = {t.name: t for t in tools}
+            result = await tools_by_name["createPet"].function(body={"name": "Rex"})
+
+            assert result["status"] == "drafted"
+            mock_client_cls.assert_not_called()
+
+        mock_response = MagicMock()
+        mock_response.json.return_value = [{"id": 1, "name": "Fluffy"}]
+        mock_response.raise_for_status = MagicMock()
+        mock_client = AsyncMock()
+        mock_client.request.return_value = mock_response
+        mock_client.aclose.return_value = None
+
+        with patch("forge_agent.builder.openapi.httpx.AsyncClient", return_value=mock_client):
+            result = await tools_by_name["listPets"].function()
+
+        mock_client.request.assert_called_once()
+        assert result == [{"id": 1, "name": "Fluffy"}]
+
+    @pytest.mark.anyio
+    async def test_approval_operations_matches_legacy_route_key_form(self) -> None:
+        """`approval_operations` accepts the legacy "METHOD /path" key
+        form -- same dual-key convention as `route_map` -- not just
+        `operationId`."""
+        source = _make_source(approval_operations=["POST /pets"])
+        gate = ToolGate(ApprovalStore())
+        builder = OpenAPIToolBuilder(source, tool_gate=gate)
+
+        with (
+            patch.object(
+                builder,
+                "_fetch_remote_spec",
+                new_callable=AsyncMock,
+                return_value=_make_petstore_spec(),
+            ),
+            patch("forge_agent.builder.openapi.httpx.AsyncClient") as mock_client_cls,
+        ):
+            tools = await builder.build()
+            tools_by_name = {t.name: t for t in tools}
+            result = await tools_by_name["createPet"].function(body={"name": "Rex"})
+
+            assert result["status"] == "drafted"
+            mock_client_cls.assert_not_called()
+
+    @pytest.mark.anyio
+    async def test_gated_source_without_tool_gate_raises_at_build_time(self) -> None:
+        """Fail-closed (mirrors ManualToolBuilder): a gated source can
+        never be built as an ungated tool just because no ToolGate was
+        supplied to the registry."""
+        source = _make_source(requires_approval=True)
+        builder = OpenAPIToolBuilder(source)  # no tool_gate
+
+        with (
+            patch.object(
+                builder,
+                "_fetch_remote_spec",
+                new_callable=AsyncMock,
+                return_value=_make_petstore_spec(),
+            ),
+            pytest.raises(ValueError, match="requires_approval"),
+        ):
+            await builder.build()
+
+    @pytest.mark.anyio
+    async def test_approval_operations_without_tool_gate_raises_at_build_time(self) -> None:
+        source = _make_source(approval_operations=["createPet"])
+        builder = OpenAPIToolBuilder(source)  # no tool_gate
+
+        with (
+            patch.object(
+                builder,
+                "_fetch_remote_spec",
+                new_callable=AsyncMock,
+                return_value=_make_petstore_spec(),
+            ),
+            pytest.raises(ValueError, match="requires_approval"),
+        ):
+            await builder.build()
