@@ -362,13 +362,58 @@ forgeConfig:
     # session cookie exists. The config schema now rejects that combination.
     allowed_origins:
       - "https://forgeai.hvslocal"
+  # Several agents, each least-privilege-scoped to a tool subset (persona.tools
+  # is a hard filter enforced server-side: an agent literally cannot reach a tool
+  # outside its list — verified). This is the "forge several agents, compliant &
+  # secure" thesis: authoring a new agent is a config edit, not code, and each
+  # one only holds the capabilities it needs. `assistant` (the default) keeps the
+  # full surface; the others are specialists. All are passive (reactive) today;
+  # the passive/active lifecycle model is ADR-0005.
   agents:
     default: assistant
     agents:
       - name: assistant
-        description: "General-purpose assistant"
-        system_prompt: "You are a helpful assistant."
+        description: "General-purpose assistant with the full tool surface"
+        system_prompt: >-
+          You are Forge's general-purpose assistant. You have access to weather,
+          geolocation, GitHub, cryptocurrency, exchange-rate, and dictionary
+          tools. Use them when they help answer the user's question, and say so
+          plainly when a request is outside what your tools can do.
         max_turns: 10
+      - name: market-analyst
+        description: "Cryptocurrency & FX markets analyst (crypto + exchange rates only)"
+        system_prompt: >-
+          You are a markets analyst. Answer questions about cryptocurrency spot
+          prices and fiat exchange rates using the crypto_price and
+          exchange_rates tools. You are scoped to markets only — if asked about
+          anything else (weather, code, definitions), say it is outside your
+          remit and suggest the general assistant.
+        tools:
+          - crypto_price
+          - exchange_rates
+        max_turns: 8
+      - name: repo-scout
+        description: "GitHub repository analyst (github_repo only)"
+        system_prompt: >-
+          You are a GitHub repository analyst. Use the github_repo tool to report
+          a repository's description, primary language, stars, forks, and open
+          issues, and to compare repositories. You are scoped to public GitHub
+          repository metadata only; decline requests outside that scope.
+        tools:
+          - github_repo
+        max_turns: 8
+      - name: field-assistant
+        description: "Location & weather assistant (weather + geolocation only)"
+        system_prompt: >-
+          You are a field assistant for location and weather. Use get_weather,
+          geolocate_ip, and the weather_at_ip workflow to answer questions about
+          conditions at a place or IP address. You are scoped to weather and
+          geolocation; for anything else, point the user to the general assistant.
+        tools:
+          - get_weather
+          - geolocate_ip
+          - weather_at_ip
+        max_turns: 8
 
 # Mount the namespace hvslocal-ca-bundle ConfigMap so the OIDC clients trust
 # Dex (dex.hvslocal is served under the hvslocal Root CA, not a public CA).
