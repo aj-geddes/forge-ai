@@ -1,6 +1,7 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "./client";
 import { getActivity } from "./activity";
+import { listApprovals, approveApproval, rejectApproval } from "./approvals";
 import type {
   ForgeConfig,
   HealthResponse,
@@ -11,6 +12,7 @@ import type {
   PingPeerResponse,
   CreatePeerRequest,
 } from "@/types/config";
+import type { ApprovalDecisionResponse } from "@/types/approvals";
 
 const ACTIVITY_POLL_INTERVAL_MS = 4_000;
 const DEFAULT_ACTIVITY_LIMIT = 20;
@@ -25,6 +27,7 @@ export const queryKeys = {
   sessions: ["sessions"] as const,
   peers: ["peers"] as const,
   activity: (limit: number) => ["activity", limit] as const,
+  approvals: ["approvals"] as const,
 };
 
 // --- Queries ---
@@ -88,6 +91,24 @@ export function useActivity(limit: number = DEFAULT_ACTIVITY_LIMIT) {
     queryKey: queryKeys.activity(limit),
     queryFn: () => getActivity(limit),
     refetchInterval: ACTIVITY_POLL_INTERVAL_MS,
+    retry: false,
+  });
+}
+
+const APPROVALS_POLL_INTERVAL_MS = 4_000;
+
+/**
+ * Polls the human-in-the-loop approval queue (pending + recently decided
+ * requests, newest state from the backend) for the Dashboard hero and the
+ * Approvals page. `retry: false` so a caller lacking `config:read` surfaces
+ * as `isError` immediately -- callers render a quiet "unavailable" state
+ * (same posture as useActivity/useSessions/usePeers) rather than crashing.
+ */
+export function useApprovals() {
+  return useQuery({
+    queryKey: queryKeys.approvals,
+    queryFn: listApprovals,
+    refetchInterval: APPROVALS_POLL_INTERVAL_MS,
     retry: false,
   });
 }
@@ -169,6 +190,28 @@ export function useCreatePeer() {
       api.post<PeerAgent>("/v1/admin/peers", peer),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.peers });
+    },
+  });
+}
+
+export function useApproveApproval() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: (id: string): Promise<ApprovalDecisionResponse> => approveApproval(id),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.approvals });
+    },
+  });
+}
+
+export function useRejectApproval() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: (id: string): Promise<ApprovalDecisionResponse> => rejectApproval(id),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.approvals });
     },
   });
 }

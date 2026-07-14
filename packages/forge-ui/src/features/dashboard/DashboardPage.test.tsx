@@ -148,3 +148,90 @@ describe("DashboardPage health + config contract", () => {
     expect(cacheRow.querySelector("svg.text-destructive")).toBeInTheDocument();
   });
 });
+
+describe("DashboardPage approvals hero", () => {
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it("leads with the pending approvals queue as the hero, above Live activity", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((url: string) => {
+        if (url === "/v1/auth/me") {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: async () => ({
+              kind: "user",
+              sub: "u1",
+              groups: [],
+              roles: [],
+              permissions: ["agent:approve"],
+            }),
+          });
+        }
+        if (url === "/v1/admin/approvals") {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: async () => [
+              {
+                id: "appr_1",
+                tool_name: "social_publish",
+                arguments: { content: "Big launch today!", channel: "twitter" },
+                argument_hash: "h1",
+                requested_by: "marketing-agent",
+                run_id: "r1",
+                draft_summary: null,
+                created_at: new Date().toISOString(),
+                status: "pending",
+              },
+            ],
+          });
+        }
+        if (url === "/health/ready") {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: async () => ({ status: "ready", version: "1.0.0", components: {} }),
+          });
+        }
+        if (url === "/v1/admin/config") {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: async () => ({
+              path: "forge.yaml",
+              config: {
+                metadata: { name: "forge", version: "0.1.0", environment: "development" },
+                llm: { default_model: "gpt-4o", litellm: { mode: "embedded" } },
+                tools: { openapi_sources: [], manual_tools: [], workflows: [] },
+                agents: { default: "assistant", agents: [], peers: [] },
+              },
+            }),
+          });
+        }
+        return Promise.resolve({ ok: true, status: 200, json: async () => [] });
+      }),
+    );
+
+    renderDashboard();
+
+    expect(screen.getByRole("heading", { level: 2, name: /needs your approval/i })).toBeInTheDocument();
+
+    await waitFor(() => {
+      expect(screen.getByText(/Big launch today!/)).toBeInTheDocument();
+    });
+    expect(screen.getByText("marketing-agent")).toBeInTheDocument();
+
+    const headings = screen.getAllByRole("heading", { level: 2 });
+    const headingTexts = headings.map((h) => h.textContent?.toLowerCase() ?? "");
+    const approvalHeadingIndex = headingTexts.findIndex((t) => t.includes("needs your approval"));
+    const activityHeadingIndex = headingTexts.findIndex((t) => t.includes("live activity"));
+    expect(approvalHeadingIndex).toBeGreaterThanOrEqual(0);
+    expect(activityHeadingIndex).toBeGreaterThan(approvalHeadingIndex);
+  });
+});

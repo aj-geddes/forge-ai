@@ -244,12 +244,14 @@ function ChatArea() {
     activeSessionId,
     isLoading,
     pendingPrompt,
+    pendingAgent,
     createSession,
     addMessage,
     appendMessageContent,
     addToolCallToMessage,
     setLoading,
     setPendingPrompt,
+    setPendingAgent,
     setSessionAgent,
   } = useChatStore();
   const [input, setInput] = useState("");
@@ -284,6 +286,21 @@ function ChatArea() {
       setPendingPrompt(null);
     }
   }, [pendingPrompt, activeSessionId, createSession, setPendingPrompt]);
+
+  // The Dashboard's compact agent strip queues an agent via chatStore; on
+  // mount here we adopt it into a (possibly brand-new) session as that
+  // session's persona. Mirrors the pendingPrompt effect above, but the
+  // agent can only be applied once a concrete session id exists, so the
+  // queue is cleared one render later than the session-creation trigger.
+  useEffect(() => {
+    if (pendingAgent === null) return;
+    if (!activeSessionId) {
+      createSession();
+      return;
+    }
+    setSessionAgent(activeSessionId, pendingAgent);
+    setPendingAgent(null);
+  }, [pendingAgent, activeSessionId, createSession, setSessionAgent, setPendingAgent]);
 
   const handleSend = useCallback(async () => {
     if (!input.trim() || !activeSessionId || isLoading) return;

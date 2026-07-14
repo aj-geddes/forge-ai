@@ -114,6 +114,19 @@ describe("App -- route protection", () => {
     );
   });
 
+  it("renders the Approvals route for an authenticated user with config:read", async () => {
+    stubFetchWithAuth(["config:read"]);
+
+    renderApp(["/approvals"]);
+
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: /sign in with github/i })).not.toBeInTheDocument(),
+    );
+    await waitFor(() =>
+      expect(screen.getByRole("heading", { name: /approvals/i })).toBeInTheDocument(),
+    );
+  });
+
   it("shows a permission-denied state (not a login redirect) for an authenticated user missing the route's permission", async () => {
     const assign = vi.fn();
     Object.defineProperty(window, "location", {

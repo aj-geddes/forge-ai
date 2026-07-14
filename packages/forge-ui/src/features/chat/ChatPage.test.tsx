@@ -377,6 +377,25 @@ describe("ChatPage agent selection", () => {
     });
   });
 
+  it("adopts a pendingAgent queued by another page (e.g. the Dashboard agent strip) into a new session", async () => {
+    stubFetchSessionsConfigToolsAndChat({
+      chatEvents: ["[DONE]"],
+      agentsConfig: AGENTS_CONFIG,
+      tools: TOOLS,
+    });
+
+    useChatStore.getState().setPendingAgent("researcher");
+
+    renderChatPage();
+
+    const select = await screen.findByRole("combobox", { name: /agent/i });
+    await waitFor(() => {
+      expect(select).toHaveValue("researcher");
+    });
+
+    expect(useChatStore.getState().pendingAgent).toBeNull();
+  });
+
   it("defaults the selector to config.agents.default without requiring a choice", async () => {
     stubFetchSessionsConfigToolsAndChat({
       chatEvents: ["[DONE]"],

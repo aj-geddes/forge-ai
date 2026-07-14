@@ -34,6 +34,10 @@ interface ChatState {
    * to be dropped into the chat input on next mount. Transient -- never
    * persisted to localStorage (see `partialize` below). */
   pendingPrompt: string | null;
+  /** An agent name queued by another page (e.g. the Dashboard's compact
+   * agent strip) to pre-select for the next session. Transient -- never
+   * persisted to localStorage (see `partialize` below). */
+  pendingAgent: string | null;
   createSession: () => string;
   setActiveSession: (id: string) => void;
   /** Resume a session the server knows about but that isn't in local state
@@ -51,6 +55,9 @@ interface ChatState {
   setLoading: (loading: boolean) => void;
   /** Queue (or clear, with `null`) a prompt for the chat page to prefill. */
   setPendingPrompt: (prompt: string | null) => void;
+  /** Queue (or clear, with `null`) an agent for the chat page to
+   * pre-select on its next (possibly brand-new) session. */
+  setPendingAgent: (agent: string | null) => void;
   /** Persist which agent persona a session talks to (see the Agent
    * selector in ChatPage). */
   setSessionAgent: (sessionId: string, agent: string) => void;
@@ -83,6 +90,7 @@ export const useChatStore = create<ChatState>()(
       activeSessionId: null,
       isLoading: false,
       pendingPrompt: null,
+      pendingAgent: null,
 
       createSession: () => {
         const id = generateId();
@@ -134,6 +142,8 @@ export const useChatStore = create<ChatState>()(
       setLoading: (loading: boolean) => set({ isLoading: loading }),
 
       setPendingPrompt: (prompt: string | null) => set({ pendingPrompt: prompt }),
+
+      setPendingAgent: (agent: string | null) => set({ pendingAgent: agent }),
 
       setSessionAgent: (sessionId: string, agent: string) =>
         set((state) => ({

@@ -11,10 +11,12 @@ import {
   ChevronLeft,
   ChevronRight,
   Flame,
+  ClipboardCheck,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useUIStore } from "@/stores/uiStore";
 import { useAuth } from "@/api/auth";
+import { useApprovals } from "@/api/hooks";
 import { Separator } from "@/components/ui/separator";
 
 // `permission: null` means always visible once signed in (e.g. the guide).
@@ -22,6 +24,7 @@ import { Separator } from "@/components/ui/separator";
 // every request each page makes (ADR-0001 section 6).
 const navItems = [
   { to: "/", label: "Dashboard", icon: LayoutDashboard, permission: "config:read" },
+  { to: "/approvals", label: "Approvals", icon: ClipboardCheck, permission: "config:read" },
   { to: "/config", label: "Config", icon: Settings, permission: "config:read" },
   { to: "/tools", label: "Tools", icon: Wrench, permission: "config:read" },
   { to: "/chat", label: "Chat", icon: MessageSquare, permission: "agent:invoke" },
@@ -32,6 +35,26 @@ const navItems = [
   { to: "/api-keys", label: "API Keys", icon: KeyRound, permission: null },
   { to: "/guide", label: "Guide", icon: BookOpen, permission: null },
 ] as const;
+
+/** A small molten-amber pending-count pill on the Approvals nav item -- the
+ * sidebar's own "something needs you" signal. Renders nothing while
+ * loading, on error, or at zero (a quiet nav the rest of the time, per the
+ * Forge design's boldness budget). */
+function ApprovalsBadge() {
+  const { data: approvals } = useApprovals();
+  const pendingCount = (approvals ?? []).filter((a) => a.status === "pending").length;
+
+  if (pendingCount === 0) return null;
+
+  return (
+    <span
+      className="ml-auto flex h-5 min-w-5 shrink-0 items-center justify-center rounded-full bg-primary px-1.5 text-[10px] font-bold text-primary-foreground"
+      aria-label={`${pendingCount} pending approval${pendingCount === 1 ? "" : "s"}`}
+    >
+      {pendingCount}
+    </span>
+  );
+}
 
 export function Sidebar() {
   const { sidebarCollapsed, toggleSidebar } = useUIStore();
@@ -77,7 +100,12 @@ export function Sidebar() {
             title={sidebarCollapsed ? label : undefined}
           >
             <Icon className="h-4 w-4 shrink-0" />
-            {!sidebarCollapsed && <span>{label}</span>}
+            {!sidebarCollapsed && (
+              <>
+                <span>{label}</span>
+                {to === "/approvals" && <ApprovalsBadge />}
+              </>
+            )}
           </NavLink>
         ))}
       </nav>

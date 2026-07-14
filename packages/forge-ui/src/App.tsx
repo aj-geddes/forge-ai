@@ -29,6 +29,9 @@ const ApiKeysPage = lazy(() =>
 const GuidePage = lazy(() =>
   import("@/features/guide/GuidePage").then((m) => ({ default: m.GuidePage }))
 );
+const ApprovalsPage = lazy(() =>
+  import("@/features/approvals/ApprovalsPage").then((m) => ({ default: m.ApprovalsPage }))
+);
 
 function PageLoader() {
   return (
@@ -103,6 +106,14 @@ export function App() {
             element={
               <RequirePermission permission="config:read">
                 <SecurityPage />
+              </RequirePermission>
+            }
+          />
+          <Route
+            path="/approvals"
+            element={
+              <RequirePermission permission="config:read">
+                <ApprovalsPage />
               </RequirePermission>
             }
           />

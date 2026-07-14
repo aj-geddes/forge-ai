@@ -2,7 +2,7 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import { renderHook, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactNode } from "react";
-import { useToolPreview, usePingPeer, useCreatePeer, useActivity } from "./hooks";
+import { useToolPreview, usePingPeer, useCreatePeer, useActivity, useApprovals, useApproveApproval, useRejectApproval } from "./hooks";
 
 function wrapper({ children }: { children: ReactNode }) {
   const queryClient = new QueryClient({
@@ -198,5 +198,124 @@ describe("useActivity", () => {
 
     await waitFor(() => expect(result.current.isError).toBe(true));
     expect(result.current.data).toBeUndefined();
+  });
+});
+
+describe("useApprovals", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it("resolves the backend's bare ApprovalRequest[] array from /v1/admin/approvals", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => [
+        {
+          id: "appr_1",
+          tool_name: "social_publish",
+          arguments: { content: "hello", channel: "twitter" },
+          argument_hash: "h1",
+          requested_by: "assistant",
+          run_id: "run_1",
+          draft_summary: null,
+          created_at: "2026-07-12T00:00:00Z",
+          status: "pending",
+        },
+      ],
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { result } = renderHook(() => useApprovals(), { wrapper });
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+    expect(result.current.data).toEqual([
+      {
+        id: "appr_1",
+        tool_name: "social_publish",
+        arguments: { content: "hello", channel: "twitter" },
+        argument_hash: "h1",
+        requested_by: "assistant",
+        run_id: "run_1",
+        draft_summary: null,
+        created_at: "2026-07-12T00:00:00Z",
+        status: "pending",
+      },
+    ]);
+
+    const [url] = fetchMock.mock.calls[0] as [string];
+    expect(url).toBe("/v1/admin/approvals");
+  });
+
+  it("surfaces a 403 (caller lacking config:read) as isError without retrying", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 403,
+        json: async () => ({ detail: "Forbidden" }),
+      }),
+    );
+
+    const { result } = renderHook(() => useApprovals(), { wrapper });
+
+    await waitFor(() => expect(result.current.isError).toBe(true));
+    expect(result.current.data).toBeUndefined();
+  });
+});
+
+describe("useApproveApproval", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it("POSTs the approve endpoint for the given id and resolves the decision", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ id: "appr_1", status: "approved", result: { published: true } }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { result } = renderHook(() => useApproveApproval(), { wrapper });
+
+    result.current.mutate("appr_1");
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+    expect(result.current.data).toEqual({ id: "appr_1", status: "approved", result: { published: true } });
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("/v1/admin/approvals/appr_1/approve");
+    expect(init.method).toBe("POST");
+  });
+});
+
+describe("useRejectApproval", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it("POSTs the reject endpoint for the given id and resolves the decision", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ id: "appr_2", status: "rejected" }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { result } = renderHook(() => useRejectApproval(), { wrapper });
+
+    result.current.mutate("appr_2");
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+    expect(result.current.data).toEqual({ id: "appr_2", status: "rejected" });
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("/v1/admin/approvals/appr_2/reject");
+    expect(init.method).toBe("POST");
   });
 });

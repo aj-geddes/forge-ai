@@ -157,6 +157,44 @@ describe("chatStore pendingPrompt", () => {
   });
 });
 
+describe("chatStore pendingAgent", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    window.localStorage.clear();
+  });
+
+  afterEach(() => {
+    window.localStorage.clear();
+    vi.restoreAllMocks();
+  });
+
+  it("starts as null", async () => {
+    const { useChatStore } = await import("./chatStore");
+    expect(useChatStore.getState().pendingAgent).toBeNull();
+  });
+
+  it("setPendingAgent sets and clears the queued agent", async () => {
+    const { useChatStore } = await import("./chatStore");
+
+    useChatStore.getState().setPendingAgent("researcher");
+    expect(useChatStore.getState().pendingAgent).toBe("researcher");
+
+    useChatStore.getState().setPendingAgent(null);
+    expect(useChatStore.getState().pendingAgent).toBeNull();
+  });
+
+  it("does not persist pendingAgent across reload (transient)", async () => {
+    const { useChatStore: firstInstance } = await import("./chatStore");
+
+    firstInstance.getState().setPendingAgent("researcher");
+
+    vi.resetModules();
+    const { useChatStore: secondInstance } = await import("./chatStore");
+
+    expect(secondInstance.getState().pendingAgent).toBeNull();
+  });
+});
+
 describe("chatStore session agent selection", () => {
   beforeEach(() => {
     vi.resetModules();
