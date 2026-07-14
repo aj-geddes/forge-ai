@@ -10,7 +10,7 @@ image:
   repository: harbor.hvslocal/dev-aj-geddes/forge-ai
   # Immutable tag pinned to the commit the image was built from. Update this
   # (and re-push a new image) on every deploy -- never track :latest.
-  tag: "466a675"
+  tag: "2cc11ff"
   pullPolicy: IfNotPresent
 
 agent:
@@ -68,6 +68,14 @@ externalSecret:
       remoteRef:
         key: users/aj-geddes/app/forge-ai
         property: session_encryption_key
+    # Postiz Public API key (Settings -> Developers -> Public API), used by the
+    # social_* tools to publish through the self-hosted Postiz. Lives only in
+    # OpenBao at users/aj-geddes/app/postiz; the social_publish tool references it
+    # as ${POSTIZ_API_KEY}.
+    - secretKey: POSTIZ_API_KEY
+      remoteRef:
+        key: users/aj-geddes/app/postiz
+        property: postiz_api_key
 
 # Minimal, sensible forge.yaml. No secret values are embedded -- LLM API keys
 # are ${ENV_VAR} references resolved at process startup from the env vars
@@ -252,6 +260,75 @@ forgeConfig:
           url: "https://api.dictionaryapi.dev/api/v2/entries/en/{{word}}"
           method: GET
           timeout: 15.0
+      # --- Social publishing (self-hosted Postiz) ---
+      # Read-only: list the social channels connected in Postiz (Bluesky today).
+      # The agent uses this to discover channel ids/platforms. Not gated.
+      - name: social_channels
+        description: >-
+          List the social media channels connected in Postiz (e.g. Bluesky),
+          returning each channel's id, name, platform (identifier), and profile.
+          Use this to find the channel id to publish to.
+        parameters: []
+        api:
+          url: "http://postiz:5000/api/public/v1/integrations"
+          method: GET
+          timeout: 15.0
+          auth:
+            type: api_key
+            header_name: Authorization
+            token:
+              source: env
+              name: POSTIZ_API_KEY
+      # GATED (requires_approval): publishing is irreversible + outward-facing, so
+      # a call does NOT post — it drafts an approval request that a human must
+      # approve (agent:approve) before Postiz actually publishes. This is the
+      # draft -> approve -> publish governance from ADR-0005 6.2. `date` uses the
+      # {{__now__}} synthetic template so `type: now` publishes at approval time.
+      - name: social_publish
+        description: >-
+          Publish a text post to a connected social channel via Postiz. This
+          does NOT post immediately — it creates a draft that a human must
+          approve before it goes live. Provide the post text; channel_id and
+          platform default to the connected Bluesky account.
+        requires_approval: true
+        parameters:
+          - name: content
+            type: string
+            description: "The post text to publish"
+            required: true
+          - name: channel_id
+            type: string
+            description: "Postiz integration id of the target channel"
+            required: false
+            default: "cmrkn65we0001gk71twg8b9qq"
+          - name: platform
+            type: string
+            description: "Postiz platform identifier / settings __type"
+            required: false
+            default: "bluesky"
+        api:
+          url: "http://postiz:5000/api/public/v1/posts"
+          method: POST
+          timeout: 20.0
+          auth:
+            type: api_key
+            header_name: Authorization
+            token:
+              source: env
+              name: POSTIZ_API_KEY
+          body_template:
+            type: now
+            date: "{{__now__}}"
+            shortLink: false
+            tags: []
+            posts:
+              - integration:
+                  id: "{{channel_id}}"
+                value:
+                  - content: "{{content}}"
+                    image: []
+                settings:
+                  __type: "{{platform}}"
     workflows:
       # Composes two of the manual tools above: geolocate an IP, then fetch the
       # weather for the resulting city. Demonstrates step chaining via output_as
@@ -417,6 +494,27 @@ forgeConfig:
           - get_weather
           - geolocate_ip
           - weather_at_ip
+        max_turns: 8
+      # Social Manager: scoped to the Postiz social tools. Passive for now (you
+      # ask it to post); social_publish is GATED, so drafting a post parks an
+      # approval request and nothing goes live until a human approves. When the
+      # active runtime (ADR-0005 Phase 1) ships this persona can be flipped to
+      # active to draft/schedule on its own — still behind the same approval gate.
+      - name: social-manager
+        mode: passive
+        description: "Social media manager (Postiz publish, human-approved)"
+        system_prompt: >-
+          You are a social media manager. You can list connected social channels
+          with social_channels and publish posts with social_publish. IMPORTANT:
+          publishing does not go live immediately — social_publish creates a
+          draft that a human must approve before it is posted, so tell the user
+          you have drafted the post and it is awaiting their approval. Write
+          concise, platform-appropriate posts; do not fabricate engagement data
+          (you cannot read comments or metrics). You are scoped to social
+          publishing only.
+        tools:
+          - social_channels
+          - social_publish
         max_turns: 8
 
 # Mount the namespace hvslocal-ca-bundle ConfigMap so the OIDC clients trust
