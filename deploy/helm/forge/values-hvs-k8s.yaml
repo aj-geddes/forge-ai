@@ -373,6 +373,7 @@ forgeConfig:
     default: assistant
     agents:
       - name: assistant
+        mode: passive
         description: "General-purpose assistant with the full tool surface"
         system_prompt: >-
           You are Forge's general-purpose assistant. You have access to weather,
@@ -381,6 +382,7 @@ forgeConfig:
           plainly when a request is outside what your tools can do.
         max_turns: 10
       - name: market-analyst
+        mode: passive
         description: "Cryptocurrency & FX markets analyst (crypto + exchange rates only)"
         system_prompt: >-
           You are a markets analyst. Answer questions about cryptocurrency spot
@@ -393,6 +395,7 @@ forgeConfig:
           - exchange_rates
         max_turns: 8
       - name: repo-scout
+        mode: passive
         description: "GitHub repository analyst (github_repo only)"
         system_prompt: >-
           You are a GitHub repository analyst. Use the github_repo tool to report
@@ -403,6 +406,7 @@ forgeConfig:
           - github_repo
         max_turns: 8
       - name: field-assistant
+        mode: passive
         description: "Location & weather assistant (weather + geolocation only)"
         system_prompt: >-
           You are a field assistant for location and weather. Use get_weather,
