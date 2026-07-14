@@ -55,11 +55,16 @@ spec:
         app.kubernetes.io/name: postiz
         app.kubernetes.io/component: elasticsearch
     spec:
-      # Official elasticsearch image runs as uid 1000 (elasticsearch) itself;
-      # no runAsNonRoot override needed here (this namespace has no
-      # restricted PodSecurity label), matching the pragmatic approach
+      # Official elasticsearch image runs as uid 1000 (elasticsearch) itself.
+      # Longhorn provisions fresh volumes root-owned, so without fsGroup the
+      # elasticsearch user gets AccessDeniedException creating
+      # /usr/share/elasticsearch/data/nodes on first boot; fsGroup makes the
+      # kubelet chown the mounted volume to gid 1000 before the container
+      # starts. No further runAsNonRoot override needed (this namespace has
+      # no restricted PodSecurity label), matching the pragmatic approach
       # postiz.yaml already takes for its own upstream image.
-      #
+      securityContext:
+        fsGroup: 1000
       # No initContainers here: ES normally needs the HOST kernel's
       # vm.max_map_count raised to >=262144 (mmap-based storage), which is
       # not something a namespaced workload can do without a privileged
