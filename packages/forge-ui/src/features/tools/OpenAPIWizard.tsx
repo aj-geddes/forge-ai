@@ -212,7 +212,7 @@ function SelectStep() {
       case "GET":
         return "bg-emerald-100 text-emerald-800 dark:bg-emerald-900/30 dark:text-emerald-400";
       case "POST":
-        return "bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400";
+        return "bg-stone-200 text-stone-800 dark:bg-stone-800/50 dark:text-stone-300";
       case "PUT":
         return "bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-400";
       case "PATCH":

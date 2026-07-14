@@ -1,60 +1,75 @@
 @import "tailwindcss";
+@import "@fontsource-variable/archivo";
+@import "@fontsource-variable/jetbrains-mono";
 
 @custom-variant dark (&:is(.dark *));
 
+/*
+ * "Forge" theme -- warm iron near-black, molten amber accent, ember alerts.
+ * No blue or purple anywhere: every hue below sits in warm amber/orange/ember
+ * (~30-75), warm low-chroma neutral (~60-75), or green (~150), which is
+ * reserved for "healthy/success" status only.
+ */
 :root {
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.145 0 0);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.145 0 0);
-  --primary: oklch(0.205 0.064 285.89);
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.97 0 0);
-  --secondary-foreground: oklch(0.205 0.064 285.89);
-  --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.556 0 0);
-  --accent: oklch(0.97 0 0);
-  --accent-foreground: oklch(0.205 0.064 285.89);
-  --destructive: oklch(0.577 0.245 27.325);
-  --border: oklch(0.922 0 0);
-  --input: oklch(0.922 0 0);
-  --ring: oklch(0.708 0.165 254.624);
+  --background: oklch(0.98 0.006 78);
+  --foreground: oklch(0.20 0.01 60);
+  --card: oklch(0.995 0.004 80);
+  --card-foreground: oklch(0.20 0.01 60);
+  --popover: oklch(0.995 0.004 80);
+  --popover-foreground: oklch(0.20 0.01 60);
+  --primary: oklch(0.62 0.17 55);
+  --primary-foreground: oklch(0.99 0.01 80);
+  --secondary: oklch(0.95 0.006 75);
+  --secondary-foreground: oklch(0.20 0.01 60);
+  --muted: oklch(0.95 0.006 75);
+  --muted-foreground: oklch(0.48 0.015 62);
+  --accent: oklch(0.93 0.02 65);
+  --accent-foreground: oklch(0.20 0.01 60);
+  --destructive: oklch(0.55 0.20 30);
+  --border: oklch(0.90 0.006 70);
+  --input: oklch(0.90 0.006 70);
+  --ring: oklch(0.62 0.17 55);
+  /* Semantic "healthy/success" green -- the only sanctioned non-amber hue. */
+  --healthy: oklch(0.55 0.16 150);
   --radius: 0.625rem;
-  --sidebar: oklch(0.985 0 0);
-  --sidebar-foreground: oklch(0.145 0 0);
-  --sidebar-primary: oklch(0.205 0.064 285.89);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.97 0 0);
-  --sidebar-accent-foreground: oklch(0.205 0.064 285.89);
-  --sidebar-border: oklch(0.922 0 0);
-  --sidebar-ring: oklch(0.708 0.165 254.624);
+  --sidebar: oklch(0.96 0.006 76);
+  --sidebar-foreground: oklch(0.20 0.01 60);
+  --sidebar-primary: oklch(0.62 0.17 55);
+  --sidebar-primary-foreground: oklch(0.99 0.01 80);
+  --sidebar-accent: oklch(0.93 0.02 65);
+  --sidebar-accent-foreground: oklch(0.20 0.01 60);
+  --sidebar-border: oklch(0.90 0.006 70);
+  --sidebar-ring: oklch(0.62 0.17 55);
 }
 
 .dark {
-  --background: oklch(0.145 0 0);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.205 0 0);
-  --card-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.708 0.165 254.624);
-  --primary-foreground: oklch(0.145 0 0);
-  --secondary: oklch(0.269 0 0);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0 0);
-  --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.269 0 0);
-  --accent-foreground: oklch(0.985 0 0);
-  --destructive: oklch(0.704 0.191 22.216);
-  --border: oklch(0.3 0 0);
-  --input: oklch(0.3 0 0);
-  --ring: oklch(0.708 0.165 254.624);
-  --sidebar: oklch(0.205 0 0);
-  --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: oklch(0.708 0.165 254.624);
-  --sidebar-primary-foreground: oklch(0.145 0 0);
-  --sidebar-accent: oklch(0.269 0 0);
-  --sidebar-accent-foreground: oklch(0.985 0 0);
-  --sidebar-border: oklch(0.3 0 0);
-  --sidebar-ring: oklch(0.708 0.165 254.624);
+  --background: oklch(0.17 0.006 60);
+  --foreground: oklch(0.92 0.01 75);
+  --card: oklch(0.215 0.008 60);
+  --card-foreground: oklch(0.92 0.01 75);
+  --popover: oklch(0.215 0.008 60);
+  --popover-foreground: oklch(0.92 0.01 75);
+  --primary: oklch(0.72 0.17 58);
+  --primary-foreground: oklch(0.18 0.02 60);
+  --secondary: oklch(0.27 0.008 60);
+  --secondary-foreground: oklch(0.92 0.01 75);
+  --muted: oklch(0.27 0.006 60);
+  --muted-foreground: oklch(0.70 0.02 72);
+  --accent: oklch(0.32 0.03 55);
+  --accent-foreground: oklch(0.95 0.01 75);
+  --destructive: oklch(0.60 0.20 30);
+  --border: oklch(0.31 0.008 60);
+  --input: oklch(0.31 0.008 60);
+  --ring: oklch(0.72 0.17 58);
+  --healthy: oklch(0.72 0.17 150);
+  --sidebar: oklch(0.15 0.006 60);
+  --sidebar-foreground: oklch(0.92 0.01 75);
+  --sidebar-primary: oklch(0.72 0.17 58);
+  --sidebar-primary-foreground: oklch(0.18 0.02 60);
+  --sidebar-accent: oklch(0.27 0.008 60);
+  --sidebar-accent-foreground: oklch(0.92 0.01 75);
+  --sidebar-border: oklch(0.28 0.008 60);
+  --sidebar-ring: oklch(0.72 0.17 58);
 }
 
 @theme inline {
@@ -62,6 +77,8 @@
   --color-foreground: var(--foreground);
   --color-card: var(--card);
   --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
   --color-primary: var(--primary);
   --color-primary-foreground: var(--primary-foreground);
   --color-secondary: var(--secondary);
@@ -74,6 +91,7 @@
   --color-border: var(--border);
   --color-input: var(--input);
   --color-ring: var(--ring);
+  --color-healthy: var(--healthy);
   --color-sidebar: var(--sidebar);
   --color-sidebar-foreground: var(--sidebar-foreground);
   --color-sidebar-primary: var(--sidebar-primary);
@@ -86,6 +104,11 @@
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
   --radius-xl: calc(var(--radius) + 4px);
+  /* Industrial grotesque for nameplates/eyebrows; bundled offline via
+     @fontsource-variable, no runtime CDN (the cluster is offline). */
+  --font-display: "Archivo Variable", ui-sans-serif, system-ui, sans-serif;
+  /* Telemetry feed + code, also bundled offline. */
+  --font-mono: "JetBrains Mono Variable", ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
 body {
@@ -104,4 +127,40 @@ body {
 
 * {
   border-color: var(--border);
+}
+
+/* Molten amber "alive" pulse -- used by the agent hero's status dot. */
+@keyframes molten-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in oklch, var(--primary) 45%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 0 8px color-mix(in oklch, var(--primary) 0%, transparent);
+  }
+}
+
+.animate-molten-pulse {
+  animation: molten-pulse 2s ease-in-out infinite;
+}
+
+/* Brief molten highlight for a freshly-arrived activity feed row. */
+@keyframes activity-highlight {
+  0% {
+    background-color: color-mix(in oklch, var(--primary) 25%, transparent);
+  }
+  100% {
+    background-color: transparent;
+  }
+}
+
+.animate-activity-highlight {
+  animation: activity-highlight 1.5s ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-molten-pulse,
+  .animate-activity-highlight {
+    animation: none;
+  }
 }

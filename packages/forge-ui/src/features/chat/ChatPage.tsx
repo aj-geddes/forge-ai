@@ -241,10 +241,13 @@ function ChatArea() {
     sessions,
     activeSessionId,
     isLoading,
+    pendingPrompt,
+    createSession,
     addMessage,
     appendMessageContent,
     addToolCallToMessage,
     setLoading,
+    setPendingPrompt,
   } = useChatStore();
   const [input, setInput] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -258,6 +261,21 @@ function ChatArea() {
   useEffect(() => {
     scrollToBottom();
   }, [activeSession?.messages.length, scrollToBottom]);
+
+  // A "Try it" chip on the Dashboard queues a prompt via chatStore; on
+  // mount here we adopt it into a (possibly brand-new) session and drop it
+  // into the input for the user to review/send, then clear the queue so it
+  // never re-fires on a later visit. Not auto-sent -- the user still
+  // confirms by pressing Send/Enter.
+  useEffect(() => {
+    if (pendingPrompt !== null) {
+      if (!activeSessionId) {
+        createSession();
+      }
+      setInput(pendingPrompt);
+      setPendingPrompt(null);
+    }
+  }, [pendingPrompt, activeSessionId, createSession, setPendingPrompt]);
 
   const handleSend = useCallback(async () => {
     if (!input.trim() || !activeSessionId || isLoading) return;

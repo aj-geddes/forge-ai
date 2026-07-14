@@ -21,14 +21,14 @@ const darkTheme = EditorView.theme(
       color: "oklch(0.985 0 0)",
     },
     ".cm-content": {
-      caretColor: "oklch(0.708 0.165 254.624)",
+      caretColor: "oklch(0.72 0.17 58)",
     },
     ".cm-cursor, .cm-dropCursor": {
-      borderLeftColor: "oklch(0.708 0.165 254.624)",
+      borderLeftColor: "oklch(0.72 0.17 58)",
     },
     "&.cm-focused .cm-selectionBackground, .cm-selectionBackground, .cm-content ::selection":
       {
-        backgroundColor: "oklch(0.3 0.05 254.624 / 0.4)",
+        backgroundColor: "oklch(0.4 0.1 58 / 0.4)",
       },
     ".cm-gutters": {
       backgroundColor: "oklch(0.17 0 0)",

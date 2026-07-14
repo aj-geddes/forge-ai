@@ -118,3 +118,41 @@ describe("chatStore resumeSession", () => {
     expect(state.sessions[0]!.messages).toHaveLength(1);
   });
 });
+
+describe("chatStore pendingPrompt", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    window.localStorage.clear();
+  });
+
+  afterEach(() => {
+    window.localStorage.clear();
+    vi.restoreAllMocks();
+  });
+
+  it("starts as null", async () => {
+    const { useChatStore } = await import("./chatStore");
+    expect(useChatStore.getState().pendingPrompt).toBeNull();
+  });
+
+  it("setPendingPrompt sets and clears the queued prompt", async () => {
+    const { useChatStore } = await import("./chatStore");
+
+    useChatStore.getState().setPendingPrompt("What's the weather in Tokyo?");
+    expect(useChatStore.getState().pendingPrompt).toBe("What's the weather in Tokyo?");
+
+    useChatStore.getState().setPendingPrompt(null);
+    expect(useChatStore.getState().pendingPrompt).toBeNull();
+  });
+
+  it("does not persist pendingPrompt across reload (transient)", async () => {
+    const { useChatStore: firstInstance } = await import("./chatStore");
+
+    firstInstance.getState().setPendingPrompt("Define serendipity");
+
+    vi.resetModules();
+    const { useChatStore: secondInstance } = await import("./chatStore");
+
+    expect(secondInstance.getState().pendingPrompt).toBeNull();
+  });
+});

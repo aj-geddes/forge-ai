@@ -1,5 +1,6 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "./client";
+import { getActivity } from "./activity";
 import type {
   ForgeConfig,
   HealthResponse,
@@ -11,6 +12,9 @@ import type {
   CreatePeerRequest,
 } from "@/types/config";
 
+const ACTIVITY_POLL_INTERVAL_MS = 4_000;
+const DEFAULT_ACTIVITY_LIMIT = 20;
+
 // --- Query Keys ---
 
 export const queryKeys = {
@@ -20,6 +24,7 @@ export const queryKeys = {
   tools: ["tools"] as const,
   sessions: ["sessions"] as const,
   peers: ["peers"] as const,
+  activity: (limit: number) => ["activity", limit] as const,
 };
 
 // --- Queries ---
@@ -68,6 +73,22 @@ export function usePeers() {
   return useQuery({
     queryKey: queryKeys.peers,
     queryFn: () => api.get<PeerAgent[]>("/v1/admin/peers"),
+  });
+}
+
+/**
+ * Polls the admin activity feed (recent tool calls, newest-first) for the
+ * Dashboard's Live Activity telemetry log. `retry: false` so a non-admin
+ * caller's 403 surfaces as `isError` immediately instead of retry-looping --
+ * the feed then renders a quiet "unavailable" state rather than crashing
+ * (same posture as useSessions/usePeers for callers lacking admin reads).
+ */
+export function useActivity(limit: number = DEFAULT_ACTIVITY_LIMIT) {
+  return useQuery({
+    queryKey: queryKeys.activity(limit),
+    queryFn: () => getActivity(limit),
+    refetchInterval: ACTIVITY_POLL_INTERVAL_MS,
+    retry: false,
   });
 }
 

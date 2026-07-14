@@ -25,6 +25,10 @@ interface ChatState {
   sessions: ChatSession[];
   activeSessionId: string | null;
   isLoading: boolean;
+  /** A prompt queued by another page (e.g. the Dashboard's "Try it" chips)
+   * to be dropped into the chat input on next mount. Transient -- never
+   * persisted to localStorage (see `partialize` below). */
+  pendingPrompt: string | null;
   createSession: () => string;
   setActiveSession: (id: string) => void;
   /** Resume a session the server knows about but that isn't in local state
@@ -40,6 +44,8 @@ interface ChatState {
     toolCall: ToolCallRecord,
   ) => void;
   setLoading: (loading: boolean) => void;
+  /** Queue (or clear, with `null`) a prompt for the chat page to prefill. */
+  setPendingPrompt: (prompt: string | null) => void;
 }
 
 function generateId(): string {
@@ -68,6 +74,7 @@ export const useChatStore = create<ChatState>()(
       sessions: [],
       activeSessionId: null,
       isLoading: false,
+      pendingPrompt: null,
 
       createSession: () => {
         const id = generateId();
@@ -117,6 +124,8 @@ export const useChatStore = create<ChatState>()(
         })),
 
       setLoading: (loading: boolean) => set({ isLoading: loading }),
+
+      setPendingPrompt: (prompt: string | null) => set({ pendingPrompt: prompt }),
     }),
     {
       name: CHAT_STORE_KEY,

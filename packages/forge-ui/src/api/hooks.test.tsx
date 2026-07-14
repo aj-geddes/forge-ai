@@ -2,7 +2,7 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import { renderHook, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactNode } from "react";
-import { useToolPreview, usePingPeer, useCreatePeer } from "./hooks";
+import { useToolPreview, usePingPeer, useCreatePeer, useActivity } from "./hooks";
 
 function wrapper({ children }: { children: ReactNode }) {
   const queryClient = new QueryClient({
@@ -136,5 +136,67 @@ describe("useCreatePeer", () => {
       capabilities: ["data_query"],
       spiffe_id: "spiffe://forge.local/peer/data-forge",
     });
+  });
+});
+
+
+describe("useActivity", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it("resolves the backend's {activity: ActivityEntry[]} shape to a bare array, polling /v1/admin/activity", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        activity: [
+          {
+            tool: "get_weather",
+            arguments: { city: "SF" },
+            ok: true,
+            timestamp: "2026-01-01T00:00:00Z",
+            session_id: "s1",
+            interface: "chat",
+          },
+        ],
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { result } = renderHook(() => useActivity(), { wrapper });
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+    expect(result.current.data).toEqual([
+      {
+        tool: "get_weather",
+        arguments: { city: "SF" },
+        ok: true,
+        timestamp: "2026-01-01T00:00:00Z",
+        session_id: "s1",
+        interface: "chat",
+      },
+    ]);
+
+    const [url] = fetchMock.mock.calls[0] as [string];
+    expect(url).toBe("/v1/admin/activity?limit=20");
+  });
+
+  it("surfaces a 403 (non-admin caller) as isError without retrying, instead of crashing", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 403,
+        json: async () => ({ detail: "Forbidden" }),
+      }),
+    );
+
+    const { result } = renderHook(() => useActivity(), { wrapper });
+
+    await waitFor(() => expect(result.current.isError).toBe(true));
+    expect(result.current.data).toBeUndefined();
   });
 });
