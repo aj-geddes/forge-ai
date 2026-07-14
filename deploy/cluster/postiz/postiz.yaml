@@ -103,10 +103,20 @@ spec:
           resources:
             requests:
               cpu: 500m
-              memory: 768Mi
+              memory: 1Gi
             limits:
               cpu: "1500m"
-              memory: 2Gi
+              # Bumped from 2Gi after observing repeated OOMKilled (exit 137)
+              # once Temporal's visibility store stopped crash-looping the
+              # container early: past that point, the bundled orchestrator
+              # process webpack-compiles a ~3MB workflow bundle per supported
+              # social-platform task queue (dribbble, discord, slack, kick,
+              # twitch, mastodon, ... ~30 platforms) sequentially on every
+              # boot, on top of the Next.js frontend and Nest backend also
+              # running in this same single-pod, three-process (pm2)
+              # container. 2Gi wasn't enough headroom for all three
+              # processes' peak startup memory at once.
+              memory: 3Gi
           # No dedicated health endpoint documented; mirrors the upstream
           # docker-compose healthcheck (GET / expecting a non-5xx response).
           # Generous startupProbe budget: first boot runs Prisma migrations
