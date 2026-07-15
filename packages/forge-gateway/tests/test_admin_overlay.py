@@ -28,11 +28,12 @@ from typing import Any
 import httpx
 import pytest
 import yaml
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from forge_config.schema import ForgeConfig, ServiceToken
 from forge_config.writable_store import OverlayStore
 from forge_gateway import security
-from forge_gateway.routes import admin
+from forge_gateway.routes import admin, conversational, programmatic
+from forge_gateway.routes.persona import resolve_persona
 from forge_security.oidc import Authorizer, ServiceTokenVerifier
 
 VALID_API_KEY = "forge_sk_admin-test_abcdefghijklmnopqrstuvwxyz0123456789ABCD"
@@ -1301,3 +1302,50 @@ class TestReadPathsNeverLeakResolvedSecrets:
             admin.set_state(
                 config=None, config_path="", agent=None, overlay_store=None, base_path=""
             )
+
+
+@pytest.mark.usefixtures("_wire_auth")
+class TestRuntimeConfigPropagation:
+    """DEFECT 1 regression: a mutation that persists to the overlay must
+    ALSO propagate the new effective config to the in-process persona
+    resolvers used by the conversational and programmatic chat routes --
+    with NO filesystem event -- so a newly-created agent is immediately
+    chat-resolvable instead of returning 404 'Unknown agent persona' (the
+    running runtime otherwise keeps the stale startup config for persona
+    resolution)."""
+
+    async def test_created_agent_is_resolvable_by_persona_resolvers_in_process(
+        self,
+        async_client: httpx.AsyncClient,
+        auth_headers: dict[str, str],
+        overlay_env: Any,
+    ) -> None:
+        # Simulate the startup state: both persona resolvers hold the base
+        # config, which has no 'researcher' persona yet.
+        base_config = admin._config
+        conversational.set_config(base_config)
+        programmatic.set_config(base_config)
+        try:
+            # Precondition: the new persona is unknown to the resolver.
+            with pytest.raises(HTTPException):
+                resolve_persona("researcher", conversational._config)
+
+            resp = await async_client.post(
+                "/v1/admin/agents", json=_agent("researcher"), headers=auth_headers
+            )
+            assert resp.status_code == 201
+
+            # No filesystem event occurred. The mutation itself must have
+            # published the new effective config to the conversational AND
+            # programmatic resolvers so chatting with the new persona resolves
+            # in-process rather than 404-ing.
+            persona = resolve_persona("researcher", conversational._config)
+            assert persona is not None
+            assert persona.name == "researcher"
+
+            persona_prog = resolve_persona("researcher", programmatic._config)
+            assert persona_prog is not None
+            assert persona_prog.name == "researcher"
+        finally:
+            conversational.set_config(None)
+            programmatic.set_config(None)

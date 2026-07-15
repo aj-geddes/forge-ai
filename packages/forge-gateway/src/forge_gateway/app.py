@@ -85,6 +85,36 @@ def _load_effective_or_plain_config(seed_path: str, overlay_path: str | None) ->
     return load_config(seed_path)
 
 
+def apply_effective_config_in_process(
+    new_config: ForgeConfig,
+    agent: object | None,
+    *,
+    config_path: str,
+) -> None:
+    """Publish an already-validated effective ``ForgeConfig`` to EVERY
+    in-process runtime consumer, so a runtime config edit goes live without
+    a process restart.
+
+    Updates, in order: admin state (its own ``_config``), the programmatic
+    and conversational persona resolvers (so a newly-created agent is
+    immediately chat-resolvable instead of 404 "Unknown agent persona"), the
+    auth subsystem, and the A2A agent card.
+
+    Intentionally does NOT rebuild the tool surface -- that differs by
+    caller (the disk-watch path schedules an async rebuild; the admin
+    mutation path awaits ``build_and_swap`` to report ``reloaded`` in its
+    response), so each caller owns the tool rebuild itself. Shared by
+    :func:`_make_reload_callback._on_config_change` and
+    ``forge_gateway.routes.admin.apply_overlay_mutation`` so the two
+    propagation paths can never drift.
+    """
+    admin.set_state(config=new_config, config_path=config_path)
+    programmatic.set_config(new_config)
+    conversational.set_config(new_config)
+    _schedule_auth_reinit(new_config)
+    _refresh_agent_card(new_config, agent)
+
+
 def _make_reload_callback(
     config_path: str,
     agent: object | None = None,
@@ -111,16 +141,16 @@ def _make_reload_callback(
             new_config = _load_effective_or_plain_config(config_path, overlay_path)
             logger.info("Reloaded config: %s", new_config.metadata.name)
 
-            # Preserve the current agent reference across config reloads
-            admin.set_state(config=new_config, config_path=config_path)
-            programmatic.set_config(new_config)
-            conversational.set_config(new_config)
-            _schedule_auth_reinit(new_config)
+            # Publish the reloaded effective config to every in-process
+            # runtime consumer (admin state, the conversational/programmatic
+            # persona resolvers, auth, and the A2A agent card). Shared with
+            # apply_overlay_mutation's post-persist path via
+            # apply_effective_config_in_process so the two cannot drift.
+            apply_effective_config_in_process(new_config, agent, config_path=config_path)
 
-            # Schedule async tool surface + MCP rebuild
+            # Schedule async tool surface + MCP rebuild (owned by the caller;
+            # the disk-watch path rebuilds asynchronously).
             _schedule_tool_rebuild(new_config, agent)
-
-            _refresh_agent_card(new_config, agent)
         except Exception:
             logger.exception("Failed to reload config from %s", changed_path)
 
@@ -773,7 +803,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                     base_watcher = ConfigWatcher(config_path, on_change=callback)
                     base_watcher.start()
                     watchers.append(base_watcher)
-                if overlay_path and Path(overlay_path).exists():
+                if overlay_path:
+                    # The overlay file typically does NOT exist yet at startup
+                    # (no runtime edits made), and its parent dir (e.g.
+                    # /app/data/overlay) may not exist at all. ConfigWatcher
+                    # watches the parent DIRECTORY, so create it first and start
+                    # the watcher unconditionally -- otherwise the first-ever
+                    # overlay write (a create/atomic-replace, which emits
+                    # on_created/on_moved rather than on_modified) is never
+                    # observed, and scheduling a watch on a missing dir fails.
+                    Path(overlay_path).parent.mkdir(parents=True, exist_ok=True)
                     overlay_watcher = ConfigWatcher(overlay_path, on_change=callback)
                     overlay_watcher.start()
                     watchers.append(overlay_watcher)

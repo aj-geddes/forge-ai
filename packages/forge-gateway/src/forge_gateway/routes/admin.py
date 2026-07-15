@@ -178,7 +178,6 @@ async def apply_overlay_mutation(
         409 -- *expected_rev* does not match the current rev.
         507 -- the durable overlay write failed (OSError). Never swallowed.
     """
-    global _config
     if _config is not None and _config.admin.mutation_policy == MutationPolicy.DISABLED:
         raise HTTPException(
             status_code=405,
@@ -365,13 +364,33 @@ async def apply_overlay_mutation(
                 }
             )
 
-            # Publish the new in-memory config INSIDE the lock, in the
-            # same serialized order as the durable write: two concurrent
-            # mutations must never let the LATER-releasing request's
-            # config overwrite the config from the request that actually
-            # produced the higher rev (a bare post-lock assignment would
-            # race on the order the event loop resumes each coroutine).
-            _config = new_effective_config
+            # Publish the new effective config to EVERY in-process runtime
+            # consumer INSIDE the lock, in the same serialized order as the
+            # durable write: admin's own _config, the conversational and
+            # programmatic persona resolvers (so a newly-created agent is
+            # immediately chat-resolvable instead of 404 "Unknown agent
+            # persona"), the auth subsystem, and the A2A agent card. Two
+            # concurrent mutations must never let the LATER-releasing
+            # request's config overwrite the config from the request that
+            # actually produced the higher rev (a bare post-lock assignment
+            # would race on the order the event loop resumes each coroutine).
+            # Routed through the shared apply_effective_config_in_process so
+            # this and the disk-watch reload callback cannot drift; it is
+            # fully synchronous (no await), so holding the lock across it is
+            # safe. Wrapped so a propagation glitch can never fail an
+            # already-persisted, already-audited mutation.
+            try:
+                from forge_gateway.app import (  # noqa: PLC0415
+                    apply_effective_config_in_process,
+                )
+
+                apply_effective_config_in_process(
+                    new_effective_config, _agent, config_path=_config_path
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to propagate new effective config in-process after mutation"
+                )
     except HTTPException:
         raise
     except OSError as e:
@@ -381,13 +400,10 @@ async def apply_overlay_mutation(
     assert new_effective_config is not None  # noqa: S101 -- set on every non-exceptional path above
     assert new_state is not None  # noqa: S101
 
-    try:
-        from forge_gateway.app import _schedule_auth_reinit  # noqa: PLC0415
-
-        _schedule_auth_reinit(new_effective_config)
-    except Exception:
-        logger.exception("Failed to schedule auth subsystem reinit after config mutation")
-
+    # Auth reinit, persona-resolver propagation, and the A2A agent-card
+    # refresh already happened in-process INSIDE the lock above (via
+    # apply_effective_config_in_process). The awaited tool rebuild stays
+    # here so its result can populate the response's ``reloaded`` field.
     reloaded = False
     if _agent is not None:
         try:

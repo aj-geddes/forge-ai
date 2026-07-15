@@ -7,14 +7,28 @@ import logging
 from collections.abc import Callable
 from pathlib import Path
 
-from watchdog.events import FileModifiedEvent, FileSystemEventHandler
+from watchdog.events import (
+    FileCreatedEvent,
+    FileModifiedEvent,
+    FileMovedEvent,
+    FileSystemEventHandler,
+)
 from watchdog.observers import Observer
 
 logger = logging.getLogger(__name__)
 
 
 class _DebouncedHandler(FileSystemEventHandler):
-    """Watchdog handler that debounces rapid file changes."""
+    """Watchdog handler that debounces rapid file changes.
+
+    Fires the callback on ``on_modified`` AND on ``on_created`` /
+    ``on_moved``: an atomic write (``tempfile.mkstemp`` -> ``os.replace``,
+    as used by ``writable_store`` for the config overlay and by the user
+    token store) does NOT emit an ``on_modified`` whose ``src_path`` is the
+    target -- on Linux inotify it emits an ``on_moved`` (``dest_path`` ==
+    target) and/or an ``on_created`` -- so a handler that only watched
+    ``on_modified`` never observed an overlay write.
+    """
 
     def __init__(
         self,
@@ -28,10 +42,15 @@ class _DebouncedHandler(FileSystemEventHandler):
         self._timer: asyncio.TimerHandle | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
 
-    def on_modified(self, event: FileModifiedEvent) -> None:  # type: ignore[override]
-        if event.is_directory:
-            return
-        if Path(str(event.src_path)).resolve() != self._target:
+    def _schedule_if_target(self, path_str: str) -> None:
+        """Debounce+fire the callback when *path_str* resolves to the watched
+        target; ignore any other path in the parent directory.
+
+        With no running event loop (e.g. a synchronous test dispatch) the
+        callback is invoked directly; otherwise it is scheduled via
+        ``loop.call_later`` and coalesced with any pending timer.
+        """
+        if Path(path_str).resolve() != self._target:
             return
 
         if self._loop is None:
@@ -49,6 +68,24 @@ class _DebouncedHandler(FileSystemEventHandler):
             self._callback,
             self._target,
         )
+
+    def on_modified(self, event: FileModifiedEvent) -> None:  # type: ignore[override]
+        if event.is_directory:
+            return
+        self._schedule_if_target(str(event.src_path))
+
+    def on_created(self, event: FileCreatedEvent) -> None:  # type: ignore[override]
+        if event.is_directory:
+            return
+        self._schedule_if_target(str(event.src_path))
+
+    def on_moved(self, event: FileMovedEvent) -> None:  # type: ignore[override]
+        if event.is_directory:
+            return
+        # An atomic replace surfaces as a move whose DEST is the target
+        # (the temp file is the src); fall back to src_path defensively.
+        dest = getattr(event, "dest_path", "") or event.src_path
+        self._schedule_if_target(str(dest))
 
 
 class ConfigWatcher:
