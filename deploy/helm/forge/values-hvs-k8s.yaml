@@ -10,7 +10,7 @@ image:
   repository: harbor.hvslocal/dev-aj-geddes/forge-ai
   # Immutable tag pinned to the commit the image was built from. Update this
   # (and re-push a new image) on every deploy -- never track :latest.
-  tag: "f1e002c"
+  tag: "cb8e365"
   pullPolicy: IfNotPresent
 
 agent:
