@@ -1563,6 +1563,73 @@ class TestPhase1RedactionResiduals:
                 config=None, config_path="", agent=None, overlay_store=None, base_path=""
             )
 
+    #: A resolved secret that CONTAINS whitespace. Long enough that ``yaml.dump``
+    #: FOLDS it across lines (inserting ``\n`` + indent AT a space) inside the
+    #: promotion diff -- so it no longer appears as a contiguous substring.
+    _SPACE_CANARY = (
+        "sk live CANARY topsecret residual value long enough to fold "
+        "across the yaml output lines here"
+    )
+
+    async def test_promotion_diff_redacts_whitespace_folded_secret(
+        self,
+        async_client: httpx.AsyncClient,
+        auth_headers: dict[str, str],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """RESIDUAL (whitespace folding): a resolved secret that CONTAINS spaces,
+        smuggled into an editable free-text field DIRECTLY on disk (out-of-band of
+        the write guard, simulating a compromised host), is FOLDED across lines by
+        ``yaml.dump`` when the promotion diff is rendered. A contiguous substring
+        match misses the folded value and leaks it in cleartext; the
+        whitespace-tolerant redaction must blank it in BOTH the diff and PR body.
+        RED before the fix (fragments ``CANARY``/``topsecret``/``residual`` leak),
+        GREEN after."""
+        store = _wire(_seeded_config(), tmp_path)
+        monkeypatch.setenv("LEGIT_TOOL_KEY", self._SPACE_CANARY)
+        base_raw = load_raw_config_dict(str(tmp_path / "forge.yaml"))
+        base_editable = editable_sections(base_raw)
+        overlay_doc = {
+            "agents": {
+                "agents": [
+                    {
+                        "name": "smuggler",
+                        "model": "base-model",
+                        # Surrounding text ("keep it safe...") is NOT secret and
+                        # must survive; only the canary substring is blanked.
+                        "system_prompt": (
+                            f"...the key is {self._SPACE_CANARY} keep it safe and secure always..."
+                        ),
+                    }
+                ]
+            },
+            "_rev": 1,
+            "_base_rev": compute_base_rev(base_editable),
+            "_updated_by": "attacker",
+            "_updated_at": "2026-01-01T00:00:00+00:00",
+        }
+        store.overlay_path.parent.mkdir(parents=True, exist_ok=True)
+        store.overlay_path.write_text(yaml.dump(overlay_doc))
+        try:
+            resp = await async_client.get("/v1/admin/config/promotion/diff", headers=auth_headers)
+            assert resp.status_code == 200
+            body = resp.json()
+            # The whole secret (folded across lines) is gone -- as are the
+            # distinctive canary-only fragments that a contiguous match leaked.
+            assert self._SPACE_CANARY not in body["diff"]
+            assert self._SPACE_CANARY not in body["pr_body"]
+            for token in ("CANARY", "topsecret", "residual"):
+                assert token not in body["diff"], f"leaked secret fragment: {token}"
+                assert token not in body["pr_body"], f"leaked secret fragment: {token}"
+            # Non-secret surrounding text and the agent name are preserved.
+            assert "smuggler" in body["diff"]
+            assert "keep it safe and secure always" in body["diff"]
+        finally:
+            admin.set_state(
+                config=None, config_path="", agent=None, overlay_store=None, base_path=""
+            )
+
     async def test_peers_redacts_secret_in_capability(
         self,
         async_client: httpx.AsyncClient,

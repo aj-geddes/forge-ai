@@ -10,6 +10,7 @@ caller.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 _REDACTED = "***REDACTED***"
@@ -134,6 +135,23 @@ def scrub_text(value: str, known_values: frozenset[str] | None) -> str:
     return _REDACTED if _contains_known_secret(value, known_values) else value
 
 
+#: Inter-chunk gap pattern used by :func:`redact_text`. It stands in for a run
+#: of whitespace INSIDE a secret and is tolerant of the two ways that whitespace
+#: survives into the rendered promotion diff:
+#:
+#: * ``yaml.dump`` FOLDS a long plain scalar across lines AT WHITESPACE, turning
+#:   a single space into ``\n`` + indentation -- matched by the leading ``\s+``.
+#: * ``difflib.unified_diff`` then prefixes every physical line (including a
+#:   folded continuation) with a ``+`` / ``-`` / space marker, so the gap can be
+#:   ``\n+      `` -- a diff marker sitting mid-whitespace. ``(?:[+-]\s+)*`` lets
+#:   the gap swallow that marker (and its trailing indent) too.
+#:
+#: For an UNFOLDED single space the tail group matches zero times, so the gap is
+#: just ``\s+`` -- and a whitespace-free secret has no gaps at all, giving a
+#: plain contiguous literal match identical to the prior ``str.replace``.
+_WHITESPACE_GAP = r"\s+(?:[+-]\s+)*"
+
+
 def redact_text(value: str, known_values: frozenset[str] | None) -> str:
     """Replace every occurrence of a known resolved secret SUBSTRING in *value*
     with :data:`REDACTED_VALUE`, returning the scrubbed string.
@@ -143,10 +161,22 @@ def redact_text(value: str, known_values: frozenset[str] | None) -> str:
     multi-line document (the git-promotion diff / PR body) where wholesale
     replacement would destroy legitimate, non-secret content. It closes the
     residual where ``GET /config/promotion/diff`` rendered a resolved secret that
-    a prior overlay had smuggled into an editable free-text field."""
+    a prior overlay had smuggled into an editable free-text field.
+
+    Robust to WHITESPACE FOLDING: the promotion diff is ``yaml.dump``-ed and then
+    ``difflib``-ed, and a resolved secret that CONTAINS whitespace no longer
+    appears as a contiguous substring once PyYAML folds it across lines (and
+    difflib prefixes the continuation). Each run of whitespace WITHIN the secret
+    is therefore matched by :data:`_WHITESPACE_GAP` (any whitespace, plus an
+    optional diff continuation marker) while the non-whitespace chunks are matched
+    literally. A secret with NO internal whitespace yields a single escaped chunk
+    -- a plain contiguous match, IDENTICAL to the prior ``str.replace`` behaviour,
+    so benign text is not over-redacted."""
     if not known_values:
         return value
     for secret in known_values:
-        if secret in value:
-            value = value.replace(secret, _REDACTED)
+        chunks = [re.escape(part) for part in re.split(r"\s+", secret) if part]
+        if not chunks:
+            continue
+        value = re.sub(_WHITESPACE_GAP.join(chunks), _REDACTED, value)
     return value
