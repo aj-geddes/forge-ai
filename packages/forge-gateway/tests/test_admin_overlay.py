@@ -29,6 +29,7 @@ import httpx
 import pytest
 import yaml
 from fastapi import FastAPI, HTTPException
+from forge_config.loader import compute_base_rev, editable_sections, load_raw_config_dict
 from forge_config.schema import ForgeConfig, ServiceToken
 from forge_config.writable_store import OverlayStore
 from forge_gateway import security
@@ -925,6 +926,144 @@ class TestDriftAndPromotion:
 
 
 @pytest.mark.usefixtures("_wire_auth")
+class TestReadPathSelfHealsNoopScaffold:
+    """**BUG REPRODUCTION**: the write-path fix (``compact_overlay`` applied
+    in ``apply_overlay_mutation``) only self-heals a structurally-empty
+    no-op scaffold (e.g. ``{"agents": {"agents": []}}`` left behind by a
+    create-then-delete of a runtime-only agent) on the NEXT mutation. A pod
+    that BOOTS with such a scaffold already sitting on its PVC -- written by
+    a prior process, never touched by this process -- must self-heal on the
+    READ path too: GET /config and GET /config/promotion/diff must report
+    drift_from_git=False and an empty diff with NO mutation ever occurring
+    in this process. These tests write the no-op scaffold directly to the
+    overlay store's file (bypassing ``apply_overlay_mutation`` entirely) to
+    simulate exactly that boot condition."""
+
+    def _write_noop_scaffold(self, base_dir: Path, store: OverlayStore) -> None:
+        base_raw = load_raw_config_dict(str(base_dir / "forge.yaml"))
+        base_editable = editable_sections(base_raw)
+        overlay_doc = {
+            "agents": {"agents": []},
+            "_rev": 3,
+            "_base_rev": compute_base_rev(base_editable),
+            "_updated_by": "prior-session",
+            "_updated_at": "2026-01-01T00:00:00+00:00",
+        }
+        store.overlay_path.parent.mkdir(parents=True, exist_ok=True)
+        store.overlay_path.write_text(yaml.dump(overlay_doc))
+
+    async def test_get_config_self_heals_stuck_noop_scaffold_on_boot(
+        self,
+        async_client: httpx.AsyncClient,
+        auth_headers: dict[str, str],
+        overlay_env: tuple[Path, OverlayStore],
+    ) -> None:
+        base_path, store = overlay_env
+        self._write_noop_scaffold(base_path.parent, store)
+
+        resp = await async_client.get("/v1/admin/config", headers=auth_headers)
+        assert resp.status_code == 200
+        assert resp.json()["drift_from_git"] is False
+
+    async def test_promotion_diff_is_empty_for_stuck_noop_scaffold_on_boot(
+        self,
+        async_client: httpx.AsyncClient,
+        auth_headers: dict[str, str],
+        overlay_env: tuple[Path, OverlayStore],
+    ) -> None:
+        base_path, store = overlay_env
+        self._write_noop_scaffold(base_path.parent, store)
+
+        resp = await async_client.get("/v1/admin/config/promotion/diff", headers=auth_headers)
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["diff"] == ""
+        assert body["drift_from_git"] is False
+
+    def test_load_effective_config_equals_base_for_noop_scaffold(self, tmp_path: Path) -> None:
+        """The in-memory effective config agrees with the self-healed drift:
+        loading BASE + a no-op-scaffold overlay yields exactly BASE."""
+        from forge_config.loader import load_effective_config
+
+        config = _forge_config()
+        base_path = tmp_path / "forge.yaml"
+        base_raw = config.model_dump(mode="json", exclude_none=True)
+        base_path.write_text(yaml.dump(base_raw))
+
+        overlay_path = tmp_path / "forge.overlay.yaml"
+        overlay_path.write_text(
+            yaml.dump(
+                {
+                    "agents": {"agents": []},
+                    "_base_rev": compute_base_rev(base_raw),
+                }
+            )
+        )
+
+        effective = load_effective_config(base_path, overlay_path)
+        base_effective = load_effective_config(base_path, None)
+        assert effective.model_dump(mode="json") == base_effective.model_dump(mode="json")
+
+    async def test_real_overlay_entry_still_reports_drift_true(
+        self,
+        async_client: httpx.AsyncClient,
+        auth_headers: dict[str, str],
+        overlay_env: tuple[Path, OverlayStore],
+    ) -> None:
+        """NEGATIVE: an overlay with REAL content (an actual agent entry,
+        not a structurally-empty scaffold) must keep reporting drift=True
+        on the read path -- compaction must never mask real, un-promoted
+        changes."""
+        base_path, store = overlay_env
+        base_raw = load_raw_config_dict(str(base_path))
+        base_editable = editable_sections(base_raw)
+        overlay_doc = {
+            "agents": {"agents": [{"name": "researcher", "model": "base-model"}]},
+            "_rev": 1,
+            "_base_rev": compute_base_rev(base_editable),
+            "_updated_by": "prior-session",
+            "_updated_at": "2026-01-01T00:00:00+00:00",
+        }
+        store.overlay_path.parent.mkdir(parents=True, exist_ok=True)
+        store.overlay_path.write_text(yaml.dump(overlay_doc))
+
+        resp = await async_client.get("/v1/admin/config", headers=auth_headers)
+        assert resp.json()["drift_from_git"] is True
+
+        diff_resp = await async_client.get("/v1/admin/config/promotion/diff", headers=auth_headers)
+        diff_body = diff_resp.json()
+        assert diff_body["drift_from_git"] is True
+        assert "researcher" in diff_body["diff"]
+
+    async def test_real_tombstone_referencing_base_still_reports_drift_true(
+        self,
+        async_client: httpx.AsyncClient,
+        auth_headers: dict[str, str],
+        seeded_env: Path,
+    ) -> None:
+        """NEGATIVE: a tombstone that still deletes a name present in BASE is
+        a REAL instruction (not a no-op), so it must keep reporting drift."""
+        from forge_gateway.routes import admin as admin_module
+
+        store = admin_module._overlay_store
+        assert store is not None
+        base_raw = load_raw_config_dict(str(seeded_env / "forge.yaml"))
+        base_editable = editable_sections(base_raw)
+        overlay_doc = {
+            "agents": {"agents": [{"__deleted__": "assistant"}]},
+            "_rev": 1,
+            "_base_rev": compute_base_rev(base_editable),
+            "_updated_by": "prior-session",
+            "_updated_at": "2026-01-01T00:00:00+00:00",
+        }
+        store.overlay_path.parent.mkdir(parents=True, exist_ok=True)
+        store.overlay_path.write_text(yaml.dump(overlay_doc))
+
+        resp = await async_client.get("/v1/admin/config", headers=auth_headers)
+        assert resp.json()["drift_from_git"] is True
+
+
+@pytest.mark.usefixtures("_wire_auth")
 class TestHistoryAndRevert:
     async def test_history_lists_applied_mutations_newest_first(
         self, async_client: httpx.AsyncClient, auth_headers: dict[str, str], overlay_env: Any
@@ -1332,6 +1471,172 @@ class TestReadPathsNeverLeakResolvedSecrets:
             resp = await async_client.get("/v1/admin/agents/assistant", headers=auth_headers)
             assert resp.status_code == 200
             assert self._CANARY not in resp.text
+        finally:
+            admin.set_state(
+                config=None, config_path="", agent=None, overlay_store=None, base_path=""
+            )
+
+
+@pytest.mark.usefixtures("_wire_auth")
+class TestPhase1RedactionResiduals:
+    """**SECURITY** [MEDIUM] Phase-1 residuals hardening.
+
+    A) Write-scrub/read-redaction asymmetry. ``_scrub_resolved_secrets`` (write
+       time) rejected a leaf only on EXACT equality with a known secret, while
+       the read-path value-scan matches on SUBSTRING containment -- so a known
+       secret embedded inside a larger free-text string passed the write gate.
+       And ``GET /config/promotion/diff`` built its diff/PR body directly from
+       raw editable dicts with NO redaction, surfacing such a value in cleartext.
+       Both are now closed: the write scrub is substring-based and the promotion
+       output runs the resolved-value scan.
+    B) ``GET /peers`` was unredacted -- now runs the same key-name + resolved
+       value substring scan as the other read paths.
+    """
+
+    _CANARY = "sk-live-CANARY-RESIDUAL-8Q-not-a-real-key"
+
+    async def test_embedded_secret_substring_in_system_prompt_is_rejected(
+        self,
+        async_client: httpx.AsyncClient,
+        auth_headers: dict[str, str],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """RESIDUAL A, write side: a known resolved BASE secret embedded as a
+        SUBSTRING of a free-text ``system_prompt`` is rejected 400 (exact-equality
+        scrub previously accepted it)."""
+        monkeypatch.setenv("LEGIT_TOOL_KEY", self._CANARY)
+        _wire(_seeded_config(), tmp_path)
+        try:
+            resp = await async_client.post(
+                "/v1/admin/agents",
+                json=_agent("smuggler", system_prompt=f"...the key is {self._CANARY} keep it..."),
+                headers=auth_headers,
+            )
+            assert resp.status_code == 400
+            assert "secret" in resp.json()["detail"].lower()
+        finally:
+            admin.set_state(
+                config=None, config_path="", agent=None, overlay_store=None, base_path=""
+            )
+
+    async def test_promotion_diff_never_returns_embedded_secret(
+        self,
+        async_client: httpx.AsyncClient,
+        auth_headers: dict[str, str],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """RESIDUAL A, read side: even when a PRIOR overlay smuggled the canary
+        into a free-text field, the promotion diff + PR body blank it."""
+        store = _wire(_seeded_config(), tmp_path)
+        monkeypatch.setenv("LEGIT_TOOL_KEY", self._CANARY)
+        base_raw = load_raw_config_dict(str(tmp_path / "forge.yaml"))
+        base_editable = editable_sections(base_raw)
+        overlay_doc = {
+            "agents": {
+                "agents": [
+                    {
+                        "name": "smuggler",
+                        "model": "base-model",
+                        "system_prompt": f"...the key is {self._CANARY} keep it...",
+                    }
+                ]
+            },
+            "_rev": 1,
+            "_base_rev": compute_base_rev(base_editable),
+            "_updated_by": "attacker",
+            "_updated_at": "2026-01-01T00:00:00+00:00",
+        }
+        store.overlay_path.parent.mkdir(parents=True, exist_ok=True)
+        store.overlay_path.write_text(yaml.dump(overlay_doc))
+        try:
+            resp = await async_client.get("/v1/admin/config/promotion/diff", headers=auth_headers)
+            assert resp.status_code == 200
+            body = resp.json()
+            assert self._CANARY not in body["diff"]
+            assert self._CANARY not in body["pr_body"]
+            # the smuggled agent still appears -- only the secret substring is blanked
+            assert "smuggler" in body["diff"]
+        finally:
+            admin.set_state(
+                config=None, config_path="", agent=None, overlay_store=None, base_path=""
+            )
+
+    async def test_peers_redacts_secret_in_capability(
+        self,
+        async_client: httpx.AsyncClient,
+        auth_headers: dict[str, str],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """RESIDUAL B: a canary planted in a peer ``capabilities`` entry is
+        blanked on the GET /peers read path."""
+        monkeypatch.setenv("LEGIT_TOOL_KEY", self._CANARY)
+        cfg = _seeded_config(
+            agents={
+                "default": "assistant",
+                "agents": [{"name": "assistant", "model": "base-model"}],
+                "peers": [
+                    {
+                        "name": "p1",
+                        "endpoint": "https://p1.example.com",
+                        "trust_level": "low",
+                        "capabilities": [f"can do {self._CANARY} things"],
+                    }
+                ],
+            }
+        )
+        _wire(cfg, tmp_path)
+        try:
+            resp = await async_client.get("/v1/admin/peers", headers=auth_headers)
+            assert resp.status_code == 200
+            assert self._CANARY not in resp.text
+        finally:
+            admin.set_state(
+                config=None, config_path="", agent=None, overlay_store=None, base_path=""
+            )
+
+    async def test_normal_promotion_diff_is_not_over_redacted(
+        self, async_client: httpx.AsyncClient, auth_headers: dict[str, str], overlay_env: Any
+    ) -> None:
+        """NEGATIVE: a diff with no secrets renders unchanged (no over-redaction)."""
+        await async_client.post("/v1/admin/agents", json=_agent("researcher"), headers=auth_headers)
+        resp = await async_client.get("/v1/admin/config/promotion/diff", headers=auth_headers)
+        body = resp.json()
+        assert "researcher" in body["diff"]
+        assert "***REDACTED***" not in body["diff"]
+        assert "***REDACTED***" not in body["pr_body"]
+        assert body["drift_from_git"] is True
+
+    async def test_normal_peers_response_is_not_over_redacted(
+        self, async_client: httpx.AsyncClient, auth_headers: dict[str, str], tmp_path: Path
+    ) -> None:
+        """NEGATIVE: a /peers response with no secrets renders unchanged."""
+        cfg = _seeded_config(
+            agents={
+                "default": "assistant",
+                "agents": [{"name": "assistant", "model": "base-model"}],
+                "peers": [
+                    {
+                        "name": "p1",
+                        "endpoint": "https://p1.example.com",
+                        "trust_level": "low",
+                        "capabilities": ["search", "summarize"],
+                    }
+                ],
+            }
+        )
+        _wire(cfg, tmp_path)
+        try:
+            resp = await async_client.get("/v1/admin/peers", headers=auth_headers)
+            assert resp.status_code == 200
+            peers = resp.json()
+            p1 = next(p for p in peers if p["name"] == "p1")
+            assert p1["capabilities"] == ["search", "summarize"]
+            assert p1["endpoint"] == "https://p1.example.com"
+            assert p1["trust_level"] == "low"
+            assert "***REDACTED***" not in resp.text
         finally:
             admin.set_state(
                 config=None, config_path="", agent=None, overlay_store=None, base_path=""

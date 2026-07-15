@@ -92,7 +92,7 @@ After the field-level split, no overlay-editable field is a legitimate secret si
 - a literal `${VAR}` or `${VAR:default}` string (matched by the same `_ENV_PATTERN` the loader uses to substitute env vars, including one embedded inside a larger string), or
 - a structured `SecretRef` mapping (`{"source": "env" | "k8s_secret", "name": ..., "key": ...}`).
 
-Secrets are therefore never editable at runtime, full stop -- there is no allowlist of "already-referenced" secrets a caller may still write; every reference must be promoted via git. Separately, `_scrub_resolved_secrets` rejects (`400`) any string leaf that is **exactly** an already-resolved BASE secret value (`os.environ.get(...)` for every `env` `SecretRef` reachable from BASE) -- catching a literal paste of the real key rather than a reference to it.
+Secrets are therefore never editable at runtime, full stop -- there is no allowlist of "already-referenced" secrets a caller may still write; every reference must be promoted via git. Separately, `_scrub_resolved_secrets` rejects (`400`) any string leaf that **contains** an already-resolved BASE secret value as a substring (`os.environ.get(...)` for every `env` `SecretRef` reachable from BASE, `>=8`-char values) -- catching a literal paste of the real key, including one embedded inside a larger free-text field, rather than a reference to it.
 
 **Source:** `packages/forge-gateway/src/forge_gateway/routes/admin.py` (`_reject_secret_refs_in_overlay`, `_find_secret_ref_paths`, `_scrub_resolved_secrets`)
 
@@ -114,11 +114,11 @@ No git write happens anywhere in this pod, and the pod holds zero git credential
 
 **Source:** `packages/forge-gateway/src/forge_gateway/routes/admin.py` (`get_promotion_diff`)
 
-## Known residuals (non-blocking)
+## Closed residuals (hardened)
 
-Two gaps are tracked for hardening rather than blocking; both require an attacker to already possess the secret's cleartext value, so neither is a novel disclosure primitive:
+Two previously-tracked gaps -- both requiring an attacker to already possess the secret's cleartext value, so neither was a novel disclosure primitive -- are now closed as defense-in-depth:
 
-- **Write-scrub/read-redaction asymmetry.** `_scrub_resolved_secrets` (write time) rejects a leaf only on **exact equality** with a known secret value; `redact_secrets`'s value-scan (read time, most paths) matches on **substring containment**. A known secret embedded inside a larger free-text string (e.g. `"...the key is sk-abc123..."` in a `system_prompt`) can therefore pass the write-time scrub. `GET /config/promotion/diff` builds its diff text directly from raw editable-section dicts and does not call `redact_secrets` at all, so such a value would surface unredacted there (unlike `GET /config`/`GET /agents`, which would catch it via substring matching).
-- **`GET /peers` is unredacted.** `list_peers` returns `AdminPeerResponse` fields (`name`, `endpoint`, `trust_level`, `capabilities`, `spiffe_id`) directly, with no `redact_secrets` pass. No current `PeerAgent` field is secret-shaped or secret-named, but `capabilities` round-trips visibly and the endpoint offers no structural guarantee against a future secret-bearing field being added without updating this route.
+- **Write-scrub/read-redaction asymmetry (closed).** `_scrub_resolved_secrets` (write time) now rejects a leaf that **contains** a known resolved BASE secret value as a **substring** -- mirroring `redact_secrets`'s read-path value-scan -- so a secret embedded inside a larger free-text string (e.g. `"...the key is sk-abc123..."` in a `system_prompt`) is rejected at write time rather than accepted. It reuses `_resolved_secret_values(base_raw)` (the same `>=8`-char floor as the read scan) to avoid over-rejecting on a trivially-common short substring. Separately, `GET /config/promotion/diff` now runs the resolved-value scan (`redaction.redact_text`) over **both** the diff text and the PR body, blanking any resolved literal a prior overlay smuggled into an editable free-text field. The diff is still built from the **unsubstituted** `base_raw` (secrets appear only as `${VAR}` there); the scan is the additional net for a resolved literal.
+- **`GET /peers` redaction (closed).** `list_peers` now runs the same key-name + resolved-value substring scan (`redact_secrets` with `known_values`) as the other read paths before serializing each `AdminPeerResponse`, so a secret-shaped or secret-valued string in e.g. `capabilities` is blanked on read.
 
-**Source:** `packages/forge-gateway/src/forge_gateway/routes/admin.py` (`get_promotion_diff`, `list_peers`)
+**Source:** `packages/forge-gateway/src/forge_gateway/routes/admin.py` (`get_promotion_diff`, `list_peers`, `_scrub_resolved_secrets`), `packages/forge-gateway/src/forge_gateway/redaction.py` (`redact_text`)

@@ -532,7 +532,16 @@ def load_effective_config(
             base_editable=editable_sections(base_raw),
             overlay_base_rev=overlay_base_rev,
         )
-        merged = deep_merge(base_raw, pruned)
+        # ALWAYS-SAFE structural compaction (see compact_overlay's
+        # docstring): drops any by-name collection reduced to an empty
+        # list (e.g. {"agents": {"agents": []}}), regardless of whether
+        # BASE has moved. Applied here too -- not just at mutation time in
+        # forge_gateway.routes.admin.apply_overlay_mutation -- so the
+        # LOADED effective config and the drift computed from the same
+        # overlay content (admin.get_config / get_promotion_diff, which
+        # also call compact_overlay) always agree.
+        compacted = compact_overlay(pruned)
+        merged = deep_merge(base_raw, compacted)
 
     if env_overlay:
         merged = _substitute_env_vars(merged)

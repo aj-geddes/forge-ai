@@ -294,7 +294,10 @@ async def apply_overlay_mutation(
             _validate_overlay_peers(new_overlay_content, principal)
 
             try:
-                known_secrets = _known_resolved_secret_values(base_raw)
+                # RESIDUAL A (write side): SUBSTRING scrub over the >=8-char-
+                # floored resolved-secret set -- mirrors the read-path value-scan
+                # so a secret embedded inside a larger free-text leaf cannot pass.
+                known_secrets = _resolved_secret_values(base_raw)
                 _scrub_resolved_secrets(new_overlay_content, known_secrets)
             except ValueError as e:
                 raise HTTPException(status_code=400, detail=str(e)) from e
@@ -580,32 +583,20 @@ def _restore_secret_refs(
     _restore_secret_refs_at(patch, base_raw, current_overlay_content, [])
 
 
-def _known_resolved_secret_values(base_raw: dict[str, Any]) -> set[str]:
-    """Every env-resolved value of a ``SecretRef`` reachable from BASE --
-    used by :func:`_scrub_resolved_secrets` to reject a pasted literal."""
-    values: set[str] = set()
+def _scrub_resolved_secrets(node: Any, known_secrets: frozenset[str], path: str = "$") -> None:
+    """Reject (raise ``ValueError``) any string leaf in *node* that CONTAINS a
+    known resolved secret value -- the overlay must only ever contain
+    ``${ENV_VAR}``/``SecretRef`` references, never a resolved value someone
+    pasted directly, even embedded as a SUBSTRING of a larger free-text field
+    (e.g. ``"...the key is <secret>..."`` in an agent ``system_prompt``).
 
-    def _walk(node: Any) -> None:
-        if isinstance(node, dict):
-            if node.get("source") == "env" and isinstance(node.get("name"), str):
-                val = os.environ.get(node["name"])
-                if val:
-                    values.add(val)
-            for v in node.values():
-                _walk(v)
-        elif isinstance(node, list):
-            for item in node:
-                _walk(item)
-
-    _walk(base_raw)
-    return values
-
-
-def _scrub_resolved_secrets(node: Any, known_secrets: set[str], path: str = "$") -> None:
-    """Reject (raise ``ValueError``) any string leaf in *node* that
-    equals a known resolved secret value -- the overlay must only ever
-    contain ``${ENV_VAR}``/``SecretRef`` references, never a resolved
-    value someone pasted directly."""
+    This SUBSTRING match mirrors the read-path value-scan
+    (:func:`redaction._contains_known_secret`); the prior exact-equality gate let
+    such an embedded literal through the write path while the read path blanked
+    it -- an asymmetry that surfaced the value in cleartext via the (previously
+    unredacted) promotion diff. *known_secrets* is
+    :func:`_resolved_secret_values` (the ``>=8``-char-floored set) so a
+    trivially-common short substring does not over-reject."""
     if not known_secrets:
         return
     if isinstance(node, dict):
@@ -617,7 +608,7 @@ def _scrub_resolved_secrets(node: Any, known_secrets: set[str], path: str = "$")
     elif isinstance(node, list):
         for i, item in enumerate(node):
             _scrub_resolved_secrets(item, known_secrets, f"{path}[{i}]")
-    elif isinstance(node, str) and node in known_secrets:
+    elif isinstance(node, str) and any(secret in node for secret in known_secrets):
         msg = (
             f"a literal secret value was found at {path} -- use a ${{ENV_VAR}} "
             "reference or SecretRef instead of pasting a resolved secret"
@@ -905,7 +896,13 @@ async def get_config(response: Response) -> AdminConfigResponse:
                     base_editable=editable_sections(base_raw),
                     overlay_base_rev=overlay_raw.get("_base_rev"),
                 )
-                drift = bool(pruned)
+                # READ-PATH self-heal: mirror the write path's ALWAYS-SAFE
+                # structural compaction (see apply_overlay_mutation) so a
+                # no-op scaffold already sitting on disk at BOOT (e.g. a
+                # create-then-delete runtime-only agent from a prior
+                # process) reports drift_from_git=False immediately,
+                # instead of staying stuck True until the next mutation.
+                drift = bool(compact_overlay(pruned))
             except ConfigLoadError:
                 drift = bool(overlay_content)
 
@@ -971,7 +968,12 @@ async def get_promotion_diff() -> PromotionDiffResponse:
     pruned = prune_noop_overlay(
         overlay_content, base_editable=base_editable, overlay_base_rev=overlay_raw.get("_base_rev")
     )
-    merged_editable = deep_merge(base_editable, pruned)
+    # READ-PATH self-heal: same ALWAYS-SAFE structural compaction as
+    # get_config/apply_overlay_mutation, so a no-op scaffold on disk at
+    # BOOT yields an empty promotion diff and drift_from_git=False below,
+    # not just after the next mutation touches the overlay.
+    compacted = compact_overlay(pruned)
+    merged_editable = deep_merge(base_editable, compacted)
 
     base_yaml = yaml.dump(base_editable, sort_keys=True, default_flow_style=False).splitlines(
         keepends=True
@@ -985,6 +987,14 @@ async def get_promotion_diff() -> PromotionDiffResponse:
         )
     )
 
+    # RESIDUAL A (read side): the diff + PR body are built from UNSUBSTITUTED
+    # base_raw, so a secret still appears only as ${VAR} there. But a resolved
+    # secret LITERAL that a prior overlay smuggled into an editable free-text
+    # field (an agent system_prompt) would surface in cleartext -- run the
+    # read-path resolved-value scan over both texts (mirrors GET /config).
+    known_values = _resolved_secret_values(base_raw)
+    diff_text = redaction.redact_text(diff_text, known_values)
+
     pr_body = (
         f"## Promote Forge config overlay (rev {rev})\n\n"
         "Auto-generated from the running instance's config overlay. Paste this "
@@ -995,8 +1005,9 @@ async def get_promotion_diff() -> PromotionDiffResponse:
         "are pruned automatically on next load -- drift_from_git returns to "
         "zero without any further action.\n"
     )
+    pr_body = redaction.redact_text(pr_body, known_values)
     return PromotionDiffResponse(
-        diff=diff_text, pr_body=pr_body, rev=rev, base_rev=base_rev, drift_from_git=bool(pruned)
+        diff=diff_text, pr_body=pr_body, rev=rev, base_rev=base_rev, drift_from_git=bool(compacted)
     )
 
 
@@ -1577,21 +1588,28 @@ async def get_activity(
     dependencies=[_read],
 )
 async def list_peers() -> list[AdminPeerResponse]:
-    """List peers with connection status."""
+    """List peers with connection status.
+
+    RESIDUAL B: applies the same read-path redaction as the other admin GETs
+    (key-name + resolved-value substring scan) before serializing, so a
+    secret-shaped or secret-valued string in e.g. ``capabilities`` is blanked
+    and no future secret-bearing peer field silently leaks through this route."""
     if _config is None:
         return []
 
-    return [
-        AdminPeerResponse(
-            name=peer.name,
-            endpoint=peer.endpoint,
-            trust_level=peer.trust_level.value,
-            capabilities=peer.capabilities,
-            spiffe_id=peer.spiffe_id,
-            status=AdminPeerStatus.UNKNOWN,
-        )
-        for peer in _config.agents.peers
-    ]
+    known_values = _resolved_secret_values(_read_base_raw_or_empty())
+    peers: list[AdminPeerResponse] = []
+    for peer in _config.agents.peers:
+        data: dict[str, Any] = {
+            "name": peer.name,
+            "endpoint": peer.endpoint,
+            "trust_level": peer.trust_level.value,
+            "capabilities": list(peer.capabilities),
+            "spiffe_id": peer.spiffe_id,
+        }
+        _redact_secrets(data, known_values)
+        peers.append(AdminPeerResponse(status=AdminPeerStatus.UNKNOWN, **data))
+    return peers
 
 
 @router.post(

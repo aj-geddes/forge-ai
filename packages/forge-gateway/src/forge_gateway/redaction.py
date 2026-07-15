@@ -132,3 +132,21 @@ def scrub_text(value: str, known_values: frozenset[str] | None) -> str:
     tool ``description``) returned outside a dict that :func:`redact_secrets`
     would walk."""
     return _REDACTED if _contains_known_secret(value, known_values) else value
+
+
+def redact_text(value: str, known_values: frozenset[str] | None) -> str:
+    """Replace every occurrence of a known resolved secret SUBSTRING in *value*
+    with :data:`REDACTED_VALUE`, returning the scrubbed string.
+
+    Unlike :func:`scrub_text` (which blanks the WHOLE value on any match), this
+    blanks ONLY the secret substrings and preserves the surrounding text -- for a
+    multi-line document (the git-promotion diff / PR body) where wholesale
+    replacement would destroy legitimate, non-secret content. It closes the
+    residual where ``GET /config/promotion/diff`` rendered a resolved secret that
+    a prior overlay had smuggled into an editable free-text field."""
+    if not known_values:
+        return value
+    for secret in known_values:
+        if secret in value:
+            value = value.replace(secret, _REDACTED)
+    return value
