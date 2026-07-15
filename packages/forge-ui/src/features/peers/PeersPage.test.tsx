@@ -31,9 +31,11 @@ function stubFetch(handlers: {
 
     if (url === "/v1/admin/peers" && method === "POST") {
       const parsedBody = JSON.parse(options?.body as string) as Record<string, unknown>;
+      // POST /v1/admin/peers resolves the bare created-peer shape (no
+      // honesty envelope) -- see hooks.ts useCreatePeer.
       const { status, body } = handlers.createPeer
         ? handlers.createPeer(parsedBody)
-        : { status: 201, body: parsedBody };
+        : { status: 201, body: { ...parsedBody, status: "unknown" } };
       return Promise.resolve({
         ok: status >= 200 && status < 300,
         status,
@@ -199,6 +201,8 @@ describe("PeersPage Add Peer dialog (POST /v1/admin/peers)", () => {
           status: "unknown",
         };
         peers = [...peers, created];
+        // POST /v1/admin/peers resolves the bare created-peer shape (no
+        // honesty envelope) -- see hooks.ts useCreatePeer.
         return { status: 201, body: created };
       },
     });

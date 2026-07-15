@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import {
   Dialog,
   DialogContent,
@@ -16,7 +16,9 @@ import { Switch } from "@/components/ui/switch";
 import { Separator } from "@/components/ui/separator";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useToast } from "@/components/ui/toast";
-import { useAddToolToConfig } from "@/api/hooks";
+import { useAddToolToConfig, useConfigSchema } from "@/api/hooks";
+import { deriveMutationUiState, isSuccessState } from "@/lib/mutationState";
+import { resolveSchemaPath, validateAgainstSchema, type JsonSchemaLike } from "@/lib/schemaValidate";
 import { useToolStore } from "@/stores/toolStore";
 import { cn } from "@/lib/utils";
 import {
@@ -560,10 +562,18 @@ function TestStep() {
   );
 }
 
+// Path into GET /v1/admin/config/schema (a Pydantic model_json_schema() for
+// ForgeConfig) to the per-item schema for a single manual tool -- Pydantic
+// names $defs entries after the model class (forge_config.schema.ManualTool),
+// so this mirrors ToolsConfig.manual_tools: list[ManualTool].
+const MANUAL_TOOL_SCHEMA_PATH = ["properties", "tools", "properties", "manual_tools", "items"];
+
 export function ManualToolWizard() {
   const { wizardType, step, manualData, closeWizard, nextStep, prevStep } =
     useToolStore();
   const { toast } = useToast();
+  const { data: configSchema } = useConfigSchema();
+  const [validationErrors, setValidationErrors] = useState<string[]>([]);
 
   const isOpen = wizardType === "manual";
 
@@ -626,23 +636,53 @@ export function ManualToolWizard() {
       },
     };
 
+    // Best-effort pre-submit validation against the backend's live schema --
+    // catches obvious shape mistakes before a round trip, without being a
+    // spec-complete validator (see lib/schemaValidate.ts). Fails open: an
+    // unresolvable/absent schema never blocks the submit.
+    if (configSchema) {
+      const toolSchema = resolveSchemaPath(
+        configSchema as unknown as JsonSchemaLike,
+        MANUAL_TOOL_SCHEMA_PATH,
+      );
+      const errors = validateAgainstSchema(toolSchema, tool);
+      if (errors.length > 0) {
+        setValidationErrors(errors);
+        return;
+      }
+    }
+    setValidationErrors([]);
+
     addToolMutation.mutate(
       (tools) => ({
         ...tools,
         manual_tools: [...(tools.manual_tools ?? []), tool],
       }),
       {
-        onSuccess: () => {
-          toast({
-            title: "Manual tool added",
-            description: `Tool "${manualData.name}" saved to config.`,
-          });
-          closeWizard();
+        onSuccess: (envelope) => {
+          const uiState = deriveMutationUiState(envelope, undefined);
+          if (isSuccessState(uiState)) {
+            toast({
+              title: uiState.kind === "success-drift" ? "Saved — not yet in Git" : "Manual tool added",
+              description:
+                uiState.kind === "success-drift"
+                  ? uiState.message
+                  : `Tool "${manualData.name}" saved to config.`,
+            });
+            closeWizard();
+          } else {
+            // persisted:false -- never close the wizard or claim success.
+            toast({
+              title: "Failed to add tool",
+              description: uiState.message,
+              variant: "destructive",
+            });
+          }
         },
         onError: (err) => {
           toast({
             title: "Failed to add tool",
-            description: err instanceof Error ? err.message : "Unknown error",
+            description: deriveMutationUiState(undefined, err).message,
             variant: "destructive",
           });
         },
@@ -670,6 +710,17 @@ export function ManualToolWizard() {
           {step === 5 && <ResponseStep />}
           {step === 6 && <TestStep />}
         </div>
+
+        {validationErrors.length > 0 && (
+          <div className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+            <p className="font-medium">Fix these before saving:</p>
+            <ul className="mt-1 list-disc space-y-0.5 pl-4">
+              {validationErrors.map((err) => (
+                <li key={err}>{err}</li>
+              ))}
+            </ul>
+          </div>
+        )}
 
         <DialogFooter className="gap-2 sm:gap-0">
           {step > 1 && (

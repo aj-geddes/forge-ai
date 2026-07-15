@@ -89,18 +89,30 @@ describe("useCreatePeer", () => {
     vi.unstubAllGlobals();
   });
 
-  it("POSTs the peer fields to /v1/admin/peers and resolves the created peer", async () => {
+  // POST /v1/admin/peers (forge_gateway.routes.admin.create_peer) resolves
+  // the bare created-peer shape (AdminPeerResponse) -- it does NOT carry a
+  // {persisted, durable, ...} honesty envelope. Honesty is enforced at the
+  // transport layer instead: the route only reaches this response after a
+  // genuine successful overlay write; a rejected write always throws
+  // (409/405/507) before it. A resolved mutate() here is therefore always a
+  // real success -- see the doc comment on useCreatePeer in hooks.ts.
+  function bareCreatedPeer(overrides?: Partial<Record<string, unknown>>) {
+    return {
+      name: "data-forge",
+      endpoint: "https://data-forge.example.com",
+      trust_level: "high",
+      capabilities: ["data_query"],
+      spiffe_id: "spiffe://forge.local/peer/data-forge",
+      status: "unknown",
+      ...overrides,
+    };
+  }
+
+  it("POSTs the peer fields to /v1/admin/peers and resolves the bare created peer (no honesty envelope)", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       status: 201,
-      json: async () => ({
-        name: "data-forge",
-        endpoint: "https://data-forge.example.com",
-        trust_level: "high",
-        capabilities: ["data_query"],
-        spiffe_id: "spiffe://forge.local/peer/data-forge",
-        status: "unknown",
-      }),
+      json: async () => bareCreatedPeer(),
     });
     vi.stubGlobal("fetch", fetchMock);
 
@@ -116,14 +128,7 @@ describe("useCreatePeer", () => {
 
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
 
-    expect(result.current.data).toEqual({
-      name: "data-forge",
-      endpoint: "https://data-forge.example.com",
-      trust_level: "high",
-      capabilities: ["data_query"],
-      spiffe_id: "spiffe://forge.local/peer/data-forge",
-      status: "unknown",
-    });
+    expect(result.current.data).toEqual(bareCreatedPeer());
 
     const [url, options] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(url).toBe("/v1/admin/peers");
@@ -137,8 +142,28 @@ describe("useCreatePeer", () => {
       spiffe_id: "spiffe://forge.local/peer/data-forge",
     });
   });
-});
 
+  it("a rejected write (e.g. 409 name already exists) surfaces as a thrown ApiError, never a resolved 'success'", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 409,
+        json: async () => ({ detail: "Peer 'data-forge' already exists" }),
+      }),
+    );
+
+    const { result } = renderHook(() => useCreatePeer(), { wrapper });
+
+    result.current.mutate({
+      name: "data-forge",
+      endpoint: "https://data-forge.example.com",
+    });
+
+    await waitFor(() => expect(result.current.isError).toBe(true));
+    expect(result.current.data).toBeUndefined();
+  });
+});
 
 describe("useActivity", () => {
   afterEach(() => {

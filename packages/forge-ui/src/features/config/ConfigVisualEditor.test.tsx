@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
@@ -93,11 +93,12 @@ describe("ConfigVisualEditor field mapping (contract with ForgeConfig backend sc
     expect(updated.security?.api_keys).toBeUndefined();
   });
 
-  describe("LLM Model List (LiteLLMConfig.model_list)", () => {
+  describe("LLM Model List / mode / endpoint are BASE-ONLY (Phase-1 field split)", () => {
     function configWithModelList(): ForgeConfig {
       const config = baseConfig();
       config.llm.litellm = {
-        mode: "embedded",
+        mode: "sidecar",
+        endpoint: "http://litellm:4000",
         model_list: [
           {
             model_name: "primary",
@@ -112,50 +113,30 @@ describe("ConfigVisualEditor field mapping (contract with ForgeConfig backend sc
       return config;
     }
 
-    it("reads model_name, the litellm_params.model id, and the api_key env var name", () => {
+    it("does not expose model_list, mode, or endpoint as form-writable fields -- they are read-only (ReadOnlyLiteLLMPanel reads them straight off the draft, not through the form)", () => {
       const form = configToForm(configWithModelList());
 
-      expect(form.llm.litellm?.model_list?.[0]).toEqual({
-        model_name: "primary",
-        model: "openai/gpt-4o",
-        api_key_env: "OPENAI_KEY",
-      });
+      expect(form.llm.litellm).not.toHaveProperty("model_list");
+      expect(form.llm.litellm).not.toHaveProperty("mode");
+      expect(form.llm.litellm).not.toHaveProperty("endpoint");
     });
 
-    it("round-trips edits while preserving untouched litellm_params keys (e.g. api_base)", () => {
+    it("formToConfig always echoes mode/endpoint/model_list back byte-for-byte, regardless of what the form contains -- a save can never repoint or introduce a destination/secret here", () => {
       const config = configWithModelList();
       const form = configToForm(config);
-      form.llm.litellm!.model_list![0]!.model = "openai/gpt-4o-2024-11-20";
-
-      const updated = formToConfig(form, config);
-
-      expect(updated.llm.litellm?.model_list?.[0]).toEqual({
-        model_name: "primary",
-        litellm_params: {
-          model: "openai/gpt-4o-2024-11-20",
-          api_key: { source: "env", name: "OPENAI_KEY" },
-          api_base: "https://api.openai.com/v1",
-        },
-      });
-    });
-
-    it("adds a brand new model list entry with a fresh api_key env var reference", () => {
-      const config = baseConfig();
-      config.llm.litellm = { mode: "embedded", model_list: [] };
-      const form = configToForm(config);
-      form.llm.litellm!.model_list = [
-        { model_name: "backup", model: "anthropic/claude-haiku-4-5-20251001", api_key_env: "ANTHROPIC_KEY" },
+      // Even a malicious/buggy caller stuffing extra keys onto the parsed
+      // form object cannot move the needle: formToConfig never reads them.
+      (form.llm.litellm as Record<string, unknown>).model_list = [
+        { model_name: "evil", litellm_params: { api_base: "https://attacker.example.com" } },
       ];
+      (form.llm.litellm as Record<string, unknown>).mode = "external";
+      (form.llm.litellm as Record<string, unknown>).endpoint = "https://attacker.example.com";
 
       const updated = formToConfig(form, config);
 
-      expect(updated.llm.litellm?.model_list?.[0]).toEqual({
-        model_name: "backup",
-        litellm_params: {
-          model: "anthropic/claude-haiku-4-5-20251001",
-          api_key: { source: "env", name: "ANTHROPIC_KEY" },
-        },
-      });
+      expect(updated.llm.litellm?.mode).toBe("sidecar");
+      expect(updated.llm.litellm?.endpoint).toBe("http://litellm:4000");
+      expect(updated.llm.litellm?.model_list).toEqual(config.llm.litellm!.model_list);
     });
   });
 
@@ -197,7 +178,7 @@ describe("ConfigVisualEditor field mapping (contract with ForgeConfig backend sc
     });
   });
 
-  describe("Agent Definitions (AgentsConfig.agents)", () => {
+  describe("Agent Definitions (AgentsConfig.agents) -- moved off this wholesale editor onto the dedicated /agents page", () => {
     function configWithAgentDefs(): ForgeConfig {
       const config = baseConfig();
       config.agents = {
@@ -217,66 +198,44 @@ describe("ConfigVisualEditor field mapping (contract with ForgeConfig backend sc
       return config;
     }
 
-    it("reads each agent definition's fields, with tools as a comma-separated string", () => {
+    it("does not expose the agents array as a form-writable field -- full CRUD lives on /agents (overlay-backed), not this wholesale PUT", () => {
       const form = configToForm(configWithAgentDefs());
 
-      expect(form.agents.agents?.[0]).toEqual({
-        name: "researcher",
-        description: "Researches topics",
-        system_prompt: "You are a researcher.",
-        model: "gpt-4o",
-        tools: "web_search, summarize",
-        max_turns: 15,
-      });
+      expect(form.agents).not.toHaveProperty("agents");
     });
 
-    it("round-trips edited agent definitions back into AgentDef objects", () => {
+    it("formToConfig passes the existing agents array through unchanged, no matter what the form contains", () => {
       const config = configWithAgentDefs();
       const form = configToForm(config);
-      form.agents.agents![0]!.max_turns = 20;
-      form.agents.agents![0]!.tools = "web_search, summarize, translate";
+      // Even if something stuffed an edit onto the parsed form object, this
+      // wholesale save must never let it reach the config.
+      (form.agents as Record<string, unknown>).agents = [{ name: "evil" }];
 
       const updated = formToConfig(form, config);
 
-      expect(updated.agents?.agents?.[0]).toEqual({
-        name: "researcher",
-        description: "Researches topics",
-        system_prompt: "You are a researcher.",
-        model: "gpt-4o",
-        tools: ["web_search", "summarize", "translate"],
-        max_turns: 20,
-      });
-    });
-
-    it("adds a brand new agent definition", () => {
-      const config = baseConfig();
-      const form = configToForm(config);
-      form.agents.agents = [
-        {
-          name: "coder",
-          description: "Writes code",
-          system_prompt: "",
-          model: "",
-          tools: "",
-          max_turns: 10,
-        },
-      ];
-
-      const updated = formToConfig(form, config);
-
-      expect(updated.agents?.agents?.[0]).toEqual({
-        name: "coder",
-        description: "Writes code",
-        system_prompt: undefined,
-        model: undefined,
-        tools: [],
-        max_turns: 10,
-      });
+      expect(updated.agents?.agents).toEqual(config.agents!.agents);
     });
   });
 });
 
 describe("ConfigVisualEditor mount dirty-state (regression: false 'Unsaved changes' on load)", () => {
+  // The Visual editor now renders ConfirmDialog instances (for the model-
+  // list/agent-definition remove confirmations) even while closed -- their
+  // underlying native <dialog> element's mount effect calls
+  // showModal()/close(), which jsdom does not implement.
+  beforeEach(() => {
+    window.HTMLDialogElement.prototype.showModal = vi.fn(function (
+      this: HTMLDialogElement,
+    ) {
+      this.open = true;
+    });
+    window.HTMLDialogElement.prototype.close = vi.fn(function (
+      this: HTMLDialogElement,
+    ) {
+      this.open = false;
+    });
+  });
+
   afterEach(() => {
     cleanup();
     useConfigStore.setState({ original: null, draft: null, isDirty: false });

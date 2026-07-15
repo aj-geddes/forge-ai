@@ -8,9 +8,40 @@ nav_order: 9
 
 # Configuration Reference
 
-This page documents every option available in `forge.yaml`. The configuration is organized into five top-level sections: `metadata`, `llm`, `tools`, `security`, and `agents`.
+This page documents every option available in `forge.yaml`. The configuration is organized into six top-level sections: `metadata`, `llm`, `tools`, `security`, `agents`, and `admin`.
 
 Secret values (API keys, passwords) are never stored in plaintext in the config file. Instead, they use **secret references** that point to environment variables or Kubernetes secrets. See [Secret References](#secret-references) at the end of this page.
+
+---
+
+## Layered BASE+OVERLAY config and the runtime admin API
+
+`forge.yaml` on disk (a git-tracked ConfigMap, reconciled by ArgoCD) is called **BASE** — it is always the durable, reviewed source of truth. When the deployment also sets `FORGE_CONFIG_OVERLAY_PATH` (wired automatically by the Helm chart whenever `persistence.enabled: true`), the running gateway resolves an **effective config**:
+
+```
+effective_config = validate(substitute_env(deep_merge(BASE, OVERLAY)))
+```
+
+`OVERLAY` is a small YAML file on the same persistent volume as the user-token store (no new volume, no new credential). It is a **whitelisted, structurally-limited** subset — only `tools`, `agents`, `llm`, and `metadata.description` can ever appear in it. The admin API (`POST`/`PATCH`/`DELETE` under `/v1/admin/tools`, `/v1/admin/agents`, `/v1/admin/peers`, and `PUT /v1/admin/config`) writes exclusively to this overlay. `security`, `oidc`, `service_tokens`, `authorization`, and `conversation_store` can **never** be represented in the overlay — this is enforced by the config schema itself (not just a permission check), so a `config:write` caller can never use the admin API to grant themselves a new permission. Editing those sections always requires a commit to `forge.yaml` in git.
+
+A change made through the admin API is applied immediately and durably persisted to the overlay volume, but it is **not yet in git** — every mutation response reports `drift_from_git: true` until a human promotes it. `GET /v1/admin/config/promotion/diff` returns a ready-to-paste unified diff and PR description for that promotion; there is no git credential in the pod, so promotion is always a deliberate, out-of-band human action. Once the PR is merged and ArgoCD reconciles `forge.yaml`, the overlay's now-redundant entries are pruned automatically the next time config is loaded, and drift returns to zero.
+
+Every mutation (and every denied attempt) is recorded in a tamper-evident, hash-chained audit journal, viewable via `GET /v1/admin/config/history`. `POST /v1/admin/config/revert` rolls the overlay back to a prior revision (or drops it entirely) without ever rewriting audit history.
+
+### admin
+
+Controls whether the runtime admin API may mutate the config overlay at all. This block is itself BASE-only — it cannot be set via the overlay, so a `config:write` caller can never re-enable mutations that an operator has disabled in git.
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `mutation_policy` | string | `"overlay"` | `overlay` allows `config:write`-permitted callers to edit tools/agents/llm/metadata via the overlay. `disabled` turns every mutating admin config endpoint into `405 Method Not Allowed`, regardless of caller permissions — for locked-down GitOps shops where every change must go through a git PR. |
+
+**Example:**
+
+```yaml
+admin:
+  mutation_policy: overlay  # or: disabled
+```
 
 ---
 

@@ -391,3 +391,57 @@ async def require_metrics_access(request: Request) -> None:
         return
     principal = await get_principal(request)
     _check_permission(principal, Permission.METRICS_READ.value)
+
+
+# --- Config-mutation anti-escalation guard (layered BASE+OVERLAY config) ---
+
+
+class ConfigEscalationDeniedError(Exception):
+    """Raised by :func:`check_no_config_escalation` when applying a
+    proposed config change would grant the calling principal a
+    permission it does not currently hold.
+
+    Belt-and-suspenders atop the STRUCTURAL guarantee that the overlay
+    can never carry a ``security``/``authorization`` key at all (see
+    ``forge_config.overlay.OverlayDocument`` and
+    ``forge_config.loader.load_effective_config``'s defense-in-depth
+    filtering): for any legitimate overlay-only mutation, *after* is
+    always identical to *before*, so this only ever fires if one of
+    those two independent structural guards has regressed.
+    """
+
+    def __init__(self, before: frozenset[str], after: frozenset[str]) -> None:
+        self.before = before
+        self.after = after
+        self.gained = after - before
+        super().__init__(
+            "config change would grant the caller permission(s) it does not "
+            f"currently hold: {sorted(self.gained)}"
+        )
+
+
+def check_no_config_escalation(
+    principal: Principal,
+    *,
+    config_after: object,
+) -> None:
+    """Recompute *principal*'s permissions under *config_after*'s
+    ``security.authorization`` block (using the SAME ``principal.roles``
+    already resolved before this request) and raise
+    :class:`ConfigEscalationDeniedError` if that set is not a subset of
+    the permissions the principal already holds
+    (``principal.permissions``, resolved under the config in effect at
+    authentication time) -- mirroring
+    ``forge_security.oidc.user_tokens.mint_user_token``'s
+    ``requested <= minter_permissions`` subset check.
+
+    Call this BEFORE any overlay write in
+    ``forge_gateway.routes.admin.apply_overlay_mutation``. ``config_after``
+    is typed ``object`` here (rather than importing ``ForgeConfig``, which
+    would create an import-time coupling this module doesn't otherwise
+    need) -- callers pass a ``forge_config.schema.ForgeConfig``.
+    """
+    authorizer_after = Authorizer(config_after.security.authorization)  # type: ignore[attr-defined]
+    after_permissions = authorizer_after.permissions_for_roles(principal.roles)
+    if not after_permissions <= principal.permissions:
+        raise ConfigEscalationDeniedError(principal.permissions, after_permissions)

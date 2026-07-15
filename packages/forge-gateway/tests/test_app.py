@@ -1590,3 +1590,94 @@ class TestMCPMountAlwaysPresent:
 
         mount_names = [r.name for r in app.routes if hasattr(r, "name")]
         assert "mcp" in mount_names
+
+
+# ---------------------------------------------------------------------------
+# 13. Layered BASE+OVERLAY config lifespan wiring
+# ---------------------------------------------------------------------------
+
+
+class TestLayeredConfigLifespan:
+    """FORGE_CONFIG_SEED_PATH + FORGE_CONFIG_OVERLAY_PATH: when set,
+    lifespan loads via load_effective_config and wires a real OverlayStore
+    into admin state + watches both files; when unset, behavior is
+    byte-for-byte the pre-existing single-file load_config path (see the
+    many other TestConfigWatcher* classes in this file, all of which only
+    set FORGE_CONFIG_PATH and still pass unchanged)."""
+
+    async def test_uses_load_effective_config_when_overlay_path_set(
+        self,
+        mock_config: MagicMock,
+        mock_watcher: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        seed_file = tmp_path / "forge.yaml"
+        seed_file.write_text("metadata:\n  name: test\n")
+        overlay_file = tmp_path / "overlay" / "forge.overlay.yaml"
+
+        app = FastAPI(lifespan=lifespan)
+        with (
+            patch.dict(
+                "os.environ",
+                {
+                    "FORGE_CONFIG_SEED_PATH": str(seed_file),
+                    "FORGE_CONFIG_OVERLAY_PATH": str(overlay_file),
+                },
+            ),
+            patch(
+                "forge_config.load_effective_config", return_value=mock_config
+            ) as mock_load_effective,
+            patch("forge_config.ConfigWatcher", return_value=mock_watcher),
+        ):
+            async with lifespan(app):
+                mock_load_effective.assert_called_once_with(str(seed_file), str(overlay_file))
+
+    async def test_admin_state_gets_a_real_overlay_store(
+        self,
+        mock_config: MagicMock,
+        mock_watcher: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        from forge_config.writable_store import OverlayStore
+        from forge_gateway.routes import admin
+
+        seed_file = tmp_path / "forge.yaml"
+        seed_file.write_text("metadata:\n  name: test\n")
+        overlay_file = tmp_path / "overlay" / "forge.overlay.yaml"
+
+        app = FastAPI(lifespan=lifespan)
+        with (
+            patch.dict(
+                "os.environ",
+                {
+                    "FORGE_CONFIG_SEED_PATH": str(seed_file),
+                    "FORGE_CONFIG_OVERLAY_PATH": str(overlay_file),
+                },
+            ),
+            patch("forge_config.load_effective_config", return_value=mock_config),
+            patch("forge_config.ConfigWatcher", return_value=mock_watcher),
+        ):
+            async with lifespan(app):
+                assert isinstance(admin._overlay_store, OverlayStore)
+                assert admin._overlay_store.overlay_path == overlay_file
+                assert admin._base_path == str(seed_file)
+
+    async def test_falls_back_to_plain_load_config_without_overlay_path(
+        self,
+        mock_config: MagicMock,
+        mock_watcher: MagicMock,
+        config_file: Path,
+    ) -> None:
+        """No FORGE_CONFIG_OVERLAY_PATH set (or FORGE_CONFIG_SEED_PATH) --
+        legacy env var alone -- uses plain load_config, unchanged."""
+        from forge_gateway.routes import admin
+
+        app = FastAPI(lifespan=lifespan)
+        with (
+            patch.dict("os.environ", {"FORGE_CONFIG_PATH": str(config_file)}, clear=False),
+            patch("forge_config.load_config", return_value=mock_config) as mock_load,
+            patch("forge_config.ConfigWatcher", return_value=mock_watcher),
+        ):
+            async with lifespan(app):
+                mock_load.assert_called_once_with(str(config_file))
+                assert admin._overlay_store is None

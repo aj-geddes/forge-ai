@@ -90,3 +90,36 @@ class TestLoadConfig:
         bad.write_text("- just\n- a\n- list\n")
         with pytest.raises(ConfigLoadError, match="must be a mapping"):
             load_config(bad)
+
+
+class TestPruneNoopOverlaySubset:
+    """Finding [MEDIUM]: prune must drop overlay entries that are a
+    structural SUBSET of BASE (e.g. a PATCH that stored only {name,
+    description}), not just byte-identical ones. Otherwise a partial PATCH
+    lingers forever as drift and shadows later BASE edits to that entity."""
+
+    def test_prune_drops_partial_subset_patch(self) -> None:
+        from forge_config.loader import prune_noop_overlay
+
+        base_editable = {
+            "tools": {"manual_tools": [{"name": "t", "description": "d", "api": {"url": "u"}}]}
+        }
+        # A PATCH persisted only {name, description}: never byte-equal to the
+        # promoted full BASE entity, but a strict subset of it -> a no-op.
+        overlay_content = {"tools": {"manual_tools": [{"name": "t", "description": "d"}]}}
+        pruned = prune_noop_overlay(
+            overlay_content, base_editable=base_editable, overlay_base_rev="stale-hash"
+        )
+        assert pruned == {}
+
+    def test_prune_keeps_partial_patch_that_actually_differs(self) -> None:
+        from forge_config.loader import prune_noop_overlay
+
+        base_editable = {
+            "tools": {"manual_tools": [{"name": "t", "description": "old", "api": {"url": "u"}}]}
+        }
+        overlay_content = {"tools": {"manual_tools": [{"name": "t", "description": "new"}]}}
+        pruned = prune_noop_overlay(
+            overlay_content, base_editable=base_editable, overlay_base_rev="stale-hash"
+        )
+        assert pruned == overlay_content

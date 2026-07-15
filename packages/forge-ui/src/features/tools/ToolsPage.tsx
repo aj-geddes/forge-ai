@@ -1,4 +1,5 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect, useCallback } from "react";
+import { Link } from "react-router-dom";
 import {
   Wrench,
   Plus,
@@ -9,6 +10,10 @@ import {
   Loader2,
   Package,
   Info,
+  Pencil,
+  Trash2,
+  Lock,
+  ExternalLink,
 } from "lucide-react";
 import {
   Card,
@@ -19,21 +24,34 @@ import {
 } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
+import { Switch } from "@/components/ui/switch";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import { Select } from "@/components/ui/select";
 import {
   Dialog,
   DialogContent,
   DialogHeader,
   DialogTitle,
   DialogDescription,
+  DialogFooter,
 } from "@/components/ui/dialog";
-import { useTools } from "@/api/hooks";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import { useTools, useConfigEnvelope, useUpdateTool, useDeleteTool } from "@/api/hooks";
+import { deriveMutationUiState, isSuccessState } from "@/lib/mutationState";
+import { useToast } from "@/components/ui/toast";
 import { useToolStore } from "@/stores/toolStore";
 import { cn } from "@/lib/utils";
 import { OpenAPIWizard } from "./OpenAPIWizard";
 import { ManualToolWizard } from "./ManualToolWizard";
 import { WorkflowComposer } from "./WorkflowComposer";
 import type { WizardType } from "@/stores/toolStore";
+import type { ManualTool, ParamType, ParameterDef } from "@/types/config";
+
+const DISABLED_REASON = "Config editing is disabled (GitOps-managed) — edit via git.";
+const PROMOTE_REASON =
+  "Base-only field -- carries a destination or credential, so it can only be changed in Git (Config > Promote).";
 
 function ToolCardSkeleton() {
   return (
@@ -174,11 +192,434 @@ function RefreshingIndicator({ isLoading, hasTools }: { isLoading: boolean; hasT
   );
 }
 
+/** Read-only summary of the fields Phase-1 classifies as base-only for a
+ * manual tool: outbound destination (url/base_url/endpoint), the
+ * request-construction contract (method/headers/body_template/timeout),
+ * the secret binding (auth), and the approval security control. None of
+ * these are ever sent by the runtime overlay editor below -- they can only
+ * be changed by promoting a Git-reviewed change (see PROMOTE_REASON). */
+function BaseOnlyToolPanel({ tool }: { tool: ManualTool }) {
+  const resolvedUrl =
+    tool.api.url || (tool.api.base_url ? `${tool.api.base_url}${tool.api.endpoint ?? ""}` : "");
+  const headerNames = Object.keys(tool.api.headers ?? {});
+
+  return (
+    <div className="space-y-2 rounded-lg border border-dashed border-muted-foreground/30 bg-muted/20 p-3">
+      <div
+        className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground"
+        title={PROMOTE_REASON}
+      >
+        <Lock className="h-3.5 w-3.5" />
+        Managed in Git -- edit via Promote/PR
+      </div>
+      <dl className="grid grid-cols-[auto,1fr] gap-x-3 gap-y-1 text-xs">
+        <dt className="text-muted-foreground">URL</dt>
+        <dd className="font-mono break-all">{resolvedUrl || "(unset)"}</dd>
+        <dt className="text-muted-foreground">Method</dt>
+        <dd className="font-mono">{tool.api.method}</dd>
+        {tool.api.auth && tool.api.auth.type !== "none" && (
+          <>
+            <dt className="text-muted-foreground">Auth</dt>
+            <dd className="font-mono">{tool.api.auth.type}</dd>
+          </>
+        )}
+        {headerNames.length > 0 && (
+          <>
+            <dt className="text-muted-foreground">Headers</dt>
+            <dd className="font-mono">{headerNames.join(", ")}</dd>
+          </>
+        )}
+        <dt className="text-muted-foreground">Timeout</dt>
+        <dd className="font-mono">{tool.api.timeout ?? 30}s</dd>
+        <dt className="text-muted-foreground">Approval</dt>
+        <dd className="font-mono">{tool.requires_approval ? "required" : "not required"}</dd>
+      </dl>
+      <Link
+        to="/config?tab=promote"
+        className="inline-flex items-center gap-1 text-xs font-medium text-primary underline-offset-4 hover:underline"
+      >
+        Review &amp; promote
+        <ExternalLink className="h-3 w-3" />
+      </Link>
+    </div>
+  );
+}
+
+interface EditableParam {
+  name: string;
+  type: ParamType;
+  description: string;
+  required: boolean;
+}
+
+function ParametersEditor({
+  parameters,
+  onChange,
+}: {
+  parameters: EditableParam[];
+  onChange: (params: EditableParam[]) => void;
+}) {
+  const update = (index: number, patch: Partial<EditableParam>) => {
+    onChange(parameters.map((p, i) => (i === index ? { ...p, ...patch } : p)));
+  };
+  const remove = (index: number) => {
+    onChange(parameters.filter((_, i) => i !== index));
+  };
+  const add = () => {
+    onChange([...parameters, { name: "", type: "string", description: "", required: false }]);
+  };
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center justify-between">
+        <p className="text-sm font-medium">Parameters</p>
+        <Button type="button" variant="outline" size="sm" onClick={add}>
+          <Plus className="h-4 w-4" />
+          Add Parameter
+        </Button>
+      </div>
+      {parameters.length === 0 ? (
+        <div className="flex h-14 items-center justify-center rounded-lg border border-dashed">
+          <p className="text-xs text-muted-foreground">No parameters defined yet.</p>
+        </div>
+      ) : (
+        <ScrollArea className="max-h-[220px]">
+          <div className="space-y-2">
+            {parameters.map((param, index) => (
+              <div key={index} className="rounded-lg border p-2 space-y-2">
+                <div className="flex items-start gap-2">
+                  <div className="flex-1 grid gap-2 sm:grid-cols-2">
+                    <Input
+                      aria-label={`Parameter ${index + 1} name`}
+                      placeholder="param_name"
+                      value={param.name}
+                      onChange={(e) => update(index, { name: e.target.value })}
+                      className="h-8 text-sm"
+                    />
+                    <Select
+                      aria-label={`Parameter ${index + 1} type`}
+                      value={param.type}
+                      onChange={(e) => update(index, { type: e.target.value as ParamType })}
+                      className="h-8 text-sm"
+                    >
+                      <option value="string">string</option>
+                      <option value="integer">integer</option>
+                      <option value="number">number</option>
+                      <option value="boolean">boolean</option>
+                      <option value="array">array</option>
+                      <option value="object">object</option>
+                    </Select>
+                  </div>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    className="shrink-0"
+                    onClick={() => remove(index)}
+                  >
+                    <Trash2 className="h-4 w-4 text-destructive" />
+                  </Button>
+                </div>
+                <Input
+                  aria-label={`Parameter ${index + 1} description`}
+                  placeholder="Describe this parameter..."
+                  value={param.description}
+                  onChange={(e) => update(index, { description: e.target.value })}
+                  className="h-8 text-sm"
+                />
+                <div className="flex items-center gap-2">
+                  <Switch
+                    checked={param.required}
+                    onCheckedChange={(checked) => update(index, { required: checked })}
+                  />
+                  <span className="text-xs">Required</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </ScrollArea>
+      )}
+    </div>
+  );
+}
+
+interface EditableFieldMapping {
+  key: string;
+  value: string;
+}
+
+function ResponseMappingEditor({
+  resultPath,
+  onResultPathChange,
+  fieldMap,
+  onFieldMapChange,
+}: {
+  resultPath: string;
+  onResultPathChange: (value: string) => void;
+  fieldMap: EditableFieldMapping[];
+  onFieldMapChange: (mappings: EditableFieldMapping[]) => void;
+}) {
+  const update = (index: number, patch: Partial<EditableFieldMapping>) => {
+    onFieldMapChange(fieldMap.map((m, i) => (i === index ? { ...m, ...patch } : m)));
+  };
+  const remove = (index: number) => {
+    onFieldMapChange(fieldMap.filter((_, i) => i !== index));
+  };
+  const add = () => {
+    onFieldMapChange([...fieldMap, { key: "", value: "" }]);
+  };
+
+  return (
+    <div className="space-y-2">
+      <div className="space-y-1">
+        <label className="text-sm font-medium" htmlFor="tool-result-path">
+          Result Path (JSONPath)
+        </label>
+        <Input
+          id="tool-result-path"
+          placeholder="e.g. $.data.results"
+          value={resultPath}
+          onChange={(e) => onResultPathChange(e.target.value)}
+        />
+      </div>
+      <div className="flex items-center justify-between">
+        <p className="text-sm font-medium">Field Mapping</p>
+        <Button type="button" variant="outline" size="sm" onClick={add}>
+          <Plus className="h-4 w-4" />
+          Add Mapping
+        </Button>
+      </div>
+      {fieldMap.length === 0 ? (
+        <div className="flex h-12 items-center justify-center rounded-lg border border-dashed">
+          <p className="text-xs text-muted-foreground">No field mappings defined.</p>
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {fieldMap.map((mapping, index) => (
+            <div key={index} className="flex items-center gap-2">
+              <Input
+                aria-label={`Field mapping ${index + 1} response field`}
+                placeholder="Response field"
+                value={mapping.key}
+                onChange={(e) => update(index, { key: e.target.value })}
+                className="h-8 text-sm"
+              />
+              <span className="shrink-0 text-muted-foreground">&rarr;</span>
+              <Input
+                aria-label={`Field mapping ${index + 1} output name`}
+                placeholder="Output name"
+                value={mapping.value}
+                onChange={(e) => update(index, { value: e.target.value })}
+                className="h-8 text-sm"
+              />
+              <Button type="button" variant="ghost" size="icon" onClick={() => remove(index)}>
+                <Trash2 className="h-4 w-4 text-destructive" />
+              </Button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function parametersToEditable(parameters: ParameterDef[] | undefined): EditableParam[] {
+  return (parameters ?? []).map((p) => ({
+    name: p.name,
+    type: p.type,
+    description: p.description ?? "",
+    required: p.required ?? false,
+  }));
+}
+
+function fieldMapToEditable(fieldMap: Record<string, string> | undefined): EditableFieldMapping[] {
+  return Object.entries(fieldMap ?? {}).map(([key, value]) => ({ key, value }));
+}
+
+/**
+ * Runtime tool editor. Phase-1 field split: description + parameters +
+ * response_mapping are the ONLY fields this dialog ever submits via the
+ * overlay (`PATCH /v1/admin/tools/{name}`). Everything that is a
+ * destination (url/base_url/endpoint), a secret binding (auth/headers), a
+ * request-construction pin (method/body_template/timeout), or a security
+ * control (requires_approval) is rendered read-only in `BaseOnlyToolPanel`
+ * with a Promote/PR affordance -- it is structurally never included in the
+ * submitted payload, so this dialog cannot be used to smuggle a base-only
+ * change through the runtime overlay.
+ */
+function EditToolDialog({
+  toolName,
+  rev,
+  onOpenChange,
+}: {
+  toolName: string | null;
+  rev: number | undefined;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const { data: tools } = useTools();
+  const { data: envelope } = useConfigEnvelope();
+  const [description, setDescription] = useState("");
+  const [parameters, setParameters] = useState<EditableParam[]>([]);
+  const [resultPath, setResultPath] = useState("");
+  const [fieldMap, setFieldMap] = useState<EditableFieldMapping[]>([]);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+  const updateTool = useUpdateTool();
+  const { toast } = useToast();
+
+  const basicTool = tools?.find((t) => t.name === toolName) ?? null;
+  const manualTool =
+    envelope?.config.tools.manual_tools?.find((t) => t.name === toolName) ?? null;
+
+  useEffect(() => {
+    if (!toolName) return;
+    setSubmitError(null);
+    if (manualTool) {
+      setDescription(manualTool.description);
+      setParameters(parametersToEditable(manualTool.parameters));
+      setResultPath(manualTool.api.response_mapping?.result_path ?? "");
+      setFieldMap(fieldMapToEditable(manualTool.api.response_mapping?.field_map));
+    } else if (basicTool) {
+      setDescription(basicTool.description);
+      setParameters([]);
+      setResultPath("");
+      setFieldMap([]);
+    }
+    // manualTool/basicTool are looked up fresh every render from query-cache
+    // data, not stable references -- key the reset off the tool's identity
+    // (name) so it does not re-fire (and clobber in-progress edits) every
+    // render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [toolName]);
+
+  const handleSubmit = () => {
+    if (!toolName || rev === undefined) return;
+    setSubmitError(null);
+
+    // Only ever description + parameters + response_mapping -- see the
+    // module doc comment above. `api` here is a partial object containing
+    // ONLY response_mapping; the backend's name-keyed overlay merge is a
+    // deep dict merge (forge_config.loader._merge_node), so omitted `api`
+    // keys (url/base_url/endpoint/method/headers/body_template/auth/
+    // timeout) are left untouched on the existing entry -- never cleared,
+    // never replaced.
+    const payload: Record<string, unknown> = manualTool
+      ? {
+          description,
+          parameters: parameters
+            .filter((p) => p.name.trim().length > 0)
+            .map((p) => ({
+              name: p.name,
+              type: p.type,
+              description: p.description || undefined,
+              required: p.required,
+            })),
+          api: {
+            response_mapping: {
+              result_path: resultPath || undefined,
+              field_map: Object.fromEntries(
+                fieldMap.filter((m) => m.key.trim().length > 0).map((m) => [m.key, m.value]),
+              ),
+            },
+          },
+        }
+      : { description };
+
+    updateTool.mutate(
+      { name: toolName, tool: payload, rev },
+      {
+        onSuccess: (result) => {
+          const state = deriveMutationUiState(result, undefined);
+          if (isSuccessState(state)) {
+            // Match the create-wizard treatment: a drifted save is still a
+            // success, but the operator needs to know it landed on the
+            // overlay only, not in Git -- an unannounced dialog close would
+            // hide that.
+            if (state.kind === "success-drift") {
+              toast({ title: "Saved — not yet in Git", description: state.message });
+            }
+            onOpenChange(false);
+          } else {
+            // persisted:false -- never close the dialog or claim success.
+            setSubmitError(state.message);
+          }
+        },
+        onError: (err) => {
+          setSubmitError(deriveMutationUiState(undefined, err).message);
+        },
+      },
+    );
+  };
+
+  return (
+    <Dialog open={toolName !== null} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-xl">
+        <DialogHeader>
+          <DialogTitle>Edit Tool</DialogTitle>
+          <DialogDescription>
+            {manualTool
+              ? "Runtime-editable fields only: description, parameters, and response mapping. The endpoint, auth, and other request-construction fields are Git-managed."
+              : "Update the description for this tool. Endpoint, parameters, and auth are managed elsewhere."}
+          </DialogDescription>
+        </DialogHeader>
+        {submitError && <p className="text-xs text-destructive">{submitError}</p>}
+
+        <div className="space-y-4">
+          <div className="space-y-1">
+            {/* NOT id="tool-description" -- ManualToolWizard's IdentityStep
+                (also always mounted; see components/ui/dialog.tsx) already
+                claims that id, and duplicate DOM ids make a <label for>
+                bind to whichever element rendered first. */}
+            <label className="text-sm font-medium" htmlFor="edit-tool-description">
+              Description
+            </label>
+            <Textarea
+              id="edit-tool-description"
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              rows={3}
+              placeholder="Describe what this tool does..."
+            />
+          </div>
+
+          {manualTool && (
+            <>
+              <ParametersEditor parameters={parameters} onChange={setParameters} />
+              <ResponseMappingEditor
+                resultPath={resultPath}
+                onResultPathChange={setResultPath}
+                fieldMap={fieldMap}
+                onFieldMapChange={setFieldMap}
+              />
+              <BaseOnlyToolPanel tool={manualTool} />
+            </>
+          )}
+        </div>
+
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>
+            Cancel
+          </Button>
+          <Button onClick={handleSubmit} disabled={updateTool.isPending}>
+            {updateTool.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+            Save
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 export function ToolsPage() {
   const { data: tools, isLoading, error } = useTools();
+  const { data: envelope } = useConfigEnvelope();
+  const deleteTool = useDeleteTool();
   const { openWizard } = useToolStore();
+  const { toast } = useToast();
   const [searchQuery, setSearchQuery] = useState("");
   const [addDialogOpen, setAddDialogOpen] = useState(false);
+  const [editingTool, setEditingTool] = useState<string | null>(null);
+  const [pendingDeleteTool, setPendingDeleteTool] = useState<string | null>(null);
+  const editingDisabled = envelope?.mutation_policy === "disabled";
 
   const filteredTools = useMemo(() => {
     if (!tools) return [];
@@ -196,6 +637,24 @@ export function ToolsPage() {
   const handleSelectType = (type: WizardType) => {
     openWizard(type);
   };
+
+  const handleConfirmDeleteTool = useCallback(() => {
+    if (pendingDeleteTool === null || envelope?.rev === undefined) return;
+    deleteTool.mutate(
+      { name: pendingDeleteTool, rev: envelope.rev },
+      {
+        onSuccess: (result) => {
+          // Match the create-wizard treatment: surface drift even though
+          // the delete itself succeeded, instead of a silent close.
+          const state = deriveMutationUiState(result, undefined);
+          if (state.kind === "success-drift") {
+            toast({ title: "Saved — not yet in Git", description: state.message });
+          }
+          setPendingDeleteTool(null);
+        },
+      },
+    );
+  }, [pendingDeleteTool, envelope?.rev, deleteTool, toast]);
 
   return (
     <div className="space-y-6">
@@ -331,6 +790,36 @@ export function ToolsPage() {
                     </p>
                   </div>
                   <SourceBadge source={tool.source} />
+                  <div className="flex shrink-0 items-center gap-1">
+                    <span
+                      title={editingDisabled ? DISABLED_REASON : undefined}
+                      className="inline-block"
+                    >
+                      <Button
+                        size="icon"
+                        variant="ghost"
+                        className="h-8 w-8 shrink-0"
+                        disabled={editingDisabled}
+                        onClick={() => setEditingTool(tool.name)}
+                      >
+                        <Pencil className="h-4 w-4" />
+                      </Button>
+                    </span>
+                    <span
+                      title={editingDisabled ? DISABLED_REASON : undefined}
+                      className="inline-block"
+                    >
+                      <Button
+                        size="icon"
+                        variant="ghost"
+                        className="h-8 w-8 shrink-0"
+                        disabled={editingDisabled}
+                        onClick={() => setPendingDeleteTool(tool.name)}
+                      >
+                        <Trash2 className="h-4 w-4 text-destructive" />
+                      </Button>
+                    </span>
+                  </div>
                 </div>
               ))}
             </div>
@@ -350,6 +839,27 @@ export function ToolsPage() {
       <OpenAPIWizard />
       <ManualToolWizard />
       <WorkflowComposer />
+      <EditToolDialog
+        toolName={editingTool}
+        rev={envelope?.rev}
+        onOpenChange={(open) => !open && setEditingTool(null)}
+      />
+      <ConfirmDialog
+        open={pendingDeleteTool !== null}
+        onOpenChange={(open) => !open && setPendingDeleteTool(null)}
+        title="Delete tool?"
+        description={`This removes the "${pendingDeleteTool ?? ""}" tool from the configuration. This cannot be undone from the UI.`}
+        confirmLabel="Delete Tool"
+        onConfirm={handleConfirmDeleteTool}
+        isPending={deleteTool.isPending}
+        errorMessage={
+          deleteTool.isError
+            ? deleteTool.error instanceof Error
+              ? deleteTool.error.message
+              : "Failed to delete tool"
+            : null
+        }
+      />
     </div>
   );
 }

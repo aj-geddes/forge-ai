@@ -14,6 +14,9 @@ const ConfigPage = lazy(() =>
 const ToolsPage = lazy(() =>
   import("@/features/tools/ToolsPage").then((m) => ({ default: m.ToolsPage }))
 );
+const AgentsPage = lazy(() =>
+  import("@/features/agents/AgentsPage").then((m) => ({ default: m.AgentsPage }))
+);
 const ChatPage = lazy(() =>
   import("@/features/chat/ChatPage").then((m) => ({ default: m.ChatPage }))
 );
@@ -82,6 +85,14 @@ export function App() {
             element={
               <RequirePermission permission="config:read">
                 <ToolsPage />
+              </RequirePermission>
+            }
+          />
+          <Route
+            path="/agents"
+            element={
+              <RequirePermission permission="config:read">
+                <AgentsPage />
               </RequirePermission>
             }
           />

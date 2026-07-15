@@ -66,6 +66,11 @@ describe("ManualToolWizard basic auth payload", () => {
         tools: { openapi_sources: [], manual_tools: [], workflows: [] },
       },
       path: "forge.yaml",
+      rev: 1,
+      base_rev: "base-sha-1",
+      drift_from_git: false,
+      source_layers: ["base"],
+      mutation_policy: "overlay",
     };
 
     const putBodies: unknown[] = [];
@@ -77,7 +82,15 @@ describe("ManualToolWizard basic auth payload", () => {
           return Promise.resolve({
             ok: true,
             status: 200,
-            json: async () => ({ success: true, reloaded: false, message: "ok" }),
+            json: async () => ({
+              persisted: true,
+              durable: true,
+              drift_from_git: false,
+              rev: 2,
+              base_rev: "base-sha-1",
+              promotion_available: false,
+              message: "ok",
+            }),
           });
         }
         return Promise.resolve({

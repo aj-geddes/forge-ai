@@ -142,6 +142,19 @@ spec:
           env:
             - name: FORGE_CONFIG_PATH
               value: /app/config/forge.yaml
+            {{- if .Values.persistence.enabled }}
+            # Layered BASE+OVERLAY config (see docs/technical/config-layering.md):
+            # FORGE_CONFIG_SEED_PATH is the same file as FORGE_CONFIG_PATH above
+            # (the git/ArgoCD source of truth, ConfigMap, readOnly).
+            # FORGE_CONFIG_OVERLAY_PATH lives on the SAME RWO PVC as the
+            # user-token store -- no new volume, no new credential -- and is
+            # only set when persistence is enabled, since without a durable
+            # volume there is nowhere safe to persist a runtime edit.
+            - name: FORGE_CONFIG_SEED_PATH
+              value: /app/config/forge.yaml
+            - name: FORGE_CONFIG_OVERLAY_PATH
+              value: {{ .Values.persistence.mountPath }}/overlay/forge.overlay.yaml
+            {{- end }}
             {{- if .Values.agentweave.enabled }}
             - name: SPIFFE_ENDPOINT_SOCKET
               value: unix://{{ .Values.agentweave.socketMountPath }}/spire-agent.sock

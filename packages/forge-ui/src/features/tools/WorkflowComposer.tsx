@@ -15,6 +15,7 @@ import { Separator } from "@/components/ui/separator";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useToast } from "@/components/ui/toast";
 import { useAddToolToConfig } from "@/api/hooks";
+import { deriveMutationUiState, isSuccessState } from "@/lib/mutationState";
 import { useToolStore } from "@/stores/toolStore";
 import { useTools } from "@/api/hooks";
 import {
@@ -66,17 +67,30 @@ export function WorkflowComposer() {
         workflows: [...(tools.workflows ?? []), workflow],
       }),
       {
-        onSuccess: () => {
-          toast({
-            title: "Workflow saved",
-            description: `Workflow "${workflowData.name}" with ${workflowData.steps.length} step(s) saved to config.`,
-          });
-          closeWizard();
+        onSuccess: (envelope) => {
+          const uiState = deriveMutationUiState(envelope, undefined);
+          if (isSuccessState(uiState)) {
+            toast({
+              title: uiState.kind === "success-drift" ? "Saved — not yet in Git" : "Workflow saved",
+              description:
+                uiState.kind === "success-drift"
+                  ? uiState.message
+                  : `Workflow "${workflowData.name}" with ${workflowData.steps.length} step(s) saved to config.`,
+            });
+            closeWizard();
+          } else {
+            // persisted:false -- never close the wizard or claim success.
+            toast({
+              title: "Failed to save workflow",
+              description: uiState.message,
+              variant: "destructive",
+            });
+          }
         },
         onError: (err) => {
           toast({
             title: "Failed to save workflow",
-            description: err instanceof Error ? err.message : "Unknown error",
+            description: deriveMutationUiState(undefined, err).message,
             variant: "destructive",
           });
         },

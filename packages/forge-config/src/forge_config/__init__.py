@@ -6,8 +6,28 @@ from forge_config.exceptions import (
     ConfigValidationError,
     SecretResolutionError,
 )
-from forge_config.loader import load_config
+from forge_config.loader import (
+    canonicalize,
+    compute_base_rev,
+    deep_merge,
+    editable_sections,
+    load_config,
+    load_effective_config,
+    load_raw_config_dict,
+    prune_noop_overlay,
+)
+from forge_config.overlay import (
+    BASE_ONLY_KEYS,
+    EDITABLE_SECTIONS,
+    OverlayDocument,
+    OverlayFieldError,
+    OverlayMetadata,
+    project_overlay_safe,
+    split_overlay_editable,
+    validate_overlay_content,
+)
 from forge_config.schema import (
+    AdminAPIConfig,
     AgentsConfig,
     AgentWeaveConfig,
     APIKeyConfig,
@@ -20,6 +40,7 @@ from forge_config.schema import (
     LLMConfig,
     ManualTool,
     ManualToolAPI,
+    MutationPolicy,
     OpenAPISource,
     ParameterDef,
     PeerAgent,
@@ -38,8 +59,19 @@ from forge_config.secret_resolver import (
     SecretResolver,
 )
 from forge_config.watcher import ConfigWatcher
+from forge_config.writable_store import (
+    AuditChainError,
+    AuditEntry,
+    OverlayConflictError,
+    OverlayState,
+    OverlayStore,
+    OverlayTxn,
+)
 
 __all__ = [
+    "AuditChainError",
+    "AuditEntry",
+    "BASE_ONLY_KEYS",
     "AgentsConfig",
     "AgentWeaveConfig",
     "APIKeyConfig",
@@ -57,6 +89,8 @@ __all__ = [
     "LiteLLMConfig",
     "LLMConfig",
     "ManualTool",
+    "AdminAPIConfig",
+    "MutationPolicy",
     "ManualToolAPI",
     "OpenAPISource",
     "ParameterDef",
@@ -69,7 +103,25 @@ __all__ = [
     "ToolsConfig",
     "TrustLevel",
     "TrustPolicy",
+    "EDITABLE_SECTIONS",
+    "OverlayConflictError",
+    "OverlayDocument",
+    "OverlayFieldError",
+    "OverlayMetadata",
+    "project_overlay_safe",
+    "split_overlay_editable",
+    "validate_overlay_content",
+    "OverlayState",
+    "OverlayStore",
+    "OverlayTxn",
     "Workflow",
     "WorkflowStep",
+    "canonicalize",
+    "compute_base_rev",
+    "deep_merge",
+    "editable_sections",
     "load_config",
+    "load_effective_config",
+    "load_raw_config_dict",
+    "prune_noop_overlay",
 ]

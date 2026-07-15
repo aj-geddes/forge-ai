@@ -93,10 +93,79 @@ class HealthResponse(BaseModel):
 
 
 class AdminConfigResponse(BaseModel):
-    """Response containing the current config (secrets redacted)."""
+    """Response containing the current EFFECTIVE config (secrets
+    redacted) -- BASE deep-merged with the overlay. ``rev``/``base_rev``/
+    ``drift_from_git``/``source_layers`` describe the layered
+    BASE+OVERLAY model (see ``forge_gateway.routes.admin``); a
+    deployment with no overlay written yet reports ``rev=0``,
+    ``drift_from_git=False``, ``source_layers=["base"]``.
+    """
 
     config: dict[str, Any]
     path: str = ""
+    rev: int = 0
+    base_rev: str | None = None
+    drift_from_git: bool = False
+    source_layers: list[str] = Field(default_factory=lambda: ["base"])
+    mutation_policy: str = "overlay"
+
+
+class AdminBaseConfigResponse(BaseModel):
+    """``GET /v1/admin/config/base`` -- the BASE (git/ArgoCD source of
+    truth) config alone, secrets redacted, for diffing against the
+    effective config in the UI."""
+
+    config: dict[str, Any]
+    base_rev: str
+
+
+class PromotionDiffResponse(BaseModel):
+    """``GET /v1/admin/config/promotion/diff`` -- a unified diff of the
+    overlay's content against BASE, plus a ready-to-paste PR body. This
+    is EXPORT ONLY: no git credential exists in the pod
+    (``mutation_policy: overlay`` never writes to git), so promoting is
+    always a human action outside the running instance.
+    """
+
+    diff: str
+    pr_body: str
+    rev: int
+    base_rev: str | None = None
+    drift_from_git: bool
+
+
+class AdminAuditEntryResponse(BaseModel):
+    """One line of the hash-chained config audit journal, as exposed by
+    ``GET /v1/admin/config/history``."""
+
+    seq: int
+    ts: datetime
+    actor_sub: str
+    actor_email: str | None = None
+    permission_used: str
+    section: str
+    op: str
+    outcome: str
+    rev: int | None = None
+    base_rev: str | None = None
+    diff: dict[str, Any] = Field(default_factory=dict)
+    reason: str | None = None
+
+
+class AdminHistoryResponse(BaseModel):
+    """``GET /v1/admin/config/history`` response -- newest first."""
+
+    entries: list[AdminAuditEntryResponse] = Field(default_factory=list)
+    total: int = 0
+
+
+class AdminRevertRequest(BaseModel):
+    """``POST /v1/admin/config/revert`` request body. Omit ``to_rev`` to
+    drop the overlay entirely (revert to pure BASE); set it to roll back
+    to a specific prior overlay revision snapshot. Either way this
+    creates a NEW rev -- history is never rewritten."""
+
+    to_rev: int | None = None
 
 
 class AdminConfigUpdateRequest(BaseModel):
@@ -106,11 +175,36 @@ class AdminConfigUpdateRequest(BaseModel):
 
 
 class AdminConfigUpdateResponse(BaseModel):
-    """Response from a config update operation."""
+    """Response from a config update operation (layered BASE+OVERLAY
+    config -- see ``forge_gateway.routes.admin.apply_overlay_mutation``).
+
+    Honesty envelope: the UI must never render a success affordance
+    unless ``persisted is True``. ``persisted`` reflects the REAL
+    ``os.replace`` outcome of the overlay write -- a failure returns
+    HTTP 507 with ``persisted=False`` rather than a 200 with this field
+    set to ``True`` (the old silent-catch-and-claim-success behavior is
+    removed). ``durable`` is currently identical to ``persisted`` (the
+    overlay write IS the durable write -- there is no separate "queued"
+    state); it is a distinct field because a future async/queued write
+    path could make them diverge. ``drift_from_git`` is ``True``
+    whenever the overlay has ANY entries not yet reflected in BASE --
+    i.e. whenever the change just applied has not been promoted into
+    git and reconciled by ArgoCD.
+    """
 
     success: bool
     reloaded: bool = False
     message: str = ""
+    persisted: bool = False
+    """``True`` only when the overlay write's ``os.replace`` actually
+    completed -- see the module docstring above."""
+    durable: bool = False
+    drift_from_git: bool = True
+    rev: int = 0
+    base_rev: str | None = None
+    promotion_available: bool = False
+    """``True`` when the overlay has content that could meaningfully be
+    promoted into git (i.e. ``drift_from_git`` is ``True``)."""
 
 
 class AdminToolInfo(BaseModel):

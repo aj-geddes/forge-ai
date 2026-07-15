@@ -14,6 +14,10 @@ from typing import Any
 
 _REDACTED = "***REDACTED***"
 
+#: Public alias -- other modules (e.g. ``routes/admin.py``'s structural
+#: SecretRef restore) need to recognize this exact sentinel too.
+REDACTED_VALUE = _REDACTED
+
 # Security-review finding #1 (CRITICAL, admin config redaction):
 # forge_config.loader substitutes ``${ENV_VAR}`` placeholders with their
 # literal value BEFORE Pydantic validation (see
@@ -57,10 +61,10 @@ def is_secret_ref_shape(data: dict[str, Any]) -> bool:
     return "source" in data and "name" in data and data.get("source") in ("env", "k8s_secret")
 
 
-def redact_secrets(data: Any) -> None:
+def redact_secrets(data: Any, known_values: frozenset[str] | None = None) -> None:
     """Recursively redact secret-shaped and secret-named values in place.
 
-    Two independent, both-required redaction strategies:
+    Three redaction strategies (the third is optional defense-in-depth):
 
     1. Structural -- a resolved ``SecretRef`` (``{"source": "env" |
        "k8s_secret", "name": ..., "key": ...}``) is redacted by shape,
@@ -69,6 +73,14 @@ def redact_secrets(data: Any) -> None:
        :data:`SENSITIVE_KEY_NAMES` is blanked, regardless of where in the
        tree it appears. ``None`` values are left as ``None`` (an unset
        credential is not the same as a redacted one).
+    3. By VALUE (only when *known_values* is supplied) -- any *string* leaf
+       (a dict value OR a list item) that CONTAINS one of *known_values* is
+       blanked. *known_values* is the set of resolved secret values reachable
+       from config (see ``routes/admin._resolved_secret_values``), so a secret
+       baked into a NON-sensitive free-text field (an agent ``system_prompt``,
+       a tool ``description``, a workflow param) is withheld on read even
+       though its key name is not sensitive -- this closes Vector B's read
+       side.
 
     Container values (dict/list) are always recursed into first -- even
     under a sensitive key name -- so a SecretRef nested under e.g.
@@ -83,14 +95,40 @@ def redact_secrets(data: Any) -> None:
     if isinstance(data, dict):
         if is_secret_ref_shape(data):
             data["name"] = _REDACTED
-            if "key" in data:
+            # Only a NON-null key is a real secret component to redact (and
+            # later require restoring). An env-source SecretRef carries
+            # key=None, which was never secret -- blanking it to the sentinel
+            # made an honest GET round-trip un-restorable from a BASE that
+            # never persisted a key, and 400'd the write (SECURITY round 2).
+            if data.get("key") is not None:
                 data["key"] = _REDACTED
             return
         for key, value in data.items():
             if isinstance(value, dict | list):
-                redact_secrets(value)
-            elif is_sensitive_key(key) and value is not None:
+                redact_secrets(value, known_values)
+            elif (is_sensitive_key(key) and value is not None) or _contains_known_secret(
+                value, known_values
+            ):
                 data[key] = _REDACTED
     elif isinstance(data, list):
-        for item in data:
-            redact_secrets(item)
+        for i, item in enumerate(data):
+            if isinstance(item, dict | list):
+                redact_secrets(item, known_values)
+            elif _contains_known_secret(item, known_values):
+                data[i] = _REDACTED
+
+
+def _contains_known_secret(value: Any, known_values: frozenset[str] | None) -> bool:
+    """True if *value* is a string containing any of *known_values* (the
+    read-path VALUE scan; see :func:`redact_secrets` strategy 3)."""
+    if not known_values or not isinstance(value, str):
+        return False
+    return any(secret in value for secret in known_values)
+
+
+def scrub_text(value: str, known_values: frozenset[str] | None) -> str:
+    """Return :data:`REDACTED_VALUE` if *value* contains any known resolved
+    secret, else *value* unchanged -- for a bare string field (e.g. an admin
+    tool ``description``) returned outside a dict that :func:`redact_secrets`
+    would walk."""
+    return _REDACTED if _contains_known_secret(value, known_values) else value

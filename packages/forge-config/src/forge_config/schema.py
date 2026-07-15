@@ -350,6 +350,18 @@ class Permission(str, Enum):
     CONFIG_READ = "config:read"
     CONFIG_WRITE = "config:write"
     METRICS_READ = "metrics:read"
+    INFRASTRUCTURE_WRITE = "infrastructure:write"
+    """Layered BASE+OVERLAY config (design doc): documentary only --
+    security.*/oidc/service_tokens/authorization/conversation_store are
+    STRUCTURALLY base-only (``forge_config.overlay.OverlayDocument``
+    rejects them; no code path writes them to the overlay), so holding
+    this permission grants no additional runtime mutation capability.
+    Any request that targets one of those sections is rejected with
+    ``405``/``403`` ("edit via git") regardless of whether the caller
+    holds ``infrastructure:write`` -- it exists so an operator can grant
+    (or, by omission, withhold) a distinct, greppable permission for
+    "this principal is trusted to know infra exists" without that
+    permission ever being load-bearing for an actual mutation."""
 
 
 # Sentinel permission granting every permission in the closed set (used by
@@ -873,6 +885,37 @@ class ForgeMetadata(BaseModel):
     environment: str = "development"
 
 
+# --- Admin API Configuration (layered BASE+OVERLAY config) ---
+
+
+class MutationPolicy(str, Enum):
+    """Whether the runtime admin API may write to the config overlay at
+    all (see the layered BASE+OVERLAY config design doc).
+
+    ``overlay`` (default) allows ``config:write``-permitted callers to
+    mutate the whitelisted editable subset (tools/agents/llm/metadata)
+    via the overlay PVC; ``disabled`` turns every mutating admin config
+    endpoint into a ``405`` regardless of caller permissions -- for
+    locked-down GitOps shops where even overlay-scoped runtime edits are
+    disallowed and every change must go through a git PR.
+    """
+
+    OVERLAY = "overlay"
+    DISABLED = "disabled"
+
+
+class AdminAPIConfig(BaseModel):
+    """Settings for the runtime admin config-mutation API. This block is
+    itself BASE-only (it is not one of the whitelisted overlay sections,
+    so ``OverlayDocument``'s ``extra="forbid"`` rejects any attempt to
+    carry it in the overlay) -- a caller can never loosen
+    ``mutation_policy`` from ``disabled`` back to ``overlay`` at runtime,
+    only a git commit to BASE can.
+    """
+
+    mutation_policy: MutationPolicy = MutationPolicy.OVERLAY
+
+
 # --- Root Config ---
 
 
@@ -885,6 +928,7 @@ class ForgeConfig(BaseModel):
     security: SecurityConfig = Field(default_factory=SecurityConfig)
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
     conversation_store: ConversationStoreConfig = Field(default_factory=ConversationStoreConfig)
+    admin: AdminAPIConfig = Field(default_factory=AdminAPIConfig)
 
     @model_validator(mode="after")
     def validate_agentweave_peers_are_pinned(self) -> ForgeConfig:

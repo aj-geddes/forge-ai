@@ -16,7 +16,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from forge_config.schema import OIDCConfig, ServiceToken, SessionConfig
+from forge_config.schema import ForgeConfig, OIDCConfig, ServiceToken, SessionConfig
 from forge_security.oidc import (
     Authorizer,
     DiscoveryDocument,
@@ -67,15 +67,39 @@ _DEV_INSECURE_LOG_INTERVAL_SECONDS = 60
 _WORKLOAD_TEST_MODE_ENV_VAR = "FORGE_WORKLOAD_TEST_MODE"
 
 
+def _load_effective_or_plain_config(seed_path: str, overlay_path: str | None) -> ForgeConfig:
+    """Load config via the layered BASE+OVERLAY resolution model
+    (``forge_config.load_effective_config``) when an overlay path is
+    configured (``FORGE_CONFIG_OVERLAY_PATH``), otherwise fall back to
+    plain ``forge_config.load_config(seed_path)`` -- the pre-existing,
+    single-file behavior. This keeps every deployment that hasn't set
+    ``FORGE_CONFIG_OVERLAY_PATH`` byte-for-byte unchanged.
+    """
+    if overlay_path:
+        from forge_config import load_effective_config
+
+        return load_effective_config(seed_path, overlay_path)
+
+    from forge_config import load_config
+
+    return load_config(seed_path)
+
+
 def _make_reload_callback(
     config_path: str,
     agent: object | None = None,
+    *,
+    overlay_path: str | None = None,
 ) -> Callable[[Path], None]:
     """Create a config-reload callback bound to a specific config path and agent.
 
-    The returned callable accepts a ``Path`` argument (provided by ConfigWatcher)
-    and reloads the config, updating admin state, auth wiring, tool surface,
-    MCP server, and the A2A agent card.
+    The returned callable accepts a ``Path`` argument (provided by ConfigWatcher
+    -- either the BASE seed file or, when layered config is enabled, the
+    overlay file) and reloads the FULL effective config (BASE deep-merged
+    with the overlay, when configured), updating admin state, auth wiring,
+    tool surface, MCP server, and the A2A agent card. A change to EITHER
+    watched file triggers the same full recompute, since either one can
+    change the effective result.
 
     The agent reference is captured in the closure so that async tool rebuilds
     can be scheduled when the config file changes on disk.
@@ -84,9 +108,7 @@ def _make_reload_callback(
     def _on_config_change(changed_path: Path) -> None:
         logger.info("Config file changed: %s, triggering reload", changed_path)
         try:
-            from forge_config import load_config
-
-            new_config = load_config(str(changed_path))
+            new_config = _load_effective_or_plain_config(config_path, overlay_path)
             logger.info("Reloaded config: %s", new_config.metadata.name)
 
             # Preserve the current agent reference across config reloads
@@ -630,21 +652,32 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Signal startup complete
     health.set_started(True)
 
-    watcher = None
+    watchers: list[object] = []
     dev_insecure_task: asyncio.Task[None] | None = None
     workload_handle: WorkloadListenerHandle | None = None
 
     try:
-        # Try to initialize the agent from config
-        config_path = os.environ.get("FORGE_CONFIG_PATH", "forge.yaml")
+        # Try to initialize the agent from config. Layered BASE+OVERLAY
+        # config (see forge_config.loader.load_effective_config): when
+        # FORGE_CONFIG_OVERLAY_PATH is set, config_path (BASE/"seed") is
+        # deep-merged with the overlay PVC file; when it isn't set, this
+        # is byte-for-byte the pre-existing single-file behavior.
+        config_path = os.environ.get("FORGE_CONFIG_SEED_PATH") or os.environ.get(
+            "FORGE_CONFIG_PATH", "forge.yaml"
+        )
+        overlay_path = os.environ.get("FORGE_CONFIG_OVERLAY_PATH") or None
+        overlay_store = None
+        if overlay_path:
+            from forge_config import OverlayStore
+
+            overlay_store = OverlayStore(overlay_path)
+
         config = None
         agent = None
         conversation_store: ConversationStore | None = None
 
         try:
-            from forge_config import load_config
-
-            config = load_config(config_path)
+            config = _load_effective_or_plain_config(config_path, overlay_path)
             logger.info("Loaded config: %s", config.metadata.name)
             health.set_version(config.metadata.version)
 
@@ -693,7 +726,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             logger.warning("No config loaded, running with defaults")
 
         # Wire admin state and the auth subsystem
-        admin.set_state(config=config, config_path=config_path, agent=agent)
+        admin.set_state(
+            config=config,
+            config_path=config_path,
+            agent=agent,
+            overlay_store=overlay_store,
+            base_path=config_path,
+        )
         await _init_auth(config)
 
         if security.is_dev_insecure():
@@ -716,14 +755,28 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             health.set_workload_health({"status": "unavailable", "reason": "unexpected_error"})
             workload_handle = None
 
-        # Start config file watcher for hot-reload
-        if config is not None and Path(config_path).exists():
+        # Start config file watcher(s) for hot-reload. The BASE/seed file
+        # is always watched (git-driven reseed/drift signalling); when
+        # layered config is enabled, the overlay file is ALSO watched as a
+        # backstop (apply_overlay_mutation already hot-reloads synchronously
+        # on every admin-API mutation -- this only matters for an
+        # out-of-band change to the overlay file itself, e.g. manual PVC
+        # inspection/edits).
+        if config is not None:
             try:
                 from forge_config import ConfigWatcher
 
-                callback = _make_reload_callback(config_path, agent=agent)
-                watcher = ConfigWatcher(config_path, on_change=callback)
-                watcher.start()
+                callback = _make_reload_callback(
+                    config_path, agent=agent, overlay_path=overlay_path
+                )
+                if Path(config_path).exists():
+                    base_watcher = ConfigWatcher(config_path, on_change=callback)
+                    base_watcher.start()
+                    watchers.append(base_watcher)
+                if overlay_path and Path(overlay_path).exists():
+                    overlay_watcher = ConfigWatcher(overlay_path, on_change=callback)
+                    overlay_watcher.start()
+                    watchers.append(overlay_watcher)
             except ImportError:
                 logger.warning("ConfigWatcher not available, hot-reload disabled")
             except Exception:
@@ -736,9 +789,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     finally:
         logger.info("Forge Gateway shutting down")
-        if watcher is not None:
+        for watcher in watchers:
             try:
-                watcher.stop()
+                watcher.stop()  # type: ignore[attr-defined]
             except Exception:
                 logger.exception("Error stopping config watcher")
         if dev_insecure_task is not None:

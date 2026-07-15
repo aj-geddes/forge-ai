@@ -63,11 +63,25 @@ def default_config() -> ForgeConfig:
 
 
 @pytest.fixture()
-def _wire_admin(default_config: ForgeConfig) -> Iterator[None]:
-    """Wire admin state with a default config."""
-    admin.set_state(config=default_config, config_path="/tmp/test-forge.yaml", agent=None)  # noqa: S108
+def _wire_admin(default_config: ForgeConfig, tmp_path: Path) -> Iterator[None]:
+    """Wire admin state with a default config, a real BASE yaml file (so
+    mutation routes can read it via ``load_raw_config_dict``), and a real
+    ``OverlayStore`` on ``tmp_path`` (layered BASE+OVERLAY config) so PUT/
+    POST/PATCH/DELETE mutations persist durably instead of failing 507."""
+    from forge_config.writable_store import OverlayStore
+
+    base_path = tmp_path / "forge.yaml"
+    base_path.write_text(yaml.dump(default_config.model_dump(mode="json", exclude_none=True)))
+    store = OverlayStore(overlay_path=tmp_path / "overlay" / "forge.overlay.yaml")
+    admin.set_state(
+        config=default_config,
+        config_path=str(base_path),
+        agent=None,
+        overlay_store=store,
+        base_path=str(base_path),
+    )
     yield
-    admin.set_state(config=None, config_path="", agent=None)
+    admin.set_state(config=None, config_path="", agent=None, overlay_store=None, base_path="")
 
 
 @pytest.fixture()
@@ -147,7 +161,7 @@ def _wire_admin_with_peers(config_with_peers: ForgeConfig) -> Iterator[None]:
         agent=None,
     )
     yield
-    admin.set_state(config=None, config_path="", agent=None)
+    admin.set_state(config=None, config_path="", agent=None, overlay_store=None, base_path="")
 
 
 def _make_app() -> FastAPI:
@@ -459,7 +473,7 @@ def _wire_admin_with_agent_modes(config_with_agent_modes: ForgeConfig) -> Iterat
         agent=None,
     )
     yield
-    admin.set_state(config=None, config_path="", agent=None)
+    admin.set_state(config=None, config_path="", agent=None, overlay_store=None, base_path="")
 
 
 @pytest.mark.usefixtures("_wire_auth", "_wire_admin_with_agent_modes")
@@ -689,7 +703,12 @@ class TestGetConfig:
         data = resp.json()
         assert "config" in data
         assert "path" in data
-        assert data["path"] == "/tmp/test-forge.yaml"  # noqa: S108
+        assert data["path"].endswith("forge.yaml")
+        # Layered BASE+OVERLAY config: no overlay written yet -> rev 0,
+        # no drift, base-only source layer.
+        assert data["rev"] == 0
+        assert data["drift_from_git"] is False
+        assert data["source_layers"] == ["base"]
 
     def test_config_has_expected_sections(
         self, client: TestClient, auth_headers: dict[str, str]
@@ -705,7 +724,7 @@ class TestGetConfig:
     def test_returns_500_without_config(
         self, client: TestClient, auth_headers: dict[str, str]
     ) -> None:
-        admin.set_state(config=None, config_path="", agent=None)
+        admin.set_state(config=None, config_path="", agent=None, overlay_store=None, base_path="")
         resp = client.get("/v1/admin/config", headers=auth_headers)
         assert resp.status_code == 500
 
@@ -1113,7 +1132,7 @@ class TestGetConfigRedactsPlaintextSecrets:
         # Non-sensitive sibling fields survive redaction.
         assert params["model"] == "anthropic/claude-3-5-sonnet"
 
-        admin.set_state(config=None, config_path="", agent=None)
+        admin.set_state(config=None, config_path="", agent=None, overlay_store=None, base_path="")
 
     async def test_live_in_memory_config_is_not_mutated_by_redaction(
         self,
@@ -1145,7 +1164,7 @@ class TestGetConfigRedactsPlaintextSecrets:
             == "***REDACTED***"
         )
 
-        admin.set_state(config=None, config_path="", agent=None)
+        admin.set_state(config=None, config_path="", agent=None, overlay_store=None, base_path="")
 
 
 # =========================================================================
@@ -1157,33 +1176,33 @@ class TestGetConfigRedactsPlaintextSecrets:
 class TestUpdateConfigEdgeCases:
     """Cover update_config branches: OSError on write, agent reload paths."""
 
-    async def test_update_config_write_failure_returns_500(
+    async def test_update_config_write_failure_returns_507_honestly(
         self,
         async_client: httpx.AsyncClient,
         auth_headers: dict[str, str],
     ) -> None:
-        """Config update succeeds even when disk write fails (best-effort persist)."""
+        """**SECURITY**: a failed durable overlay write returns HTTP 507
+        with persisted=false -- it is NEVER swallowed or masked as a 200
+        success (the old silent-catch-and-claim-success behavior, and
+        this test's own former name/assertions, are removed per the
+        layered BASE+OVERLAY config design's honesty requirement)."""
+        import os
         import unittest.mock
 
-        admin.set_state(
-            config=ForgeConfig(),
-            config_path="/nonexistent/dir/forge.yaml",
-            agent=None,
-        )
-
         new_config = ForgeConfig()
-        with unittest.mock.patch.object(
-            Path, "write_text", side_effect=OSError("Permission denied")
-        ):
+
+        def _boom(*_a: object, **_k: object) -> None:
+            raise OSError("Permission denied")
+
+        with unittest.mock.patch.object(os, "replace", side_effect=_boom):
             resp = await async_client.put(
                 "/v1/admin/config",
                 json={"config": new_config.model_dump(mode="json")},
                 headers=auth_headers,
             )
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["success"] is True
-        assert "in-memory only" in data["message"]
+        assert resp.status_code == 507
+        detail = resp.json()["detail"].lower()
+        assert "persist" in detail
 
     async def test_update_config_with_agent_reload_success(
         self,
@@ -1311,7 +1330,7 @@ class TestListToolsNoRegistry:
         assert resp.json() == []
 
         # Cleanup
-        admin.set_state(config=None, config_path="", agent=None)
+        admin.set_state(config=None, config_path="", agent=None, overlay_store=None, base_path="")
 
 
 # =========================================================================
@@ -1445,7 +1464,7 @@ class TestListSessionsWithData:
         assert sess_map["sess-1"]["agent"] is None
 
         # Cleanup
-        admin.set_state(config=None, config_path="", agent=None)
+        admin.set_state(config=None, config_path="", agent=None, overlay_store=None, base_path="")
 
     async def test_list_sessions_agent_without_context(
         self,
@@ -1465,7 +1484,7 @@ class TestListSessionsWithData:
         assert resp.json() == []
 
         # Cleanup
-        admin.set_state(config=None, config_path="", agent=None)
+        admin.set_state(config=None, config_path="", agent=None, overlay_store=None, base_path="")
 
 
 # =========================================================================
@@ -1504,7 +1523,7 @@ class TestDeleteSessionSuccess:
         assert "target-session" not in await store.session_ids()
 
         # Cleanup
-        admin.set_state(config=None, config_path="", agent=None)
+        admin.set_state(config=None, config_path="", agent=None, overlay_store=None, base_path="")
 
     async def test_delete_session_not_found(
         self,
@@ -1529,7 +1548,7 @@ class TestDeleteSessionSuccess:
         assert "not found" in resp.json()["detail"]
 
         # Cleanup
-        admin.set_state(config=None, config_path="", agent=None)
+        admin.set_state(config=None, config_path="", agent=None, overlay_store=None, base_path="")
 
     async def test_delete_session_no_context(
         self,
@@ -1549,7 +1568,7 @@ class TestDeleteSessionSuccess:
         assert "context" in resp.json()["detail"].lower()
 
         # Cleanup
-        admin.set_state(config=None, config_path="", agent=None)
+        admin.set_state(config=None, config_path="", agent=None, overlay_store=None, base_path="")
 
 
 # =========================================================================
@@ -1567,14 +1586,14 @@ class TestListPeersNoConfig:
         auth_headers: dict[str, str],
     ) -> None:
         """Line 260: _config is None -> return []."""
-        admin.set_state(config=None, config_path="", agent=None)
+        admin.set_state(config=None, config_path="", agent=None, overlay_store=None, base_path="")
 
         resp = await async_client.get("/v1/admin/peers", headers=auth_headers)
         assert resp.status_code == 200
         assert resp.json() == []
 
         # Cleanup
-        admin.set_state(config=None, config_path="", agent=None)
+        admin.set_state(config=None, config_path="", agent=None, overlay_store=None, base_path="")
 
 
 # =========================================================================
@@ -1592,7 +1611,7 @@ class TestPingPeerEdgeCases:
         auth_headers: dict[str, str],
     ) -> None:
         """Line 285: _config is None -> 404."""
-        admin.set_state(config=None, config_path="", agent=None)
+        admin.set_state(config=None, config_path="", agent=None, overlay_store=None, base_path="")
 
         resp = await async_client.post("/v1/admin/peers/any-peer/ping", headers=auth_headers)
         assert resp.status_code == 404
@@ -1635,7 +1654,7 @@ class TestPingPeerEdgeCases:
         assert "error" in data
 
         # Cleanup
-        admin.set_state(config=None, config_path="", agent=None)
+        admin.set_state(config=None, config_path="", agent=None, overlay_store=None, base_path="")
 
     async def test_ping_peer_timeout_returns_unreachable(
         self,
@@ -1676,7 +1695,7 @@ class TestPingPeerEdgeCases:
         assert "error" in data
 
         # Cleanup
-        admin.set_state(config=None, config_path="", agent=None)
+        admin.set_state(config=None, config_path="", agent=None, overlay_store=None, base_path="")
 
     async def test_ping_peer_http_status_error_returns_unreachable(
         self,
@@ -1724,7 +1743,7 @@ class TestPingPeerEdgeCases:
         assert "error" in data
 
         # Cleanup
-        admin.set_state(config=None, config_path="", agent=None)
+        admin.set_state(config=None, config_path="", agent=None, overlay_store=None, base_path="")
 
 
 # =========================================================================
@@ -1795,7 +1814,7 @@ class TestListToolsWithPeerTools:
         assert tool_map["peer_search"]["source"] == "peer"
 
         # Cleanup
-        admin.set_state(config=None, config_path="", agent=None)
+        admin.set_state(config=None, config_path="", agent=None, overlay_store=None, base_path="")
 
 
 # =========================================================================
@@ -1845,24 +1864,45 @@ class TestCreatePeerRequiresWritePermission:
         assert resp.json()["detail"] == "forbidden"
 
         security.reset_auth()
-        admin.set_state(config=None, config_path="", agent=None)
+        admin.set_state(config=None, config_path="", agent=None, overlay_store=None, base_path="")
 
 
 @pytest.mark.usefixtures("_wire_auth")
-class TestCreatePeer:
-    """POST /v1/admin/peers: validates, SSRF-checks, appends to
-    agents.peers, persists + hot-reloads the same way PUT /v1/admin/config
-    does, and returns the created peer."""
+def _wire_admin_with_overlay(
+    config: ForgeConfig, tmp_path: Any, agent: Any = None, config_path: Any = None
+) -> None:
+    """Wire admin state with a real BASE yaml file + a real OverlayStore
+    on tmp_path -- mutation routes need both to persist durably instead
+    of failing 507."""
+    from forge_config.writable_store import OverlayStore
 
-    async def test_creates_and_returns_the_peer(
+    base_file = Path(config_path) if config_path is not None else Path(tmp_path) / "forge.yaml"
+    base_file.write_text(yaml.dump(config.model_dump(mode="json", exclude_none=True)))
+    store = OverlayStore(overlay_path=Path(tmp_path) / "overlay" / "forge.overlay.yaml")
+    admin.set_state(
+        config=config,
+        config_path=str(base_file),
+        agent=agent,
+        overlay_store=store,
+        base_path=str(base_file),
+    )
+
+
+class TestCreatePeer:
+    """POST /v1/admin/peers is BASE-ONLY (Phase-1 field-level split): a peer
+    carries an ``endpoint`` (an outbound destination), so creating one is a
+    git-promoted change, never a runtime overlay edit. The route returns a
+    clear promote-via-git 400 (or 500 when no config is loaded). Editing an
+    EXISTING base-defined peer's safe fields is still allowed via PATCH."""
+
+    async def test_creating_a_peer_is_base_only_promote_via_git(
         self,
         async_client: httpx.AsyncClient,
         auth_headers: dict[str, str],
         tmp_path: Any,
     ) -> None:
         config_file = tmp_path / "forge.yaml"
-        config_file.write_text("metadata:\n  name: old\n")
-        admin.set_state(config=ForgeConfig(), config_path=str(config_file), agent=None)
+        _wire_admin_with_overlay(ForgeConfig(), tmp_path, config_path=config_file)
 
         resp = await async_client.post(
             "/v1/admin/peers",
@@ -1870,204 +1910,67 @@ class TestCreatePeer:
                 "name": "data-forge",
                 "endpoint": "https://data-forge.hvs.internal.example.com",
                 "trust_level": "high",
-                "capabilities": ["data_query", "reporting"],
+                "capabilities": ["data_query"],
             },
             headers=auth_headers,
         )
 
-        assert resp.status_code == 201
-        data = resp.json()
-        assert data["name"] == "data-forge"
-        assert data["endpoint"] == "https://data-forge.hvs.internal.example.com"
-        assert data["trust_level"] == "high"
-        assert data["capabilities"] == ["data_query", "reporting"]
+        assert resp.status_code == 400
+        detail = resp.json()["detail"].lower()
+        assert "base-only" in detail
+        assert "promote" in detail and "git" in detail
 
-        admin.set_state(config=None, config_path="", agent=None)
+        admin.set_state(config=None, config_path="", agent=None, overlay_store=None, base_path="")
 
-    async def test_persists_to_disk(
+    async def test_creation_never_writes_the_overlay(
         self,
         async_client: httpx.AsyncClient,
         auth_headers: dict[str, str],
         tmp_path: Any,
     ) -> None:
         config_file = tmp_path / "forge.yaml"
-        config_file.write_text("metadata:\n  name: old\n")
-        admin.set_state(config=ForgeConfig(), config_path=str(config_file), agent=None)
+        _wire_admin_with_overlay(ForgeConfig(), tmp_path, config_path=config_file)
 
         resp = await async_client.post(
             "/v1/admin/peers",
             json={"name": "peer-x", "endpoint": "https://peer-x.example.com"},
             headers=auth_headers,
         )
-        assert resp.status_code == 201
+        assert resp.status_code == 400
 
-        persisted = yaml.safe_load(config_file.read_text())
-        peer_names = [p["name"] for p in persisted["agents"]["peers"]]
-        assert "peer-x" in peer_names
+        # No overlay file is written for a rejected creation.
+        overlay_file = tmp_path / "overlay" / "forge.overlay.yaml"
+        assert not overlay_file.exists()
 
-        admin.set_state(config=None, config_path="", agent=None)
+        get_resp = await async_client.get("/v1/admin/peers", headers=auth_headers)
+        assert get_resp.json() == []
 
-    async def test_appends_to_the_running_config(
+        admin.set_state(config=None, config_path="", agent=None, overlay_store=None, base_path="")
+
+    async def test_creation_rejected_even_for_public_endpoint(
         self,
         async_client: httpx.AsyncClient,
         auth_headers: dict[str, str],
         tmp_path: Any,
     ) -> None:
         config_file = tmp_path / "forge.yaml"
-        config_file.write_text("metadata:\n  name: old\n")
-        config = ForgeConfig(
-            agents=AgentsConfig(
-                peers=[PeerAgent(name="existing", endpoint="https://existing.example.com")]
-            )
-        )
-        admin.set_state(config=config, config_path=str(config_file), agent=None)
+        _wire_admin_with_overlay(ForgeConfig(), tmp_path, config_path=config_file)
 
         resp = await async_client.post(
             "/v1/admin/peers",
             json={"name": "peer-y", "endpoint": "https://peer-y.example.com"},
             headers=auth_headers,
         )
-        assert resp.status_code == 201
-
-        get_resp = await async_client.get("/v1/admin/peers", headers=auth_headers)
-        names = {p["name"] for p in get_resp.json()}
-        assert names == {"existing", "peer-y"}
-
-        admin.set_state(config=None, config_path="", agent=None)
-
-    async def test_hot_reloads_tool_surface(
-        self,
-        async_client: httpx.AsyncClient,
-        auth_headers: dict[str, str],
-        tmp_path: Any,
-    ) -> None:
-        from unittest.mock import AsyncMock
-
-        config_file = tmp_path / "forge.yaml"
-        config_file.write_text("metadata:\n  name: old\n")
-
-        mock_registry = MagicMock()
-        mock_registry.build_and_swap = AsyncMock(return_value=True)
-        mock_agent = MagicMock()
-        mock_agent._registry = mock_registry
-
-        admin.set_state(config=ForgeConfig(), config_path=str(config_file), agent=mock_agent)
-
-        resp = await async_client.post(
-            "/v1/admin/peers",
-            json={"name": "peer-z", "endpoint": "https://peer-z.example.com"},
-            headers=auth_headers,
-        )
-        assert resp.status_code == 201
-        mock_registry.build_and_swap.assert_awaited_once()
-
-        admin.set_state(config=None, config_path="", agent=None)
-
-    async def test_rejects_ssrf_endpoint(
-        self,
-        async_client: httpx.AsyncClient,
-        auth_headers: dict[str, str],
-    ) -> None:
-        admin.set_state(config=ForgeConfig(), config_path="/tmp/test.yaml", agent=None)  # noqa: S108
-
-        resp = await async_client.post(
-            "/v1/admin/peers",
-            json={"name": "internal-peer", "endpoint": "http://192.168.1.50:8000"},
-            headers=auth_headers,
-        )
-
-        assert resp.status_code == 400
-        detail = resp.json()["detail"].lower()
-        assert "private" in detail or "internal" in detail
-
-        # The rejected peer must never have been appended to the running config.
-        get_resp = await async_client.get("/v1/admin/peers", headers=auth_headers)
-        assert get_resp.json() == []
-
-        admin.set_state(config=None, config_path="", agent=None)
-
-    async def test_rejects_localhost_endpoint(
-        self,
-        async_client: httpx.AsyncClient,
-        auth_headers: dict[str, str],
-    ) -> None:
-        admin.set_state(config=ForgeConfig(), config_path="/tmp/test.yaml", agent=None)  # noqa: S108
-
-        resp = await async_client.post(
-            "/v1/admin/peers",
-            json={"name": "local-peer", "endpoint": "http://localhost:9000"},
-            headers=auth_headers,
-        )
-
         assert resp.status_code == 400
 
-        admin.set_state(config=None, config_path="", agent=None)
-
-    async def test_rejects_unpinned_peer_when_agentweave_enabled(
-        self,
-        async_client: httpx.AsyncClient,
-        auth_headers: dict[str, str],
-    ) -> None:
-        """ADR-0004 SS7.3: when security.agentweave.enabled is true, every
-        peer must carry a spiffe_id. forge-config enforces this at load
-        time by raising a ValueError from a model_validator -- the admin
-        API must surface that as a clean 4xx, never an unhandled 500."""
-        from forge_config.schema import AgentWeaveConfig, SecurityConfig
-
-        config = ForgeConfig(
-            security=SecurityConfig(agentweave=AgentWeaveConfig(enabled=True)),
-        )
-        admin.set_state(config=config, config_path="/tmp/test.yaml", agent=None)  # noqa: S108
-
-        resp = await async_client.post(
-            "/v1/admin/peers",
-            json={"name": "unpinned-peer", "endpoint": "https://unpinned.example.com"},
-            headers=auth_headers,
-        )
-
-        assert resp.status_code < 500
-        assert resp.status_code >= 400
-        detail = resp.json()["detail"].lower()
-        assert "spiffe_id" in detail or "spiffe" in detail
-
-        # The rejected peer must never have been appended to the running config.
-        assert config.agents.peers == []
-
-        admin.set_state(config=None, config_path="", agent=None)
-
-    async def test_accepts_pinned_peer_when_agentweave_enabled(
-        self,
-        async_client: httpx.AsyncClient,
-        auth_headers: dict[str, str],
-    ) -> None:
-        from forge_config.schema import AgentWeaveConfig, SecurityConfig
-
-        config = ForgeConfig(
-            security=SecurityConfig(agentweave=AgentWeaveConfig(enabled=True)),
-        )
-        admin.set_state(config=config, config_path="/tmp/test.yaml", agent=None)  # noqa: S108
-
-        resp = await async_client.post(
-            "/v1/admin/peers",
-            json={
-                "name": "pinned-peer",
-                "endpoint": "https://pinned.example.com",
-                "spiffe_id": "spiffe://forge.local/peer/pinned-peer",
-            },
-            headers=auth_headers,
-        )
-
-        assert resp.status_code == 201
-        assert resp.json()["spiffe_id"] == "spiffe://forge.local/peer/pinned-peer"
-
-        admin.set_state(config=None, config_path="", agent=None)
+        admin.set_state(config=None, config_path="", agent=None, overlay_store=None, base_path="")
 
     async def test_returns_500_without_config(
         self,
         async_client: httpx.AsyncClient,
         auth_headers: dict[str, str],
     ) -> None:
-        admin.set_state(config=None, config_path="", agent=None)
+        admin.set_state(config=None, config_path="", agent=None, overlay_store=None, base_path="")
 
         resp = await async_client.post(
             "/v1/admin/peers",
@@ -2076,27 +1979,6 @@ class TestCreatePeer:
         )
 
         assert resp.status_code == 500
-
-    async def test_rejects_duplicate_peer_name(
-        self,
-        async_client: httpx.AsyncClient,
-        auth_headers: dict[str, str],
-    ) -> None:
-        config = ForgeConfig(
-            agents=AgentsConfig(peers=[PeerAgent(name="dupe", endpoint="https://dupe.example.com")])
-        )
-        admin.set_state(config=config, config_path="/tmp/test.yaml", agent=None)  # noqa: S108
-
-        resp = await async_client.post(
-            "/v1/admin/peers",
-            json={"name": "dupe", "endpoint": "https://dupe-2.example.com"},
-            headers=auth_headers,
-        )
-
-        assert resp.status_code == 400
-        assert "dupe" in resp.json()["detail"].lower()
-
-        admin.set_state(config=None, config_path="", agent=None)
 
 
 # =========================================================================

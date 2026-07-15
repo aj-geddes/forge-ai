@@ -16,6 +16,7 @@ import { Separator } from "@/components/ui/separator";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useToast } from "@/components/ui/toast";
 import { useAddToolToConfig } from "@/api/hooks";
+import { deriveMutationUiState, isSuccessState } from "@/lib/mutationState";
 import { useToolStore } from "@/stores/toolStore";
 import { cn } from "@/lib/utils";
 import {
@@ -541,17 +542,30 @@ export function OpenAPIWizard() {
         openapi_sources: [...(tools.openapi_sources ?? []), source],
       }),
       {
-        onSuccess: () => {
-          toast({
-            title: "OpenAPI tools added",
-            description: `${openApiData.selected.length} tool(s) from ${openApiData.specTitle || "spec"} saved to config.`,
-          });
-          closeWizard();
+        onSuccess: (envelope) => {
+          const uiState = deriveMutationUiState(envelope, undefined);
+          if (isSuccessState(uiState)) {
+            toast({
+              title: uiState.kind === "success-drift" ? "Saved — not yet in Git" : "OpenAPI tools added",
+              description:
+                uiState.kind === "success-drift"
+                  ? uiState.message
+                  : `${openApiData.selected.length} tool(s) from ${openApiData.specTitle || "spec"} saved to config.`,
+            });
+            closeWizard();
+          } else {
+            // persisted:false -- never close the wizard or claim success.
+            toast({
+              title: "Failed to add tools",
+              description: uiState.message,
+              variant: "destructive",
+            });
+          }
         },
         onError: (err) => {
           toast({
             title: "Failed to add tools",
-            description: err instanceof Error ? err.message : "Unknown error",
+            description: deriveMutationUiState(undefined, err).message,
             variant: "destructive",
           });
         },

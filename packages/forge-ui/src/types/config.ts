@@ -92,6 +92,9 @@ export interface ManualTool {
   description: string;
   parameters?: ParameterDef[];
   api: ManualToolAPI;
+  /** ADR-0005 SS6.2 human-approval gate. Base-only (security control) --
+   * runtime-editable UI must never let a caller flip this. */
+  requires_approval?: boolean;
 }
 
 export interface OpenAPISource {
@@ -231,4 +234,96 @@ export interface PingPeerResponse {
   http_status?: number;
   error?: string;
   latency_ms?: number | null;
+}
+
+// --- Layered base+overlay config, monotonic git-promotion ---
+//
+// These mirror the honesty-envelope contract on the admin config API:
+// `persisted` reflects the real filesystem write outcome (never assumed
+// from a 2xx status alone), `durable`/`drift_from_git` distinguish "written
+// to the overlay PVC" from "reconciled into the git-owned BASE", and
+// `rev`/`base_rev` drive optimistic concurrency (If-Match) plus the
+// drift-banner/promotion-diff UI.
+
+/**
+ * Policy determining how configuration mutations are handled.
+ */
+export type MutationPolicy = "disabled" | "overlay";
+
+/**
+ * Response from GET /v1/admin/config. `rev` and `base_rev` drive optimistic
+ * concurrency via If-Match headers. `base_rev` is `null` on a deployment
+ * with no overlay written yet (pure BASE, nothing to diff against).
+ */
+export interface AdminConfigGetResponse {
+  config: ForgeConfig;
+  path: string;
+  rev: number;
+  base_rev: string | null;
+  drift_from_git: boolean;
+  source_layers: string[];
+  mutation_policy: MutationPolicy;
+}
+
+/**
+ * Envelope returned by every config-mutating admin endpoint. `persisted`
+ * must be true before the UI shows success. NOTE: `POST /v1/admin/peers`
+ * does NOT return this envelope -- it resolves the bare created peer
+ * (`PeerAgent`); see the doc comment on `useCreatePeer` in `api/hooks.ts`.
+ */
+export interface ConfigMutationEnvelope {
+  persisted: boolean;
+  durable: boolean;
+  drift_from_git: boolean;
+  rev: number;
+  base_rev: string | null;
+  promotion_available: boolean;
+  message: string;
+}
+
+/**
+ * A single entry in the configuration audit trail. NOT currently returned
+ * by `GET /v1/admin/config/promotion/diff` (see `PromotionDiffResponse`) --
+ * the audit trail lives on the separate `GET /v1/admin/config/history`
+ * endpoint. Kept here (optional, unused today) for the promotion view to
+ * pick up if/when that endpoint is wired in.
+ */
+export interface AuditTrailEntry {
+  rev: number;
+  updated_by?: string;
+  updated_at?: string;
+  summary?: string;
+}
+
+/**
+ * Response from GET /v1/admin/config/promotion/diff. Contains the unified
+ * diff and a copy-paste PR body. `audit_trail` and `changed_count` are not
+ * populated by the current backend response model -- both are optional and
+ * the UI degrades gracefully (hides/falls back) when absent; see the note
+ * on `AuditTrailEntry` above.
+ */
+export interface PromotionDiffResponse {
+  diff: string;
+  pr_body: string;
+  audit_trail?: AuditTrailEntry[];
+  rev: number;
+  base_rev: string | null;
+  drift_from_git: boolean;
+  changed_count?: number;
+}
+
+/**
+ * Body of a 409 (Conflict) response for optimistic-concurrency failures.
+ *
+ * FastAPI serializes `HTTPException(status_code=409, detail=...)` as
+ * `{"detail": <detail>}`. The admin API's 409s pass a structured
+ * `{message, current_rev}` object as `detail`, so the server's current
+ * revision normally lives at `body.detail.current_rev`. `current_rev` /
+ * `rev` are also accepted at the top level as a defensive fallback for any
+ * endpoint that hasn't been migrated to the structured form yet.
+ */
+export interface ConflictErrorBody {
+  detail?: string | { message?: string; current_rev?: number };
+  current_rev?: number;
+  rev?: number;
 }

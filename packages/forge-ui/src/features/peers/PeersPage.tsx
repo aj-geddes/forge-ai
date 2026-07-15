@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import {
   Network,
   Plus,
@@ -8,6 +8,8 @@ import {
   Loader2,
   Info,
   AlertCircle,
+  Trash2,
+  Pencil,
 } from "lucide-react";
 import {
   Card,
@@ -31,9 +33,13 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
-import { ApiError } from "@/api/client";
-import { usePeers, usePingPeer, useCreatePeer } from "@/api/hooks";
+import { usePeers, usePingPeer, useCreatePeer, useConfigEnvelope, useDeletePeer, useUpdatePeer } from "@/api/hooks";
+import { deriveMutationUiState, isSuccessState } from "@/lib/mutationState";
+import { useToast } from "@/components/ui/toast";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import type { TrustLevel } from "@/types/config";
+
+const DISABLED_REASON = "Config editing is disabled (GitOps-managed) — edit via git.";
 
 type ConnectionStatus = "reachable" | "unreachable" | "unknown";
 
@@ -84,10 +90,18 @@ function PeerCard({
   peer,
   pingState,
   onPing,
+  onEdit,
+  onDelete,
+  actionsDisabled,
+  actionsDisabledReason,
 }: {
   peer: { name: string; endpoint: string; trust_level: TrustLevel; capabilities?: string[] };
   pingState: PeerPingState;
   onPing: () => void;
+  onEdit: () => void;
+  onDelete: () => void;
+  actionsDisabled: boolean;
+  actionsDisabledReason?: string;
 }) {
   return (
     <Card>
@@ -97,12 +111,44 @@ function PeerCard({
             <StatusDot status={pingState.status} />
             <CardTitle className="text-lg">{peer.name}</CardTitle>
           </div>
-          <Badge
-            variant="outline"
-            className={cn("capitalize", trustLevelColors[peer.trust_level])}
-          >
-            {peer.trust_level}
-          </Badge>
+          <div className="flex items-center gap-2">
+            <Badge
+              variant="outline"
+              className={cn("capitalize", trustLevelColors[peer.trust_level])}
+            >
+              {peer.trust_level}
+            </Badge>
+            <span
+              title={actionsDisabled ? actionsDisabledReason : undefined}
+              className="inline-block"
+            >
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-8 w-8 shrink-0"
+                disabled={actionsDisabled}
+                onClick={onEdit}
+                title={actionsDisabled ? undefined : "Edit trust level & capabilities"}
+              >
+                <Pencil className="h-3.5 w-3.5" />
+              </Button>
+            </span>
+            <span
+              title={actionsDisabled ? actionsDisabledReason : undefined}
+              className="inline-block"
+            >
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-8 w-8 shrink-0"
+                disabled={actionsDisabled}
+                onClick={onDelete}
+                title={actionsDisabled ? undefined : "Delete this peer"}
+              >
+                <Trash2 className="h-3.5 w-3.5 text-destructive" />
+              </Button>
+            </span>
+          </div>
         </div>
         <CardDescription className="flex items-center gap-1.5 pt-1">
           <Globe className="h-3.5 w-3.5" />
@@ -164,7 +210,13 @@ function PeerCard({
   );
 }
 
-function AddPeerDialog() {
+function AddPeerDialog({
+  disabled,
+  disabledReason,
+}: {
+  disabled?: boolean;
+  disabledReason?: string;
+}) {
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
   const [endpoint, setEndpoint] = useState("");
@@ -202,18 +254,17 @@ function AddPeerDialog() {
         spiffe_id: spiffeId.trim() || undefined,
       },
       {
+        // POST /v1/admin/peers resolves the bare created-peer shape, not a
+        // {persisted, ...} envelope (see hooks.ts useCreatePeer) -- honesty
+        // is enforced at the transport layer there: a rejected write
+        // (409/405/507) always throws before this callback ever fires, so a
+        // resolved mutate() here is unconditionally a real, durable success.
         onSuccess: () => {
           setOpen(false);
           resetForm();
         },
         onError: (err) => {
-          setSubmitError(
-            err instanceof ApiError
-              ? err.message
-              : err instanceof Error
-                ? err.message
-                : "Failed to add peer",
-          );
+          setSubmitError(deriveMutationUiState(undefined, err).message);
         },
       },
     );
@@ -227,10 +278,23 @@ function AddPeerDialog() {
         if (!next) setSubmitError(null);
       }}
     >
-      <DialogTrigger className="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90">
-        <Plus className="h-4 w-4" />
-        Add Peer
-      </DialogTrigger>
+      {disabled ? (
+        <span title={disabledReason} className="inline-block">
+          <button
+            type="button"
+            disabled
+            className="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground opacity-50 cursor-not-allowed"
+          >
+            <Plus className="h-4 w-4" />
+            Add Peer
+          </button>
+        </span>
+      ) : (
+        <DialogTrigger className="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90">
+          <Plus className="h-4 w-4" />
+          Add Peer
+        </DialogTrigger>
+      )}
       <DialogContent>
         <DialogHeader>
           <DialogTitle>Add Peer Agent</DialogTitle>
@@ -345,12 +409,137 @@ function AddPeerDialog() {
   );
 }
 
+function EditPeerDialog({
+  peer,
+  rev,
+  onOpenChange,
+}: {
+  peer: { name: string; trust_level: TrustLevel; capabilities?: string[] } | null;
+  rev: number | undefined;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const [trustLevel, setTrustLevel] = useState<TrustLevel>("medium");
+  const [capabilities, setCapabilities] = useState("");
+  const [submitError, setSubmitError] = useState<string | null>(null);
+  const updatePeer = useUpdatePeer();
+  const { toast } = useToast();
+
+  useEffect(() => {
+    if (peer) {
+      setTrustLevel(peer.trust_level);
+      setCapabilities((peer.capabilities ?? []).join(", "));
+      setSubmitError(null);
+    }
+  }, [peer]);
+
+  const handleSubmit = () => {
+    if (!peer || rev === undefined) return;
+    setSubmitError(null);
+
+    updatePeer.mutate(
+      {
+        name: peer.name,
+        peer: {
+          trust_level: trustLevel,
+          capabilities: capabilities
+            .split(",")
+            .map((c) => c.trim())
+            .filter(Boolean),
+        },
+        rev,
+      },
+      {
+        onSuccess: (envelope) => {
+          const uiState = deriveMutationUiState(envelope, undefined);
+          if (isSuccessState(uiState)) {
+            // Match the create-wizard treatment: surface drift even though
+            // the edit itself succeeded, instead of a silent close.
+            if (uiState.kind === "success-drift") {
+              toast({ title: "Saved — not yet in Git", description: uiState.message });
+            }
+            onOpenChange(false);
+          } else {
+            setSubmitError(uiState.message);
+          }
+        },
+        onError: (err) => {
+          setSubmitError(deriveMutationUiState(undefined, err).message);
+        },
+      },
+    );
+  };
+
+  return (
+    <Dialog open={peer !== null} onOpenChange={onOpenChange}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Edit Peer</DialogTitle>
+          <DialogDescription>
+            Update the trust level and declared capabilities for{" "}
+            {peer ? <strong>{peer.name}</strong> : "this peer"}. The name and endpoint are
+            not editable here -- delete and re-add the peer to change those.
+          </DialogDescription>
+        </DialogHeader>
+        {submitError && (
+          <div className="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+            <AlertCircle className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+            <span>{submitError}</span>
+          </div>
+        )}
+        <div className="space-y-4 py-2">
+          <div className="space-y-2">
+            <Label htmlFor="edit-peer-trust">Trust Level</Label>
+            <Select
+              id="edit-peer-trust"
+              value={trustLevel}
+              onChange={(e) => setTrustLevel(e.target.value as TrustLevel)}
+            >
+              <option value="high">High</option>
+              <option value="medium">Medium</option>
+              <option value="low">Low</option>
+            </Select>
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="edit-peer-capabilities">Capabilities</Label>
+            <Input
+              id="edit-peer-capabilities"
+              placeholder="search, summarize, translate"
+              value={capabilities}
+              onChange={(e) => setCapabilities(e.target.value)}
+            />
+          </div>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>
+            Cancel
+          </Button>
+          <Button onClick={handleSubmit} disabled={updatePeer.isPending}>
+            {updatePeer.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+            Save
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 export function PeersPage() {
   const { data: peers, isLoading, error } = usePeers();
+  const { data: envelope } = useConfigEnvelope();
   const pingMutation = usePingPeer();
+  const deletePeer = useDeletePeer();
+  const { toast } = useToast();
   const [pingStates, setPingStates] = useState<Record<string, PeerPingState>>(
     {},
   );
+  const [pendingDelete, setPendingDelete] = useState<string | null>(null);
+  const [editingPeer, setEditingPeer] = useState<{
+    name: string;
+    trust_level: TrustLevel;
+    capabilities?: string[];
+  } | null>(null);
+
+  const editingDisabled = envelope?.mutation_policy === "disabled";
 
   const handlePing = useCallback(
     (peerName: string) => {
@@ -392,6 +581,24 @@ export function PeersPage() {
     [pingStates],
   );
 
+  const handleConfirmDelete = useCallback(() => {
+    if (pendingDelete === null || envelope?.rev === undefined) return;
+    deletePeer.mutate(
+      { name: pendingDelete, rev: envelope.rev },
+      {
+        onSuccess: (result) => {
+          // Match the create-wizard treatment: surface drift even though
+          // the delete itself succeeded, instead of a silent close.
+          const state = deriveMutationUiState(result, undefined);
+          if (state.kind === "success-drift") {
+            toast({ title: "Saved — not yet in Git", description: state.message });
+          }
+          setPendingDelete(null);
+        },
+      },
+    );
+  }, [pendingDelete, envelope?.rev, deletePeer, toast]);
+
   if (isLoading) {
     return (
       <div className="flex min-h-[400px] items-center justify-center">
@@ -426,7 +633,10 @@ export function PeersPage() {
             </p>
           </div>
         </div>
-        <AddPeerDialog />
+        <AddPeerDialog
+          disabled={editingDisabled}
+          disabledReason={editingDisabled ? DISABLED_REASON : undefined}
+        />
       </div>
 
       {!peers || peers.length === 0 ? (
@@ -460,10 +670,43 @@ export function PeersPage() {
               peer={peer}
               pingState={getPingState(peer.name)}
               onPing={() => handlePing(peer.name)}
+              onEdit={() =>
+                setEditingPeer({
+                  name: peer.name,
+                  trust_level: peer.trust_level,
+                  capabilities: peer.capabilities,
+                })
+              }
+              onDelete={() => setPendingDelete(peer.name)}
+              actionsDisabled={editingDisabled}
+              actionsDisabledReason={editingDisabled ? DISABLED_REASON : undefined}
             />
           ))}
         </div>
       )}
+
+      <EditPeerDialog
+        peer={editingPeer}
+        rev={envelope?.rev}
+        onOpenChange={(open) => !open && setEditingPeer(null)}
+      />
+
+      <ConfirmDialog
+        open={pendingDelete !== null}
+        onOpenChange={(open) => !open && setPendingDelete(null)}
+        title="Delete peer?"
+        description={`This removes the "${pendingDelete ?? ""}" peer connection. This cannot be undone from the UI.`}
+        confirmLabel="Delete Peer"
+        onConfirm={handleConfirmDelete}
+        isPending={deletePeer.isPending}
+        errorMessage={
+          deletePeer.isError
+            ? deletePeer.error instanceof Error
+              ? deletePeer.error.message
+              : "Failed to delete peer"
+            : null
+        }
+      />
     </div>
   );
 }

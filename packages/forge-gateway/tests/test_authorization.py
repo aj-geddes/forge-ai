@@ -79,12 +79,38 @@ def _conversational_app(agent: AsyncMock) -> FastAPI:
     return app
 
 
-def _admin_app() -> FastAPI:
+def _admin_app(tmp_path: object | None = None) -> FastAPI:
+    """Build a bare admin-router app. When *tmp_path* is given (a real
+    pytest tmp_path), wires a real BASE yaml file + OverlayStore so
+    mutation routes can persist durably instead of failing 507 -- tests
+    that only exercise read-paths or pre-persistence auth checks (401/403)
+    can omit it."""
+    from pathlib import Path
+
     from forge_config.schema import ForgeConfig
+    from forge_config.writable_store import OverlayStore
 
     app = FastAPI()
     app.include_router(admin.router)
-    admin.set_state(config=ForgeConfig(), config_path="/tmp/forge.yaml", agent=None)  # noqa: S108
+    if tmp_path is not None:
+        base_path = Path(str(tmp_path)) / "forge.yaml"
+        base_path.write_text("metadata:\n  name: test\n")
+        store = OverlayStore(overlay_path=Path(str(tmp_path)) / "overlay" / "forge.overlay.yaml")
+        admin.set_state(
+            config=ForgeConfig(),
+            config_path=str(base_path),
+            agent=None,
+            overlay_store=store,
+            base_path=str(base_path),
+        )
+    else:
+        admin.set_state(
+            config=ForgeConfig(),
+            config_path="/tmp/forge.yaml",  # noqa: S108
+            agent=None,
+            overlay_store=None,
+            base_path="",
+        )
     return app
 
 
@@ -130,7 +156,7 @@ class TestUserRoleCanChatButNotWriteConfig:
 
 
 class TestAdminRoleCanWriteConfig:
-    async def test_admin_role_can_write_config(self) -> None:
+    async def test_admin_role_can_write_config(self, tmp_path: object) -> None:
         from forge_config.schema import ForgeConfig
 
         security.configure_auth(
@@ -143,12 +169,13 @@ class TestAdminRoleCanWriteConfig:
             dev_insecure=False,
         )
         resp = await _put(
-            _admin_app(),
+            _admin_app(tmp_path),
             "/v1/admin/config",
             json={"config": ForgeConfig().model_dump(mode="json")},
             headers={"Authorization": "Bearer forge_sk_admin_zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"},
         )
         assert resp.status_code == 200
+        assert resp.json()["persisted"] is True
 
 
 class TestViewerCanReadConfigButNotChat:

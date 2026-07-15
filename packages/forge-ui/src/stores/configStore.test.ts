@@ -149,3 +149,104 @@ describe("configStore dirty-check semantics", () => {
     expect(useConfigStore.getState().isDirty).toBe(true);
   });
 });
+
+
+describe("configStore optimistic concurrency (rev/inflight/applyMutationResult)", () => {
+  afterEach(() => {
+    useConfigStore.setState({
+      original: null,
+      draft: null,
+      isDirty: false,
+      rev: null,
+      lastServerRev: null,
+      inflight: false,
+    });
+  });
+
+  it("setOriginal(config, rev) sets rev and lastServerRev to the given revision", () => {
+    useConfigStore.getState().setOriginal(liveConfig(), 3);
+
+    expect(useConfigStore.getState().rev).toBe(3);
+    expect(useConfigStore.getState().lastServerRev).toBe(3);
+  });
+
+  it("setOriginal(config) without a rev preserves the previously loaded rev/lastServerRev", () => {
+    useConfigStore.getState().setOriginal(liveConfig(), 5);
+    useConfigStore.getState().setOriginal(liveConfig());
+
+    expect(useConfigStore.getState().rev).toBe(5);
+    expect(useConfigStore.getState().lastServerRev).toBe(5);
+  });
+
+  it("setInflight toggles the inflight flag", () => {
+    useConfigStore.getState().setInflight(true);
+    expect(useConfigStore.getState().inflight).toBe(true);
+
+    useConfigStore.getState().setInflight(false);
+    expect(useConfigStore.getState().inflight).toBe(false);
+  });
+
+  it("applyMutationResult commits (original <- draft, rev/lastServerRev advance) when persisted:true and rev advances", () => {
+    useConfigStore.getState().setOriginal(liveConfig(), 1);
+    const edited = liveConfig();
+    edited.llm.temperature = 0.9;
+    useConfigStore.getState().updateDraft(edited);
+    useConfigStore.getState().setInflight(true);
+
+    useConfigStore.getState().applyMutationResult(edited, { persisted: true, rev: 2 });
+
+    const state = useConfigStore.getState();
+    expect(state.original?.llm.temperature).toBe(0.9);
+    expect(state.draft?.llm.temperature).toBe(0.9);
+    expect(state.isDirty).toBe(false);
+    expect(state.rev).toBe(2);
+    expect(state.lastServerRev).toBe(2);
+    expect(state.inflight).toBe(false);
+  });
+
+  it("applyMutationResult rolls back to original (never commits) when persisted:false, even if rev advances", () => {
+    useConfigStore.getState().setOriginal(liveConfig(), 1);
+    const original = useConfigStore.getState().original!;
+    const edited = liveConfig();
+    edited.llm.temperature = 0.9;
+    useConfigStore.getState().updateDraft(edited);
+    useConfigStore.getState().setInflight(true);
+
+    useConfigStore.getState().applyMutationResult(edited, { persisted: false, rev: 2 });
+
+    const state = useConfigStore.getState();
+    expect(state.original).toEqual(original);
+    expect(state.draft?.llm.temperature).toBe(0.7);
+    expect(state.isDirty).toBe(false);
+    expect(state.rev).toBe(1);
+    expect(state.lastServerRev).toBe(1);
+    expect(state.inflight).toBe(false);
+  });
+
+  it("applyMutationResult rolls back (does not commit) when persisted:true but rev did NOT advance (stale response)", () => {
+    useConfigStore.getState().setOriginal(liveConfig(), 5);
+    const original = useConfigStore.getState().original!;
+    const edited = liveConfig();
+    edited.llm.temperature = 0.9;
+    useConfigStore.getState().updateDraft(edited);
+
+    useConfigStore.getState().applyMutationResult(edited, { persisted: true, rev: 5 });
+
+    const state = useConfigStore.getState();
+    expect(state.original).toEqual(original);
+    expect(state.draft?.llm.temperature).toBe(0.7);
+    expect(state.isDirty).toBe(false);
+    expect(state.lastServerRev).toBe(5);
+  });
+
+  it("applyMutationResult rolls back to null draft when there is no original to roll back to", () => {
+    useConfigStore.setState({ original: null, draft: liveConfig(), isDirty: true, rev: null, lastServerRev: null, inflight: true });
+
+    useConfigStore.getState().applyMutationResult(liveConfig(), { persisted: false, rev: 1 });
+
+    const state = useConfigStore.getState();
+    expect(state.draft).toBeNull();
+    expect(state.isDirty).toBe(false);
+    expect(state.inflight).toBe(false);
+  });
+});

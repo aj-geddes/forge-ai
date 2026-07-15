@@ -1,11 +1,5 @@
 import { useEffect, useRef } from "react";
-import {
-  useForm,
-  useFieldArray,
-  Controller,
-  type Control,
-  type UseFormRegister,
-} from "react-hook-form";
+import { useForm, Controller } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { Link } from "react-router-dom";
@@ -17,8 +11,7 @@ import {
   Users,
   Wrench,
   Sparkles,
-  Plus,
-  Trash2,
+  Lock,
 } from "lucide-react";
 import {
   Accordion,
@@ -26,7 +19,6 @@ import {
   AccordionTrigger,
   AccordionContent,
 } from "@/components/ui/accordion";
-import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select } from "@/components/ui/select";
@@ -34,7 +26,7 @@ import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { useConfigStore } from "@/stores/configStore";
-import type { AgentDef, ForgeConfig, LiteLLMMode, TrustPolicy } from "@/types/config";
+import type { ForgeConfig, TrustPolicy } from "@/types/config";
 
 // --- Help text component ---
 
@@ -120,18 +112,18 @@ function blankToUndefined(value: unknown): unknown {
   return value === "" || value === null ? undefined : value;
 }
 
-const modelListEntrySchema = z.object({
-  model_name: z.string().min(1, "Model name is required"),
-  model: z.string().min(1, "Model identifier is required"),
-  api_key_env: z.string().optional(),
-});
-
+// mode, endpoint, and model_list are BASE-ONLY (Phase-1 field split): mode
+// selects the outbound LiteLLM proxy destination, endpoint IS a
+// destination, and model_list carries both destinations (api_base) and
+// secrets (api_key) for every routed model. None of the three is
+// represented in the form schema below -- they are read-only, sourced
+// directly from `draft.llm.litellm` (see ReadOnlyLiteLLMPanel), and
+// formToConfig always echoes the existing value back unchanged (see the
+// NOTE on formToConfig's litellm block).
 const litellmSchema = z.object({
-  mode: z.enum(["embedded", "sidecar", "external"]),
-  endpoint: z.string().optional(),
-  model_list: z.array(modelListEntrySchema).optional(),
   // Comma-separated string in the form; mapped to the backend's
-  // `fallback_models: string[]` field.
+  // `fallback_models: string[]` field. A SELECTION over model_name
+  // aliases, not a destination -- runtime-safe per the field split.
   fallback_models: z.string().optional(),
   timeout: z.preprocess(blankToUndefined, z.coerce.number().positive().optional()),
   max_retries: z.preprocess(blankToUndefined, z.coerce.number().int().nonnegative().optional()),
@@ -169,21 +161,13 @@ const securitySchema = z.object({
   // synthetic service token. The form neither reads nor writes it.
 });
 
-// AgentDef.tools is a `list[str]` tool-name filter on the backend; the form
-// represents it as a comma-separated string, mirroring the
-// fallback_models/cors_origins convention above.
-const agentDefSchema = z.object({
-  name: z.string().min(1, "Name is required"),
-  description: z.string().optional(),
-  system_prompt: z.string().optional(),
-  model: z.string().optional(),
-  tools: z.string().optional(),
-  max_turns: z.preprocess(blankToUndefined, z.coerce.number().int().positive().optional()),
-});
-
+// Full agent (persona) create/edit/delete now lives on the dedicated
+// Agents page (/agents), which talks to the name-keyed overlay endpoints
+// (POST/PATCH/DELETE /v1/admin/agents) directly -- not this wholesale-PUT
+// visual editor. `agents.agents` is intentionally NOT represented here;
+// formToConfig always passes the existing array through unchanged.
 const agentsSchema = z.object({
   default_agent_name: z.string().optional(),
-  agents: z.array(agentDefSchema).optional(),
 });
 
 const formSchema = z.object({
@@ -194,8 +178,6 @@ const formSchema = z.object({
 });
 
 type FormValues = z.infer<typeof formSchema>;
-type ModelListEntryForm = z.infer<typeof modelListEntrySchema>;
-type AgentDefForm = z.infer<typeof agentDefSchema>;
 
 // --- Helpers ---
 //
@@ -212,31 +194,6 @@ type AgentDefForm = z.infer<typeof agentDefSchema>;
 //     object.
 // llm.litellm intentionally has no config_path/port fields in the form --
 // the backend's LiteLLMConfig does not define them (see litellmSchema above).
-
-function modelListEntryToForm(entry: Record<string, unknown>): ModelListEntryForm {
-  const litellmParams = (entry.litellm_params ?? {}) as Record<string, unknown>;
-  const apiKey = litellmParams.api_key;
-  const apiKeyEnv =
-    apiKey && typeof apiKey === "object" && "name" in (apiKey as Record<string, unknown>)
-      ? String((apiKey as Record<string, unknown>).name)
-      : "";
-  return {
-    model_name: typeof entry.model_name === "string" ? entry.model_name : "",
-    model: typeof litellmParams.model === "string" ? litellmParams.model : "",
-    api_key_env: apiKeyEnv,
-  };
-}
-
-function agentDefToForm(agent: AgentDef): AgentDefForm {
-  return {
-    name: agent.name,
-    description: agent.description ?? "",
-    system_prompt: agent.system_prompt ?? "",
-    model: agent.model ?? "",
-    tools: (agent.tools ?? []).join(", "),
-    max_turns: agent.max_turns,
-  };
-}
 
 export function configToForm(config: ForgeConfig): FormValues {
   return {
@@ -255,11 +212,10 @@ export function configToForm(config: ForgeConfig): FormValues {
       temperature: config.llm.temperature,
       max_tokens: config.llm.max_tokens,
       system_prompt: config.llm.system_prompt ?? undefined,
+      // mode/endpoint/model_list deliberately excluded -- base-only, read
+      // directly from `draft.llm.litellm` by ReadOnlyLiteLLMPanel instead.
       litellm: config.llm.litellm
         ? {
-            mode: config.llm.litellm.mode,
-            endpoint: config.llm.litellm.endpoint ?? undefined,
-            model_list: (config.llm.litellm.model_list ?? []).map(modelListEntryToForm),
             fallback_models: (config.llm.litellm.fallback_models ?? []).join(", "),
             timeout: config.llm.litellm.timeout,
             max_retries: config.llm.litellm.max_retries,
@@ -275,42 +231,7 @@ export function configToForm(config: ForgeConfig): FormValues {
     },
     agents: {
       default_agent_name: config.agents?.default ?? "",
-      agents: (config.agents?.agents ?? []).map(agentDefToForm),
     },
-  };
-}
-
-function modelListEntryFromForm(
-  entry: ModelListEntryForm,
-  existingEntry: Record<string, unknown> | undefined,
-): Record<string, unknown> {
-  const existingParams = (existingEntry?.litellm_params ?? {}) as Record<string, unknown>;
-  return {
-    ...existingEntry,
-    model_name: entry.model_name,
-    litellm_params: {
-      ...existingParams,
-      model: entry.model,
-      ...(entry.api_key_env
-        ? { api_key: { source: "env", name: entry.api_key_env } }
-        : {}),
-    },
-  };
-}
-
-function agentDefFromForm(agent: AgentDefForm): AgentDef {
-  return {
-    name: agent.name,
-    description: agent.description || undefined,
-    system_prompt: agent.system_prompt || undefined,
-    model: agent.model || undefined,
-    tools: agent.tools
-      ? agent.tools
-          .split(",")
-          .map((t) => t.trim())
-          .filter(Boolean)
-      : [],
-    max_turns: agent.max_turns,
   };
 }
 
@@ -343,25 +264,26 @@ export function formToConfig(
       // `original`, while a real edit (form field genuinely populated)
       // still overrides it and marks the draft dirty as expected.
       system_prompt: form.llm.system_prompt || existing.llm.system_prompt,
-      litellm: form.llm.litellm
+      // NOTE (Phase-1 field split): mode/endpoint/model_list are BASE-ONLY
+      // -- mode selects the outbound LiteLLM proxy destination, endpoint IS
+      // a destination, and model_list carries destinations (api_base) and
+      // secrets (api_key). This form has no control that can change any of
+      // the three; the `...existing.llm.litellm` spread always echoes them
+      // back byte-for-byte, so a save can never repoint or introduce one.
+      // Keyed off `existing.llm.litellm` (not `form.llm.litellm`) so the
+      // spread always carries a complete, required `mode` -- the form
+      // value alone can't prove that to the type checker.
+      litellm: existing.llm.litellm
         ? {
             ...existing.llm.litellm,
-            mode: form.llm.litellm.mode as LiteLLMMode,
-            endpoint: form.llm.litellm.endpoint || undefined,
-            model_list:
-              form.llm.litellm.model_list && form.llm.litellm.model_list.length > 0
-                ? form.llm.litellm.model_list.map((entry, index) =>
-                    modelListEntryFromForm(entry, existing.llm.litellm?.model_list?.[index]),
-                  )
-                : existing.llm.litellm?.model_list,
-            fallback_models: form.llm.litellm.fallback_models
+            fallback_models: form.llm.litellm?.fallback_models
               ? form.llm.litellm.fallback_models
                   .split(",")
                   .map((s) => s.trim())
                   .filter(Boolean)
-              : existing.llm.litellm?.fallback_models,
-            timeout: form.llm.litellm.timeout,
-            max_retries: form.llm.litellm.max_retries,
+              : existing.llm.litellm.fallback_models,
+            timeout: form.llm.litellm?.timeout,
+            max_retries: form.llm.litellm?.max_retries,
           }
         : existing.llm.litellm,
     },
@@ -381,228 +303,82 @@ export function formToConfig(
             .filter(Boolean)
         : existing.security?.allowed_origins,
     },
+    // Full agent (persona) CRUD now lives on the dedicated Agents page
+    // (/agents), talking to the name-keyed overlay endpoints directly. This
+    // wholesale visual-editor save must never touch `agents.agents` --
+    // pass it through unchanged so a Config-page save can't clobber edits
+    // made on /agents (or vice versa become a second, divergent write path
+    // for the exact same array).
     agents: {
       ...existing.agents,
       default: form.agents.default_agent_name || existing.agents?.default,
-      agents: (form.agents.agents ?? []).map(agentDefFromForm),
     },
   };
 }
 
-// --- Repeatable list editors ---
+// --- Read-only base-only panels ---
+//
+// Phase-1 field split: mode/endpoint/model_list (LiteLLM router config) and
+// the full agent-definitions array are BASE-ONLY or have moved to a
+// dedicated overlay-backed page respectively. Both render read-only here,
+// with a "Managed in Git" affordance routing to Config > Promote -- this
+// visual editor structurally cannot submit a change to either.
 
-function ModelListEditor({
-  control,
-  register,
-}: {
-  control: Control<FormValues>;
-  register: UseFormRegister<FormValues>;
-}) {
-  const { fields, append, remove } = useFieldArray({
-    control,
-    name: "llm.litellm.model_list",
-  });
+function ReadOnlyLiteLLMPanel({ litellm }: { litellm: ForgeConfig["llm"]["litellm"] }) {
+  if (!litellm) return null;
+  const modelList = litellm.model_list ?? [];
 
   return (
-    <div className="sm:col-span-2 mt-4 space-y-3">
-      <div className="flex items-center justify-between">
-        <div>
-          <p className="text-sm font-medium">Model List</p>
-          <p className="text-xs text-muted-foreground">
-            Additional model routes LiteLLM can dispatch to, beyond the default model above.
-          </p>
-        </div>
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          onClick={() => append({ model_name: "", model: "", api_key_env: "" })}
-        >
-          <Plus className="h-4 w-4" />
-          Add Model
-        </Button>
+    <div className="sm:col-span-2 mt-4 space-y-3 rounded-lg border border-dashed border-muted-foreground/30 bg-muted/20 p-3">
+      <div className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+        <Lock className="h-3.5 w-3.5" />
+        Managed in Git -- edit via Promote/PR
       </div>
-
-      {fields.length === 0 ? (
-        <div className="flex h-16 items-center justify-center rounded-lg border border-dashed">
-          <p className="text-sm text-muted-foreground">No additional models configured.</p>
-        </div>
-      ) : (
-        <div className="space-y-3">
-          {fields.map((field, index) => (
-            <div key={field.id} className="rounded-lg border p-3 space-y-2">
-              <div className="flex items-start gap-2">
-                <div className="flex-1 grid gap-2 sm:grid-cols-3">
-                  <div>
-                    <Label className="text-xs">Model Name</Label>
-                    <Input
-                      placeholder="my-fast-model"
-                      className="h-8 text-sm"
-                      {...register(`llm.litellm.model_list.${index}.model_name` as const)}
-                    />
-                  </div>
-                  <div>
-                    <Label className="text-xs">Model ID</Label>
-                    <Input
-                      placeholder="openai/gpt-4o-mini"
-                      className="h-8 text-sm"
-                      {...register(`llm.litellm.model_list.${index}.model` as const)}
-                    />
-                  </div>
-                  <div>
-                    <Label className="text-xs">API Key Env Var</Label>
-                    <Input
-                      placeholder="OPENAI_API_KEY"
-                      className="h-8 text-sm"
-                      {...register(`llm.litellm.model_list.${index}.api_key_env` as const)}
-                    />
-                  </div>
-                </div>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  className="mt-4 shrink-0"
-                  onClick={() => remove(index)}
-                >
-                  <Trash2 className="h-4 w-4 text-destructive" />
-                </Button>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
+      <dl className="grid grid-cols-[auto,1fr] gap-x-3 gap-y-1 text-xs">
+        <dt className="text-muted-foreground">Mode</dt>
+        <dd className="font-mono">{litellm.mode}</dd>
+        {litellm.endpoint && (
+          <>
+            <dt className="text-muted-foreground">Endpoint</dt>
+            <dd className="font-mono break-all">{litellm.endpoint}</dd>
+          </>
+        )}
+      </dl>
+      <div>
+        <p className="text-xs font-medium text-muted-foreground mb-1">
+          Model List ({modelList.length})
+        </p>
+        {modelList.length === 0 ? (
+          <p className="text-xs text-muted-foreground">No additional models configured.</p>
+        ) : (
+          <ul className="space-y-1">
+            {modelList.map((entry, index) => {
+              const modelName =
+                typeof entry.model_name === "string" ? entry.model_name : `entry ${index + 1}`;
+              const litellmParams = (entry.litellm_params ?? {}) as Record<string, unknown>;
+              const model = typeof litellmParams.model === "string" ? litellmParams.model : "";
+              return (
+                <li key={`${modelName}-${index}`} className="font-mono text-xs">
+                  {modelName}
+                  {model ? ` -> ${model}` : ""}
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </div>
       <HelpText>
-        Each entry routes a friendly model name to a provider-specific model ID. The API key
-        env var names the environment variable Forge resolves the secret from at runtime --
-        the literal key value is never stored in the config.
+        Destinations (endpoint/api_base) and credentials (api_key) route requests and carry
+        secrets, so LiteLLM routing is Git-reviewed rather than overlay-editable. Promote a
+        change to add or repoint a model route.
       </HelpText>
-    </div>
-  );
-}
-
-function AgentDefinitionsEditor({
-  control,
-  register,
-}: {
-  control: Control<FormValues>;
-  register: UseFormRegister<FormValues>;
-}) {
-  const { fields, append, remove } = useFieldArray({
-    control,
-    name: "agents.agents",
-  });
-
-  return (
-    <div className="sm:col-span-2 space-y-3">
-      <div className="flex items-center justify-between">
-        <div>
-          <p className="text-sm font-medium">Agent Definitions</p>
-          <p className="text-xs text-muted-foreground">
-            Named personas your agent can be invoked as, each with its own prompt, model, and
-            tool filter.
-          </p>
-        </div>
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          onClick={() =>
-            append({
-              name: "",
-              description: "",
-              system_prompt: "",
-              model: "",
-              tools: "",
-              max_turns: 10,
-            })
-          }
-        >
-          <Plus className="h-4 w-4" />
-          Add Agent
-        </Button>
-      </div>
-
-      {fields.length === 0 ? (
-        <div className="flex h-16 items-center justify-center rounded-lg border border-dashed">
-          <p className="text-sm text-muted-foreground">No agent personas defined yet.</p>
-        </div>
-      ) : (
-        <div className="space-y-3">
-          {fields.map((field, index) => (
-            <div key={field.id} className="rounded-lg border p-3 space-y-2">
-              <div className="flex items-start gap-2">
-                <div className="flex-1 space-y-2">
-                  <div className="grid gap-2 sm:grid-cols-2">
-                    <div>
-                      <Label className="text-xs">Name</Label>
-                      <Input
-                        placeholder="researcher"
-                        className="h-8 text-sm"
-                        {...register(`agents.agents.${index}.name` as const)}
-                      />
-                    </div>
-                    <div>
-                      <Label className="text-xs">Model Override</Label>
-                      <Input
-                        placeholder="(uses default model)"
-                        className="h-8 text-sm"
-                        {...register(`agents.agents.${index}.model` as const)}
-                      />
-                    </div>
-                  </div>
-                  <div>
-                    <Label className="text-xs">Description</Label>
-                    <Input
-                      placeholder="What this persona is for"
-                      className="h-8 text-sm"
-                      {...register(`agents.agents.${index}.description` as const)}
-                    />
-                  </div>
-                  <div>
-                    <Label className="text-xs">System Prompt</Label>
-                    <Textarea
-                      placeholder="You are a specialist in..."
-                      rows={2}
-                      className="text-sm"
-                      {...register(`agents.agents.${index}.system_prompt` as const)}
-                    />
-                  </div>
-                  <div className="grid gap-2 sm:grid-cols-2">
-                    <div>
-                      <Label className="text-xs">Tools (comma-separated)</Label>
-                      <Input
-                        placeholder="web_search, summarize"
-                        className="h-8 text-sm"
-                        {...register(`agents.agents.${index}.tools` as const)}
-                      />
-                    </div>
-                    <div>
-                      <Label className="text-xs">Max Turns</Label>
-                      <Input
-                        type="number"
-                        min={1}
-                        placeholder="10"
-                        className="h-8 text-sm"
-                        {...register(`agents.agents.${index}.max_turns` as const)}
-                      />
-                    </div>
-                  </div>
-                </div>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  className="mt-4 shrink-0"
-                  onClick={() => remove(index)}
-                >
-                  <Trash2 className="h-4 w-4 text-destructive" />
-                </Button>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
+      <Link
+        to="/config?tab=promote"
+        className="inline-flex items-center gap-1 text-xs font-medium text-primary underline-offset-4 hover:underline"
+      >
+        Review &amp; promote
+        <ExternalLink className="h-3 w-3" />
+      </Link>
     </div>
   );
 }
@@ -660,7 +436,6 @@ export function ConfigVisualEditor() {
     return () => subscription.unsubscribe();
   }, [watch, draft, updateDraft]);
 
-  const litellmMode = watch("llm.litellm.mode");
   const currentModel = watch("llm.model");
 
   if (!draft) {
@@ -675,6 +450,7 @@ export function ConfigVisualEditor() {
   const manualCount = draft.tools.manual_tools?.length ?? 0;
   const workflowCount = draft.tools.workflows?.length ?? 0;
   const peersCount = draft.agents?.peers?.length ?? 0;
+  const agentDefsCount = draft.agents?.agents?.length ?? 0;
 
   // Check if current model is in our preset list
   const isCustomModel = !MODEL_OPTIONS.some((g) =>
@@ -880,41 +656,6 @@ export function ConfigVisualEditor() {
                 </p>
                 <div className="grid gap-4 sm:grid-cols-2">
                   <div className="space-y-2">
-                    <Label htmlFor="llm.litellm.mode">Mode</Label>
-                    <Select
-                      id="llm.litellm.mode"
-                      {...register("llm.litellm.mode")}
-                    >
-                      <option value="embedded">Embedded &mdash; runs inside the agent process</option>
-                      <option value="sidecar">Sidecar &mdash; separate container in the same pod</option>
-                      <option value="external">External &mdash; dedicated LiteLLM proxy service</option>
-                    </Select>
-                    <HelpText>
-                      <strong>Embedded</strong> is simplest for development (zero extra setup).{" "}
-                      <strong>Sidecar</strong> isolates LLM routing for better resource control.{" "}
-                      <strong>External</strong> is best for production &mdash; a shared proxy that
-                      multiple agents connect to, with its own scaling and caching.
-                    </HelpText>
-                  </div>
-
-                  {(litellmMode === "sidecar" ||
-                    litellmMode === "external") && (
-                    <div className="space-y-2">
-                      <Label htmlFor="llm.litellm.endpoint">Endpoint URL</Label>
-                      <Input
-                        id="llm.litellm.endpoint"
-                        placeholder="http://litellm:4000"
-                        {...register("llm.litellm.endpoint")}
-                      />
-                      <HelpText>
-                        The URL where the LiteLLM proxy is reachable. For sidecar mode, this is
-                        typically <code className="text-xs">http://localhost:4000</code>. For
-                        external mode, use the service DNS name.
-                      </HelpText>
-                    </div>
-                  )}
-
-                  <div className="space-y-2">
                     <Label htmlFor="llm.litellm.timeout">Timeout (seconds)</Label>
                     <Input
                       id="llm.litellm.timeout"
@@ -960,7 +701,7 @@ export function ConfigVisualEditor() {
                   </div>
                 </div>
 
-                <ModelListEditor control={control} register={register} />
+                <ReadOnlyLiteLLMPanel litellm={draft.llm.litellm} />
               </div>
             </div>
           </AccordionContent>
@@ -1132,9 +873,17 @@ export function ConfigVisualEditor() {
           </AccordionTrigger>
           <AccordionContent>
             <SectionDescription>
-              Define named agent personas with different system prompts, model overrides, and
-              tool access. Each persona behaves like a specialized expert. Callers select a
-              persona by name when making requests.
+              Named agent personas with different system prompts, model selections, and tool
+              access are managed on the dedicated{" "}
+              <Link
+                to="/agents"
+                className="inline-flex items-center gap-1 text-primary underline-offset-4 hover:underline"
+              >
+                Agents page
+                <ExternalLink className="h-3 w-3" />
+              </Link>
+              {" "}with full create/edit/delete via the overlay -- an agent carries no
+              endpoint or credential of its own, so it is entirely runtime-editable there.
             </SectionDescription>
             <div className="grid gap-4 sm:grid-cols-2">
               <div className="space-y-2">
@@ -1148,7 +897,7 @@ export function ConfigVisualEditor() {
                 />
                 <HelpText>
                   The agent persona used when no specific agent is requested. This should match one
-                  of the names defined in your agents list in the YAML config.
+                  of the names defined on the Agents page.
                 </HelpText>
               </div>
 
@@ -1170,7 +919,11 @@ export function ConfigVisualEditor() {
                 </div>
               </div>
 
-              <AgentDefinitionsEditor control={control} register={register} />
+              <div className="sm:col-span-2">
+                <Badge variant="secondary">
+                  {agentDefsCount} agent{agentDefsCount !== 1 ? "s" : ""} defined
+                </Badge>
+              </div>
             </div>
           </AccordionContent>
         </AccordionItem>

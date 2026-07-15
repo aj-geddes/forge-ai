@@ -5,13 +5,32 @@ export interface ConfigDraftState {
   original: ForgeConfig | null;
   draft: ForgeConfig | null;
   isDirty: boolean;
-  setOriginal: (config: ForgeConfig) => void;
+  /** The config revision this client currently has loaded (mirrors the last-known server `rev`). */
+  rev: number | null;
+  /** The highest revision this client has confirmed the server actually persisted. */
+  lastServerRev: number | null;
+  /** True while a save mutation is in progress. */
+  inflight: boolean;
+  setOriginal: (config: ForgeConfig, rev?: number) => void;
   updateDraft: (config: ForgeConfig) => void;
   updateSection: <K extends keyof ForgeConfig>(
     section: K,
     value: ForgeConfig[K],
   ) => void;
   resetDraft: () => void;
+  setInflight: (inflight: boolean) => void;
+  /**
+   * Optimistic-concurrency commit/rollback for the result of a save
+   * mutation. A draft is only committed as the new `original` when the
+   * server actually reports `persisted === true` AND the revision genuinely
+   * advanced past the highest one this client has confirmed -- otherwise
+   * the draft is rolled back to `original` (never silently clobbered, and
+   * never treated as saved when it was not durably written).
+   */
+  applyMutationResult: (
+    config: ForgeConfig,
+    envelope: { persisted: boolean; rev: number },
+  ) => void;
 }
 
 // The visual editor's form round-trip is lossless in meaning but not
@@ -50,13 +69,18 @@ export const useConfigStore = create<ConfigDraftState>((set) => ({
   original: null,
   draft: null,
   isDirty: false,
+  rev: null,
+  lastServerRev: null,
+  inflight: false,
 
-  setOriginal: (config) =>
-    set({
+  setOriginal: (config, rev) =>
+    set((state) => ({
       original: structuredClone(config),
       draft: structuredClone(config),
       isDirty: false,
-    }),
+      rev: rev !== undefined ? rev : state.rev,
+      lastServerRev: rev !== undefined ? rev : state.lastServerRev,
+    })),
 
   updateDraft: (config) =>
     set((state) => ({
@@ -78,5 +102,31 @@ export const useConfigStore = create<ConfigDraftState>((set) => ({
     set((state) => ({
       draft: state.original ? structuredClone(state.original) : null,
       isDirty: false,
+      inflight: false,
     })),
+
+  setInflight: (inflight) => set({ inflight }),
+
+  applyMutationResult: (config, envelope) =>
+    set((state) => {
+      const advanced =
+        state.lastServerRev === null || envelope.rev > state.lastServerRev;
+
+      if (envelope.persisted && advanced) {
+        return {
+          original: structuredClone(config),
+          draft: structuredClone(config),
+          isDirty: false,
+          rev: envelope.rev,
+          lastServerRev: envelope.rev,
+          inflight: false,
+        };
+      }
+
+      return {
+        draft: state.original ? structuredClone(state.original) : null,
+        isDirty: false,
+        inflight: false,
+      };
+    }),
 }));

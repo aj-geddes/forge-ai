@@ -134,3 +134,40 @@ class TestGatedToolRequiresSingleWriter:
     def test_no_forge_config_with_multiple_replicas_renders_successfully(self) -> None:
         result = _helm_template("--set", "agent.replicaCount=3")
         assert result.returncode == 0, result.stderr
+
+
+class TestLayeredConfigEnvVars:
+    """Layered BASE+OVERLAY config (design doc): FORGE_CONFIG_SEED_PATH /
+    FORGE_CONFIG_OVERLAY_PATH are only rendered when persistence is
+    enabled (there is no durable place to write the overlay otherwise),
+    and the pre-existing single-replica RWO fail-guard still trips
+    regardless -- the new env vars don't create a second, unguarded
+    write path.
+    """
+
+    def test_overlay_env_vars_rendered_when_persistence_enabled(self) -> None:
+        result = _helm_template("--set", "persistence.enabled=true")
+        assert result.returncode == 0, result.stderr
+        assert "FORGE_CONFIG_SEED_PATH" in result.stdout
+        assert "FORGE_CONFIG_OVERLAY_PATH" in result.stdout
+        assert "/app/data/overlay/forge.overlay.yaml" in result.stdout
+
+    def test_overlay_env_vars_absent_when_persistence_disabled(self) -> None:
+        result = _helm_template("--set", "persistence.enabled=false")
+        assert result.returncode == 0, result.stderr
+        assert "FORGE_CONFIG_SEED_PATH" not in result.stdout
+        assert "FORGE_CONFIG_OVERLAY_PATH" not in result.stdout
+
+    def test_single_replica_fail_guard_still_trips_with_overlay_enabled(self) -> None:
+        result = _helm_template(
+            "--set", "persistence.enabled=true", "--set", "agent.replicaCount=2"
+        )
+        assert result.returncode != 0
+        assert "single writer" in result.stderr
+
+    def test_autoscaling_still_trips_the_fail_guard_with_overlay_enabled(self) -> None:
+        result = _helm_template(
+            "--set", "persistence.enabled=true", "--set", "autoscaling.enabled=true"
+        )
+        assert result.returncode != 0
+        assert "single writer" in result.stderr

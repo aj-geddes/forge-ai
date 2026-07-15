@@ -1,6 +1,36 @@
 ---
 # Forge AI - Example Configuration
 # Copy to forge.yaml and customize for your deployment.
+#
+# --- Layered BASE+OVERLAY config (runtime admin API) ---
+#
+# This file (forge.yaml, mounted read-only from a ConfigMap in-cluster) is
+# BASE: the git/ArgoCD source of truth. When FORGE_CONFIG_OVERLAY_PATH is
+# also set (see deploy/helm/forge -- wired automatically whenever
+# persistence.enabled is true), the running gateway resolves:
+#
+#     effective_config = validate(substitute_env(deep_merge(BASE, OVERLAY)))
+#
+# The admin API (POST/PATCH/DELETE under /v1/admin/tools, /agents, /peers,
+# and PUT /v1/admin/config) writes ONLY to the overlay -- a small,
+# whitelisted, PVC-backed YAML file holding just `tools`, `agents`, `llm`,
+# and `metadata.description`. It can NEVER contain `security`, `oidc`,
+# `service_tokens`, `authorization`, or `conversation_store` -- those
+# remain exclusively editable here, in BASE, by a human committing to git.
+# This is a structural guarantee (forge_config.overlay.OverlayDocument
+# rejects those keys outright), not a runtime permission check, so a
+# `config:write` caller can never self-escalate privileges through the
+# admin API.
+#
+# A runtime edit is immediately live but only DURABLE on the overlay PVC
+# -- it is NOT yet in git (`drift_from_git: true` in the admin API's
+# responses until a human promotes it). `GET /v1/admin/config/promotion/diff`
+# produces a ready-to-paste unified diff + PR body for that promotion; no
+# git credential exists in the pod, so promotion is always a human,
+# out-of-band action. Once the PR merges and ArgoCD reconciles this file,
+# the overlay's now-redundant entries are pruned automatically and drift
+# returns to zero. Set `admin.mutation_policy: disabled` below to turn off
+# the runtime admin API entirely (locked-down GitOps shops).
 
 metadata:
   name: my-forge-agent
@@ -172,3 +202,11 @@ agents:
       endpoint: "https://security-forge.hvs.internal"
       trust_level: medium
       capabilities: [threat_analysis, audit]
+
+# Runtime admin config-mutation API (layered BASE+OVERLAY config, see the
+# comment at the top of this file). This "admin:" block is itself
+# BASE-only -- it is not one of the whitelisted overlay sections, so a
+# config:write caller can never flip mutation_policy back to "overlay"
+# from "disabled" at runtime, only a git commit here can.
+admin:
+  mutation_policy: overlay  # overlay (default) | disabled

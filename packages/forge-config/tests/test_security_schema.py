@@ -270,4 +270,5 @@ class TestPermissionEnum:
             "config:read",
             "config:write",
             "metrics:read",
+            "infrastructure:write",
         }

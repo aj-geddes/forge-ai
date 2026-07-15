@@ -22,6 +22,13 @@ export class ApiError extends Error {
   constructor(
     public status: number,
     message: string,
+    /**
+     * The raw parsed JSON error body, when available (e.g. a 409 conflict's
+     * `{detail, current_rev}` or a 507's `{detail}`). Callers that need
+     * structured error data (optimistic-concurrency conflicts, honesty
+     * envelope rejections) read this instead of re-parsing `message`.
+     */
+    public body?: unknown,
   ) {
     super(message);
     this.name = "ApiError";
@@ -88,6 +95,7 @@ export async function apiRequest<T>(
     throw new ApiError(
       res.status,
       error.detail || error.error || "Request failed",
+      error,
     );
   }
 
@@ -113,6 +121,13 @@ export const api = {
     apiRequest<T>(path, {
       ...options,
       method: "PUT",
+      body: body ? JSON.stringify(body) : undefined,
+    }),
+
+  patch: <T>(path: string, body?: unknown, options?: ApiRequestOptions) =>
+    apiRequest<T>(path, {
+      ...options,
+      method: "PATCH",
       body: body ? JSON.stringify(body) : undefined,
     }),
 
