@@ -889,6 +889,40 @@ class TestDriftAndPromotion:
         assert "researcher" in body["diff"]
         assert body["drift_from_git"] is True
 
+    async def test_create_then_delete_agent_clears_drift(
+        self,
+        async_client: httpx.AsyncClient,
+        auth_headers: dict[str, str],
+        overlay_env: tuple[Path, OverlayStore],
+    ) -> None:
+        """**BUG REPRODUCTION** (confirmed live on the deployed pod): a
+        runtime-only agent created then deleted through the overlay leaves
+        a structurally-empty {"agents": {"agents": []}} scaffold behind --
+        a no-op under deep_merge's by-name semantics (no BASE agent is
+        shadowed and none is added), so drift_from_git must return to
+        False and the persisted overlay must compact to nothing. It must
+        NOT stay stuck True forever with an un-clearable empty scaffold on
+        disk."""
+        _, store = overlay_env
+
+        create_resp = await async_client.post(
+            "/v1/admin/agents", json=_agent("researcher"), headers=auth_headers
+        )
+        assert create_resp.status_code == 201
+
+        delete_resp = await async_client.delete("/v1/admin/agents/researcher", headers=auth_headers)
+        assert delete_resp.status_code == 200
+        assert delete_resp.json()["drift_from_git"] is False
+
+        config_resp = await async_client.get("/v1/admin/config", headers=auth_headers)
+        assert config_resp.json()["drift_from_git"] is False
+
+        from forge_config.loader import compact_overlay
+
+        overlay_raw = store.read_overlay()
+        overlay_content = {k: v for k, v in overlay_raw.items() if not k.startswith("_")}
+        assert compact_overlay(overlay_content) == {}
+
 
 @pytest.mark.usefixtures("_wire_auth")
 class TestHistoryAndRevert:

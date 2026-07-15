@@ -33,6 +33,7 @@ from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query, Resp
 from forge_config import loader
 from forge_config.exceptions import ConfigLoadError
 from forge_config.loader import (
+    compact_overlay,
     compute_base_rev,
     deep_merge,
     editable_sections,
@@ -303,7 +304,15 @@ async def apply_overlay_mutation(
                 base_editable=editable_sections(base_raw),
                 overlay_base_rev=base_rev,
             )
-            merged_raw = deep_merge(base_raw, pruned)
+            # ALWAYS-SAFE structural compaction (unlike prune_noop_overlay,
+            # unconditional -- it does not require BASE to have moved): drops
+            # any by-name-list/dict container that has become structurally
+            # empty (e.g. {"agents": {"agents": []}} after a runtime-only
+            # agent is created then deleted). This is what is both persisted
+            # and used to compute drift below, so an overlay that reduces to
+            # a no-op is never left on disk as permanent, un-clearable drift.
+            compacted = compact_overlay(pruned)
+            merged_raw = deep_merge(base_raw, compacted)
             from forge_config.loader import _substitute_env_vars  # noqa: PLC0415
 
             substituted = _substitute_env_vars(merged_raw)
@@ -333,7 +342,7 @@ async def apply_overlay_mutation(
 
             try:
                 new_state = await txn.write(
-                    new_overlay_content,
+                    compacted,
                     base_rev=base_rev,
                     updated_by=principal.sub,
                     expected_rev=expected_rev,
@@ -413,7 +422,7 @@ async def apply_overlay_mutation(
         except Exception:
             logger.exception("Failed to reload tool surface after config mutation")
 
-    drift = bool(pruned)
+    drift = bool(compacted)
     parts = [f"Config {op} applied to '{section}'"]
     if reloaded:
         parts.append("tools reloaded")

@@ -429,6 +429,62 @@ def prune_noop_overlay(
     return _prune_against_base(overlay_content, base_editable)
 
 
+def compact_overlay(content: dict[str, Any]) -> dict[str, Any]:
+    """Recursively strip STRUCTURALLY-EMPTY containers from overlay
+    CONTENT, unconditionally -- regardless of whether BASE has moved.
+
+    Complements :func:`prune_noop_overlay`, which only prunes no-op
+    entries once BASE has moved past the overlay's stamped ``_base_rev``
+    (a promotion). A name-keyed list emptied by deleting every entry it
+    ever held -- e.g. creating then deleting a runtime-only agent -- is a
+    no-op under :func:`deep_merge`'s by-name merge semantics REGARDLESS of
+    whether BASE has moved, so it must never be left sitting in the
+    persisted overlay as permanent, un-clearable drift.
+
+    Drops, bottom-up:
+
+    - An empty list at one of the whitelisted by-name merge paths
+      (:data:`_NAME_KEYED_LIST_PATHS` -- ``tools.manual_tools``,
+      ``tools.openapi_sources``, ``tools.workflows``, ``agents.agents``,
+      ``agents.peers``). An empty list there is always a no-op under
+      by-name :func:`deep_merge` (there is nothing to merge in), so
+      dropping it never changes the effective result. A list containing
+      anything -- a real entry OR a tombstone
+      ``{"__deleted__": "<name>"}`` (itself a REAL, non-no-op
+      instruction) -- is left completely untouched, including its
+      contents (never descended into).
+    - Any dict that becomes (or already is) empty after its own children
+      are compacted -- e.g. ``{"tools": {}}`` collapses to ``{}``. Safe
+      because every dict-typed overlay field merges onto a same-shaped
+      dict in BASE (see :func:`_merge_node`'s dict branch), so an empty
+      overlay dict is always a no-op there too.
+
+    Any OTHER list -- one NOT at a whitelisted by-name path, e.g.
+    ``llm.litellm.fallback_models`` -- is left untouched even when empty:
+    those replace BASE wholesale under :func:`deep_merge` (``_merge_node``'s
+    "everything else... replaces outright" branch), so an empty list there
+    is a real "clear this" instruction, not a no-op.
+    """
+
+    def _compact(node: dict[str, Any], path: tuple[str, ...]) -> dict[str, Any]:
+        out: dict[str, Any] = {}
+        for key, val in node.items():
+            child_path = (*path, key)
+            if isinstance(val, list):
+                if child_path in _NAME_KEYED_LIST_PATHS and not val:
+                    continue
+                out[key] = val
+            elif isinstance(val, dict):
+                compacted = _compact(val, child_path)
+                if compacted:
+                    out[key] = compacted
+            else:
+                out[key] = val
+        return out
+
+    return _compact(content, ())
+
+
 def load_effective_config(
     base_path: str | Path,
     overlay_path: str | Path | None = None,

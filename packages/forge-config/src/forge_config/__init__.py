@@ -8,6 +8,7 @@ from forge_config.exceptions import (
 )
 from forge_config.loader import (
     canonicalize,
+    compact_overlay,
     compute_base_rev,
     deep_merge,
     editable_sections,
@@ -117,6 +118,7 @@ __all__ = [
     "Workflow",
     "WorkflowStep",
     "canonicalize",
+    "compact_overlay",
     "compute_base_rev",
     "deep_merge",
     "editable_sections",

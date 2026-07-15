@@ -13,6 +13,7 @@ import yaml
 from forge_config.exceptions import ConfigValidationError
 from forge_config.loader import (
     canonicalize,
+    compact_overlay,
     compute_base_rev,
     deep_merge,
     editable_sections,
@@ -254,6 +255,45 @@ class TestPruneNoopOverlay:
             overlay_content, base_editable=new_base_editable, overlay_base_rev=overlay_base_rev
         )
         assert result == {}
+
+
+# --- compact_overlay: ALWAYS-SAFE structural compaction, base-move-agnostic ---
+#
+# Unlike prune_noop_overlay (which only prunes once BASE has moved past the
+# overlay's stamped _base_rev), compact_overlay drops structurally-empty
+# by-name-list/dict containers UNCONDITIONALLY -- e.g. after a runtime-only
+# agent is created then deleted through the overlay, the resulting
+# {"agents": {"agents": []}} scaffold is a no-op under deep_merge's by-name
+# semantics REGARDLESS of whether BASE has moved, and must not linger as
+# permanent, un-clearable drift_from_git=True.
+
+
+class TestCompactOverlay:
+    def test_empty_name_keyed_list_collapses_to_empty_dict(self) -> None:
+        assert compact_overlay({"agents": {"agents": []}}) == {}
+
+    def test_multiple_empty_name_keyed_lists_all_collapse(self) -> None:
+        content = {"tools": {"manual_tools": []}, "agents": {"agents": []}}
+        assert compact_overlay(content) == {}
+
+    def test_tombstone_entry_is_preserved_not_treated_as_empty(self) -> None:
+        content = {"agents": {"agents": [{"__deleted__": "x"}]}}
+        assert compact_overlay(content) == content
+
+    def test_real_entry_is_preserved(self) -> None:
+        content = {"agents": {"agents": [{"name": "a", "model": "base-model"}]}}
+        assert compact_overlay(content) == content
+
+    def test_nested_empty_dict_collapses(self) -> None:
+        assert compact_overlay({"tools": {}}) == {}
+
+    def test_non_name_keyed_empty_list_is_left_untouched(self) -> None:
+        """An empty list at a path OUTSIDE _NAME_KEYED_LIST_PATHS (e.g.
+        llm.litellm.fallback_models) replaces BASE wholesale under
+        deep_merge -- it is a real "clear this" instruction, not a no-op,
+        so compact_overlay must never drop it."""
+        content = {"llm": {"litellm": {"fallback_models": []}}}
+        assert compact_overlay(content) == content
 
 
 # --- load_effective_config: end-to-end ---
