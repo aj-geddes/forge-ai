@@ -27,7 +27,7 @@ from _token_fixtures import (
 from fastapi import FastAPI
 from forge_config.schema import ServiceToken
 from forge_gateway import security
-from forge_security.oidc import Authorizer, ServiceTokenVerifier
+from forge_security.oidc import SERVICE_TOKEN_PREFIX, Authorizer, ServiceTokenVerifier
 from forge_security.oidc.user_tokens import UserTokenRecord, UserTokenStoreUnavailableError
 
 
@@ -322,9 +322,19 @@ class TestMint:
                 cookies=_cookies(wiring.user_cookie),
             )
 
-        raw_token = resp.json()["token"]
-        secret_part = raw_token.rsplit("_", 1)[-1]
-        assert all(secret_part not in record.getMessage() for record in caplog.records)
+        body = resp.json()
+        raw_token = body["token"]
+        token_id = body["id"]
+        # forge_sk_<token_id>_<secret> (ADR-0002 SS7.1); derive the secret
+        # from this known prefix, not rsplit("_", 1) -- the base64url
+        # secret can itself contain '_', so rsplit can grab only a short
+        # coincidental tail that spuriously collides with unrelated log
+        # text (e.g. the hex token_id), producing a flaky false leak.
+        id_prefix = f"{SERVICE_TOKEN_PREFIX}{token_id}_"
+        assert raw_token.startswith(id_prefix)
+        secret = raw_token[len(id_prefix) :]
+        assert len(secret) == 43
+        assert all(secret not in record.getMessage() for record in caplog.records)
 
     async def test_mint_race_store_becomes_unavailable_during_mint_returns_503(
         self, client: httpx.AsyncClient, tmp_path: Path
