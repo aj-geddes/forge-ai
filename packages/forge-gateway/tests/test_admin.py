@@ -2031,3 +2031,76 @@ class TestPingPeerLatency:
         data = resp.json()
         assert data["status"] == "unreachable"
         assert data.get("latency_ms") is None
+
+
+# =========================================================================
+# 20. POST /v1/admin/tools/preview -- ADR-0006 slice 4: config:write +
+#     SSRF-guarded spec fetch (was a config:read live SSRF-read primitive).
+# =========================================================================
+
+
+class TestPreviewToolsEgressGuard:
+    """The dry-run preview fetches a caller-supplied OpenAPI source URL. It is a
+    mutation of the server's egress surface, so it now requires config:write
+    (not merely config:read); and the spec fetch runs through the connect-time
+    SSRF guard so an internal/metadata URL is refused."""
+
+    _VIEWER_TOKEN = "forge_sk_viewer_pppppppppppppppppppppppppppppppppppppppp"  # noqa: S105
+    _ADMIN_TOKEN = "forge_sk_prev-admin_qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq"  # noqa: S105
+
+    def _wire(self) -> None:
+        viewer_digest = hashlib.sha256(self._VIEWER_TOKEN.encode("utf-8")).hexdigest()
+        admin_digest = hashlib.sha256(self._ADMIN_TOKEN.encode("utf-8")).hexdigest()
+        security.configure_auth(
+            session_codec=None,
+            service_token_verifier=ServiceTokenVerifier(
+                [
+                    ServiceToken(id="viewer-svc", secret_sha256=viewer_digest, roles=["viewer"]),
+                    ServiceToken(id="prev-admin", secret_sha256=admin_digest, roles=["admin"]),
+                ]
+            ),
+            oidc_verifier=None,
+            authorizer=Authorizer(AuthorizationConfig()),
+            dev_insecure=False,
+        )
+        admin.set_state(config=ForgeConfig(), config_path="/tmp/test.yaml", agent=None)  # noqa: S108
+
+    def _teardown(self) -> None:
+        security.reset_auth()
+        admin.set_state(config=None, config_path="", agent=None, overlay_store=None, base_path="")
+
+    async def test_viewer_role_cannot_preview(self) -> None:
+        # A config:read-only principal must be forbidden -- preview is a mutation.
+        self._wire()
+        try:
+            app = _make_app()
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
+                resp = await ac.post(
+                    "/v1/admin/tools/preview",
+                    json={"source": {"url": "https://example.com/openapi.json"}},
+                    headers={"Authorization": f"Bearer {self._VIEWER_TOKEN}"},
+                )
+            assert resp.status_code == 403
+            assert resp.json()["detail"] == "forbidden"
+        finally:
+            self._teardown()
+
+    async def test_preview_spec_fetch_ssrf_blocked(self) -> None:
+        # A config:write principal, but the spec URL points at an internal
+        # address -> the guarded fetch refuses it and the handler returns a
+        # generic 400 that does NOT echo the fetched body.
+        self._wire()
+        try:
+            app = _make_app()
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
+                resp = await ac.post(
+                    "/v1/admin/tools/preview",
+                    json={"source": {"url": "https://192.168.0.10/openapi.json"}},
+                    headers={"Authorization": f"Bearer {self._ADMIN_TOKEN}"},
+                )
+            assert resp.status_code == 400
+            assert resp.json()["detail"] == "failed to preview OpenAPI source"
+        finally:
+            self._teardown()

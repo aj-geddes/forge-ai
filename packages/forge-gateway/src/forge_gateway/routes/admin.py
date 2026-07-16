@@ -1326,16 +1326,27 @@ async def delete_tool(
     "/tools/preview",
     response_model=AdminToolPreviewResponse,
     responses={400: {"model": ErrorResponse}},
-    dependencies=[_read],
+    dependencies=[_write_principal],
 )
 async def preview_tools(request: AdminToolPreviewRequest) -> AdminToolPreviewResponse:
-    """Dry-run: parse an OpenAPI spec and return the tool list without registering."""
+    """Dry-run: parse an OpenAPI spec and return the tool list without registering.
+
+    ADR-0006: this is a live SSRF-read primitive -- a caller-supplied ``source``
+    is fetched by ``_fetch_remote_spec``. It therefore (a) requires
+    ``config:write`` (not merely ``config:read`` -- fetching an attacker-chosen
+    URL is a mutation of the server's egress surface, matching every other
+    admin mutation), and (b) constructs the builder with the deployment's egress
+    policy so the spec fetch runs through the connect-time SSRF guard. The error
+    path returns a generic message: the fetched body is never echoed back to the
+    caller (it could contain internal-service content).
+    """
     try:
         from forge_agent.builder.openapi import OpenAPIToolBuilder  # noqa: PLC0415
-        from forge_config.schema import OpenAPISource  # noqa: PLC0415
+        from forge_config.schema import EgressPolicy, OpenAPISource  # noqa: PLC0415
 
         source = OpenAPISource.model_validate(request.source)
-        builder = OpenAPIToolBuilder(source)
+        egress_policy = _config.security.egress if _config is not None else EgressPolicy()
+        builder = OpenAPIToolBuilder(source, egress_policy=egress_policy)
         tools = await builder.build()
 
         return AdminToolPreviewResponse(
@@ -1350,7 +1361,10 @@ async def preview_tools(request: AdminToolPreviewRequest) -> AdminToolPreviewRes
             count=len(tools),
         )
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
+        # Do NOT leak the fetched spec body (or any upstream error text that may
+        # embed it) to the caller -- log server-side, return a generic 400.
+        logger.warning("tools/preview failed for source: %s", e)
+        raise HTTPException(status_code=400, detail="failed to preview OpenAPI source") from e
 
 
 # --- Agents endpoints (agents.agents; name-keyed CRUD via the overlay) ---

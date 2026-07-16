@@ -141,6 +141,9 @@ class ToolSurfaceRegistry:
                 source,
                 secret_resolver=resolver,
                 tool_gate=self._tool_gate,
+                # ADR-0006: thread the SSRF/egress policy so both the spec fetch
+                # and operation calls are guarded and the credential is host-bound.
+                egress_policy=config.security.egress,
             )
             tools.extend(await openapi_builder.build())
 

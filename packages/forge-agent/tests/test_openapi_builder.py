@@ -640,7 +640,7 @@ class TestOpenAPIToolBuilderHTTPCalls:
         mock_client.request.return_value = mock_response
         mock_client.aclose.return_value = None
 
-        with patch("forge_agent.builder.openapi.httpx.AsyncClient", return_value=mock_client):
+        with patch("forge_agent.builder.openapi.make_guarded_client", return_value=mock_client):
             result = await fn(limit=10)
 
         assert result == [{"id": 1, "name": "Fido"}]
@@ -675,7 +675,7 @@ class TestOpenAPIToolBuilderHTTPCalls:
         mock_client.request.return_value = mock_response
         mock_client.aclose.return_value = None
 
-        with patch("forge_agent.builder.openapi.httpx.AsyncClient", return_value=mock_client):
+        with patch("forge_agent.builder.openapi.make_guarded_client", return_value=mock_client):
             result = await fn(body={"name": "Rex"})
 
         assert result["name"] == "Rex"
@@ -708,7 +708,7 @@ class TestOpenAPIToolBuilderHTTPCalls:
         mock_client.request.return_value = mock_response
         mock_client.aclose.return_value = None
 
-        with patch("forge_agent.builder.openapi.httpx.AsyncClient", return_value=mock_client):
+        with patch("forge_agent.builder.openapi.make_guarded_client", return_value=mock_client):
             result = await fn(petId=7)
 
         assert result["id"] == 7
@@ -751,7 +751,7 @@ class TestOpenAPIToolBuilderHTTPCalls:
         mock_client.request.return_value = mock_response
         mock_client.aclose.return_value = None
 
-        with patch("forge_agent.builder.openapi.httpx.AsyncClient", return_value=mock_client):
+        with patch("forge_agent.builder.openapi.make_guarded_client", return_value=mock_client):
             await fn()
 
         call_kwargs = mock_client.request.call_args
@@ -796,7 +796,7 @@ class TestOpenAPIToolBuilderHTTPCalls:
         mock_client.request.return_value = mock_response
         mock_client.aclose.return_value = None
 
-        with patch("forge_agent.builder.openapi.httpx.AsyncClient", return_value=mock_client):
+        with patch("forge_agent.builder.openapi.make_guarded_client", return_value=mock_client):
             await fn()
 
         call_kwargs = mock_client.request.call_args
@@ -914,7 +914,7 @@ class TestOpenAPIToolBuilderBaseURL:
         mock_client.request.return_value = mock_response
         mock_client.aclose.return_value = None
 
-        with patch("forge_agent.builder.openapi.httpx.AsyncClient", return_value=mock_client):
+        with patch("forge_agent.builder.openapi.make_guarded_client", return_value=mock_client):
             await fn()
 
         call_kwargs = mock_client.request.call_args
@@ -955,7 +955,7 @@ class TestOpenAPIToolBuilderBaseURL:
         mock_client.request.return_value = mock_response
         mock_client.aclose.return_value = None
 
-        with patch("forge_agent.builder.openapi.httpx.AsyncClient", return_value=mock_client):
+        with patch("forge_agent.builder.openapi.make_guarded_client", return_value=mock_client):
             await fn()
 
         call_kwargs = mock_client.request.call_args
@@ -1454,7 +1454,7 @@ class TestOpenAPIToolBuilderSpecFormats:
         mock_client.get.return_value = mock_response
         mock_client.aclose.return_value = None
 
-        with patch("forge_agent.builder.openapi.httpx.AsyncClient", return_value=mock_client):
+        with patch("forge_agent.builder.openapi.make_guarded_client", return_value=mock_client):
             tools = await builder.build()
 
         assert len(tools) == 6
@@ -1524,7 +1524,7 @@ class TestOpenAPIToolBuilderGating:
                 new_callable=AsyncMock,
                 return_value=_make_petstore_spec(),
             ),
-            patch("forge_agent.builder.openapi.httpx.AsyncClient") as mock_client_cls,
+            patch("forge_agent.builder.openapi.make_guarded_client") as mock_client_cls,
         ):
             tools = await builder.build()
             tools_by_name = {t.name: t for t in tools}
@@ -1548,7 +1548,7 @@ class TestOpenAPIToolBuilderGating:
                 new_callable=AsyncMock,
                 return_value=_make_petstore_spec(),
             ),
-            patch("forge_agent.builder.openapi.httpx.AsyncClient"),
+            patch("forge_agent.builder.openapi.make_guarded_client"),
         ):
             tools = await builder.build()
             tools_by_name = {t.name: t for t in tools}
@@ -1562,7 +1562,7 @@ class TestOpenAPIToolBuilderGating:
         mock_client.request.return_value = mock_response
         mock_client.aclose.return_value = None
 
-        with patch("forge_agent.builder.openapi.httpx.AsyncClient", return_value=mock_client):
+        with patch("forge_agent.builder.openapi.make_guarded_client", return_value=mock_client):
             result = await gate.approve(draft["approval_id"])
 
         mock_client.request.assert_called_once()
@@ -1588,7 +1588,7 @@ class TestOpenAPIToolBuilderGating:
                 new_callable=AsyncMock,
                 return_value=_make_petstore_spec(),
             ),
-            patch("forge_agent.builder.openapi.httpx.AsyncClient", return_value=mock_client),
+            patch("forge_agent.builder.openapi.make_guarded_client", return_value=mock_client),
         ):
             tools = await builder.build()
             tools_by_name = {t.name: t for t in tools}
@@ -1610,7 +1610,7 @@ class TestOpenAPIToolBuilderGating:
                 new_callable=AsyncMock,
                 return_value=_make_petstore_spec(),
             ),
-            patch("forge_agent.builder.openapi.httpx.AsyncClient") as mock_client_cls,
+            patch("forge_agent.builder.openapi.make_guarded_client") as mock_client_cls,
         ):
             tools = await builder.build()
             tools_by_name = {t.name: t for t in tools}
@@ -1626,7 +1626,7 @@ class TestOpenAPIToolBuilderGating:
         mock_client.request.return_value = mock_response
         mock_client.aclose.return_value = None
 
-        with patch("forge_agent.builder.openapi.httpx.AsyncClient", return_value=mock_client):
+        with patch("forge_agent.builder.openapi.make_guarded_client", return_value=mock_client):
             result = await tools_by_name["listPets"].function()
 
         mock_client.request.assert_called_once()
@@ -1648,7 +1648,7 @@ class TestOpenAPIToolBuilderGating:
                 new_callable=AsyncMock,
                 return_value=_make_petstore_spec(),
             ),
-            patch("forge_agent.builder.openapi.httpx.AsyncClient") as mock_client_cls,
+            patch("forge_agent.builder.openapi.make_guarded_client") as mock_client_cls,
         ):
             tools = await builder.build()
             tools_by_name = {t.name: t for t in tools}

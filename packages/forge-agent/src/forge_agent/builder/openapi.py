@@ -13,12 +13,13 @@ import json
 import logging
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 from forge_config.exceptions import SecretResolutionError
-from forge_config.schema import AuthConfig, AuthType, OpenAPISource
+from forge_config.schema import AuthConfig, AuthType, EgressPolicy, OpenAPISource
 from forge_config.secret_resolver import SecretResolver
-from forge_security.egress import BoundCredential
+from forge_security.egress import BoundCredential, enforce_binding, make_guarded_client
 from pydantic_ai.tools import Tool
 
 from forge_agent.active.gate import ToolGate
@@ -51,12 +52,17 @@ class OpenAPIToolBuilder:
         secret_resolver: SecretResolver | None = None,
         tool_gate: ToolGate | None = None,
         *,
+        egress_policy: EgressPolicy | None = None,
         requested_by: str | None = None,
         run_id: str | None = None,
     ) -> None:
         self._source = source
         self._http_client = http_client
         self._secret_resolver = secret_resolver
+        # ADR-0006: SSRF/egress policy threaded from the registry
+        # (config.security.egress). ``None`` => a default-safe EgressPolicy()
+        # is used at call time (IP-layer deny + require_https, pin-to-origin).
+        self._egress_policy = egress_policy
         # ADR-0005 SS6.2 (security review finding #1): OpenAPI-sourced
         # tools must be gate-able exactly like manual tools. ``tool_gate``
         # is the shared gate the registry threads through (mirrors
@@ -86,9 +92,32 @@ class OpenAPIToolBuilder:
         base_url = self._extract_base_url(spec)
         operations = self._extract_operations(spec)
         filtered = self._filter_operations(operations)
-        # Resolve auth headers once at build time (fail-fast).
-        auth_headers = _resolve_auth_headers(self._source.auth, self._secret_resolver)
-        return self._build_tools(filtered, base_url, auth_headers)
+        # ADR-0006: resolve the bound credential once at build time (fail-fast).
+        # The credential is pinned to auth.allowed_hosts, or -- when empty -- to
+        # the OPERATOR-declared origin host ("pin to where you were pointed"), so
+        # a hostile spec ``servers[0].url`` cannot drag it to an attacker host.
+        policy = self._egress_policy or EgressPolicy()
+        declared_host = self._declared_host(base_url)
+        bound = resolve_bound_credential(
+            self._source.auth,
+            self._secret_resolver,
+            declared_host=declared_host,
+        )
+        return self._build_tools(filtered, base_url, bound, policy)
+
+    def _declared_host(self, base_url: str) -> str | None:
+        """Return the OPERATOR-declared origin host used to bind the credential.
+
+        For a REMOTE spec the operator named the host via ``source.url``, so the
+        credential binds THERE -- a spec that then advertises a hostile
+        ``servers[0].url`` cannot drag the credential to that host (the binding
+        check rejects it). For a local/inline spec there is no ``source.url`` and
+        the base_url (from the operator-authored spec content) is the declared
+        origin.
+        """
+        if self._source.url:
+            return urlsplit(self._source.url).hostname
+        return urlsplit(base_url).hostname
 
     async def _load_spec(self) -> dict[str, Any]:
         """Load the OpenAPI spec from inline content, URL, or local path.
@@ -136,7 +165,7 @@ class OpenAPIToolBuilder:
         Returns:
             The parsed spec dict.
         """
-        client = self._http_client or httpx.AsyncClient()
+        client = self._http_client or make_guarded_client(policy=self._egress_policy)
         should_close = self._http_client is None
 
         try:
@@ -278,14 +307,16 @@ class OpenAPIToolBuilder:
         self,
         operations: list[dict[str, Any]],
         base_url: str,
-        auth_headers: dict[str, str],
+        bound: BoundCredential,
+        policy: EgressPolicy,
     ) -> list[Tool[None]]:
         """Build PydanticAI Tool objects from parsed operations.
 
         Args:
             operations: The filtered list of operations.
             base_url: The base URL for API calls.
-            auth_headers: Pre-resolved authentication headers.
+            bound: The resolved, host-bound credential (ADR-0006).
+            policy: The SSRF/egress policy threaded into each tool's client.
 
         Returns:
             List of PydanticAI Tool objects.
@@ -348,7 +379,8 @@ class OpenAPIToolBuilder:
                 base_url=base_url,
                 parameters=op["parameters"],
                 request_body=op["request_body"],
-                auth_headers=auth_headers,
+                bound=bound,
+                egress_policy=policy,
                 http_client=http_client,
                 tool_gate=self._tool_gate if gated else None,
                 requested_by=self._requested_by,
@@ -523,7 +555,8 @@ def _build_tool_function(
     base_url: str,
     parameters: list[dict[str, Any]],
     request_body: dict[str, Any] | None,
-    auth_headers: dict[str, str],
+    bound: BoundCredential,
+    egress_policy: EgressPolicy,
     http_client: httpx.AsyncClient | None,
     tool_gate: ToolGate | None = None,
     requested_by: str | None = None,
@@ -544,7 +577,8 @@ def _build_tool_function(
         base_url: The base URL for the API.
         parameters: OpenAPI parameter definitions.
         request_body: OpenAPI requestBody definition or None.
-        auth_headers: Pre-resolved authentication headers.
+        bound: The resolved, host-bound credential (ADR-0006).
+        egress_policy: The SSRF/egress policy for the outbound client.
         http_client: Optional pre-configured httpx client.
         tool_gate: When given, the built tool is gated: invoking it drafts
             an :class:`~forge_agent.active.gate.ApprovalRequest` instead of
@@ -626,7 +660,8 @@ def _build_tool_function(
             query_params=query_param_names,
             header_params=header_param_names,
             has_body=has_body,
-            auth_headers=auth_headers,
+            bound=bound,
+            egress_policy=egress_policy,
             http_client=http_client,
             call_kwargs=kwargs,
         )
@@ -778,7 +813,8 @@ async def _execute_openapi_call(
     query_params: set[str],
     header_params: set[str],
     has_body: bool,
-    auth_headers: dict[str, str],
+    bound: BoundCredential,
+    egress_policy: EgressPolicy,
     http_client: httpx.AsyncClient | None,
     call_kwargs: dict[str, Any],
 ) -> Any:
@@ -792,7 +828,9 @@ async def _execute_openapi_call(
         query_params: Set of query parameter names.
         header_params: Set of header parameter names.
         has_body: Whether the operation expects a JSON body.
-        auth_headers: Pre-resolved authentication headers.
+        bound: The resolved, host-bound credential (ADR-0006).
+        egress_policy: The SSRF/egress policy; guards the outbound client and
+            gates the secret->destination binding on the FINAL URL.
         http_client: Optional pre-configured httpx client.
         call_kwargs: The keyword arguments from the tool invocation.
 
@@ -815,8 +853,14 @@ async def _execute_openapi_call(
         if safe_name in call_kwargs and call_kwargs[safe_name] is not None:
             query[param_name] = call_kwargs[safe_name]
 
-    # Collect header parameters — start with pre-resolved auth headers.
-    headers: dict[str, str] = dict(auth_headers)
+    # ADR-0006: enforce the secret->destination binding against the FINAL,
+    # fully-resolved URL. Raises EgressViolationError (REJECT) or returns the
+    # credential minus its headers (DROP) when the destination host is out of the
+    # bound set -- this is what stops a hostile spec ``servers[0].url`` from
+    # carrying the operator credential to an attacker host. Header params (which
+    # are not credential-bound) layer on top.
+    policy = egress_policy or EgressPolicy()
+    headers: dict[str, str] = dict(enforce_binding(url, bound, policy=policy))
     for param_name in header_params:
         safe_name = _sanitize_name(param_name)
         if safe_name in call_kwargs and call_kwargs[safe_name] is not None:
@@ -825,7 +869,7 @@ async def _execute_openapi_call(
     # Extract body.
     body = call_kwargs.get("body") if has_body else None
 
-    client = http_client or httpx.AsyncClient()
+    client = http_client or make_guarded_client(policy=egress_policy)
     should_close = http_client is None
 
     try:
