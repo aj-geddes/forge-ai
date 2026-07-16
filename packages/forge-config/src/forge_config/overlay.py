@@ -2,6 +2,13 @@
 subset of ``forge.yaml`` that may live in the runtime config overlay
 (``/app/data/overlay/forge.overlay.yaml``).
 
+SLICE 7 (Phase-2 payoff): tool/openapi DESTINATION fields
+(``url``/``base_url``/``endpoint``) are now runtime-editable via the overlay.
+The safety moved from "structurally un-representable" to a WRITE-TIME gate in
+``forge_gateway.routes.admin._enforce_destination_binding``: an internal
+literal is rejected by the SSRF classifier, and a credentialed tool may only
+be repointed within its BASE credential binding. SECRETS remain git-only.
+
 This is the *structural* half of the Phase-1 field-level split. A config
 field is runtime-editable via the overlay only if it provably cannot reach
 (a) an outbound DESTINATION it did not already have in BASE (any
@@ -90,27 +97,35 @@ class Tombstone(BaseModel):
 
 
 class OverlayManualToolAPI(BaseModel):
-    """The ONLY ``ManualToolAPI`` field editable at runtime:
-    ``response_mapping`` (which merely READS the response and never
-    contributes to url/headers/body). ``extra="forbid"`` structurally
-    rejects ``url``/``base_url``/``endpoint`` (DESTINATIONS),
-    ``headers``/``auth`` (SECRET bindings), and
-    ``method``/``body_template``/``timeout`` (pinned request-construction
-    surface). Because a tool CREATE needs a ``url`` this model cannot
-    carry, defining a new tool through the overlay is impossible."""
+    """The runtime-editable subset of a ``ManualToolAPI`` after SLICE 7.
+
+    DESTINATION fields (``url``/``base_url``/``endpoint``) are now editable
+    at runtime -- but the admin mutation choke point
+    (``_enforce_destination_binding``) gates every such edit: an internal
+    literal is rejected by the SSRF classifier, and a tool that carries a
+    BASE credential may only be repointed within its bound host set. SECRETS
+    stay git-only: ``extra="forbid"`` still structurally rejects
+    ``headers``/``auth`` (SECRET bindings) and
+    ``method``/``body_template``/``timeout`` (the pinned request-construction
+    surface), so a runtime edit can move WHERE a call goes but never WHICH
+    credential it carries."""
 
     model_config = ConfigDict(extra="forbid")
 
+    url: str | None = None
+    base_url: str | None = None
+    endpoint: str | None = None
     response_mapping: ResponseMapping | None = None
 
 
 class OverlayManualTool(BaseModel):
     """Runtime-editable subset of a ``ManualTool``: identity/selector
     ``name`` plus the inert ``description``/``parameters`` and the
-    read-only ``api.response_mapping``. Omits ``api.url``/etc.,
-    ``requires_approval`` (a security control), and every secret binding --
-    so an overlay may only EDIT those safe fields on a base-defined tool,
-    never repoint its destination, change its credential, or ungate it."""
+    editable ``api`` destination (``url``/``base_url``/``endpoint``, gated at
+    write time by the binding check). Omits ``requires_approval`` (a security
+    control) and every secret binding (``headers``/``auth``) -- so an overlay
+    may repoint a base-defined tool's destination (within its credential
+    binding) but never change its credential or ungate it."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -121,17 +136,20 @@ class OverlayManualTool(BaseModel):
 
 
 class OverlayOpenAPISource(BaseModel):
-    """Runtime-editable subset of an ``OpenAPISource``: filters/labels over
-    an already-base-defined spec (``route_map``/``prefix``/``namespace``/
-    ``include_tags``/``include_operations``). Omits ``url``/``path``/
-    ``spec`` (the DESTINATION/spec source), ``auth`` (SECRET binding), and
-    the ``requires_approval``/``approval_operations`` security controls.
-    Broadening a filter only exposes more calls to the SAME base host,
-    never a new destination; and creation (needs ``url``) is impossible."""
+    """Runtime-editable subset of an ``OpenAPISource``: the remote-spec
+    DESTINATION ``url`` (gated at write time by the binding check, exactly
+    like a manual tool) plus filters/labels over the base-defined spec
+    (``route_map``/``prefix``/``namespace``/``include_tags``/
+    ``include_operations``). Omits ``path``/``spec`` (the local spec source),
+    ``auth`` (SECRET binding), and the ``requires_approval``/
+    ``approval_operations`` security controls -- so a runtime edit may
+    repoint the source (within its credential binding) or broaden a filter,
+    but never change its credential."""
 
     model_config = ConfigDict(extra="forbid")
 
     name: str
+    url: str | None = None
     route_map: dict[str, str] | None = None
     prefix: str | None = None
     namespace: str | None = None
@@ -283,9 +301,10 @@ class OverlayDocument(BaseModel):
 #: Human-readable summary of the base-only field classes, appended to every
 #: promote-via-git rejection so an operator/UI knows WHY and where to go.
 _PROMOTE_HINT = (
-    "these are BASE-only (destinations: url/base_url/endpoint/api_base/peer "
-    "endpoint; secrets & secret-bindings: api_key/auth/SecretRef/secret headers; "
-    "the model_list registry; and security controls like requires_approval) -- "
+    "these are BASE-only (the llm model_list api_base and peer endpoint "
+    "destinations; secrets & secret-bindings: api_key/auth/SecretRef/secret "
+    "headers; the model_list registry; and security controls like "
+    "requires_approval) -- "
     "promote this change via git (export it from the promotion diff at "
     "GET /v1/admin/config/promotion/diff); it cannot be applied through the "
     "runtime overlay"
@@ -338,9 +357,11 @@ def validate_overlay_content(content: dict[str, Any]) -> None:
 # surfaced as a promote-via-git action.
 
 _MANUAL_TOOL_SAFE: frozenset[str] = frozenset({"name", "description", "parameters", "api"})
-_MANUAL_TOOL_API_SAFE: frozenset[str] = frozenset({"response_mapping"})
+_MANUAL_TOOL_API_SAFE: frozenset[str] = frozenset(
+    {"response_mapping", "url", "base_url", "endpoint"}
+)
 _OPENAPI_SAFE: frozenset[str] = frozenset(
-    {"name", "route_map", "prefix", "namespace", "include_tags", "include_operations"}
+    {"name", "url", "route_map", "prefix", "namespace", "include_tags", "include_operations"}
 )
 _LLM_SAFE: frozenset[str] = frozenset(
     {"default_model", "temperature", "max_tokens", "system_prompt", "litellm"}

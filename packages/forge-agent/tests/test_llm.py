@@ -33,8 +33,15 @@ def _make_llm_config(
     max_tokens: int = 4096,
     timeout: float = 30.0,
     max_retries: int = 3,
+    allowed_api_hosts: list[str] | None = None,
 ) -> LLMConfig:
-    """Build an LLMConfig for testing."""
+    """Build an LLMConfig for testing.
+
+    ``allowed_api_hosts`` defaults to trusting the internal vLLM fixture host
+    (``192.168.86.42``) so the pre-existing model_list fixtures -- which point
+    at an on-LAN vLLM -- keep resolving under the SLICE 6 fail-closed egress
+    guard. Egress-rejection tests pass an explicit ``[]`` or a different list.
+    """
     litellm = LiteLLMConfig(
         mode=mode,
         endpoint=endpoint,
@@ -42,6 +49,9 @@ def _make_llm_config(
         fallback_models=fallback_models or [],
         timeout=timeout,
         max_retries=max_retries,
+        allowed_api_hosts=(
+            allowed_api_hosts if allowed_api_hosts is not None else ["192.168.86.42"]
+        ),
     )
     return LLMConfig(
         default_model=default_model,
@@ -351,3 +361,150 @@ class TestErrorCases:
 
         with pytest.raises(LLMConfigError, match="litellm_params.model"):
             router.resolve_model()
+
+
+# --- SLICE 6: LLM egress hardening (api_base validation + api_key hygiene) ---
+
+_INTERNAL_ENTRY = {
+    "model_name": "internal",
+    "litellm_params": {
+        "model": "openai/local-model",
+        "api_base": "http://10.0.0.5:8000/v1",
+        "api_key": "k",
+    },
+}
+_METADATA_ENTRY = {
+    "model_name": "meta",
+    "litellm_params": {
+        "model": "openai/x",
+        "api_base": "http://169.254.169.254/latest/v1",
+        "api_key": "k",
+    },
+}
+_PUBLIC_ENTRY = {
+    "model_name": "pub",
+    "litellm_params": {
+        "model": "openai/gpt-4o",
+        "api_base": "https://api.openai.com/v1",
+        "api_key": "sk-x",
+    },
+}
+
+
+class TestApiBaseEgressValidation:
+    """SLICE 6: an internal/metadata api_base is rejected at model build,
+    fail-closed, unless positively allow-listed via allowed_api_hosts."""
+
+    def test_internal_api_base_rejected_with_empty_allowlist(self) -> None:
+        config = _make_llm_config(
+            default_model="internal", model_list=[_INTERNAL_ENTRY], allowed_api_hosts=[]
+        )
+        router = LLMRouter(config)
+        with pytest.raises(LLMConfigError, match="internal/metadata/blocked"):
+            router.resolve_model()
+
+    def test_metadata_api_base_rejected_with_empty_allowlist(self) -> None:
+        config = _make_llm_config(
+            default_model="meta", model_list=[_METADATA_ENTRY], allowed_api_hosts=[]
+        )
+        router = LLMRouter(config)
+        with pytest.raises(LLMConfigError):
+            router.resolve_model()
+
+    def test_allowlisted_internal_api_base_resolves(self) -> None:
+        config = _make_llm_config(
+            default_model="internal",
+            model_list=[_INTERNAL_ENTRY],
+            allowed_api_hosts=["10.0.0.5"],
+        )
+        model = LLMRouter(config).resolve_model()
+        assert isinstance(model, OpenAIChatModel)
+        assert str(model.base_url).rstrip("/") == "http://10.0.0.5:8000/v1"
+
+    def test_public_api_base_not_in_allowlist_rejected(self) -> None:
+        config = _make_llm_config(
+            default_model="pub",
+            model_list=[_PUBLIC_ENTRY],
+            allowed_api_hosts=["api.anthropic.com"],
+        )
+        router = LLMRouter(config)
+        with pytest.raises(LLMConfigError, match="allowed_api_hosts"):
+            router.resolve_model()
+
+    def test_public_api_base_in_allowlist_resolves(self) -> None:
+        config = _make_llm_config(
+            default_model="pub",
+            model_list=[_PUBLIC_ENTRY],
+            allowed_api_hosts=["api.openai.com"],
+        )
+        assert isinstance(LLMRouter(config).resolve_model(), OpenAIChatModel)
+
+    def test_internal_api_base_cannot_be_introduced_via_resolve(self) -> None:
+        # No resolve path may bypass the guard: an allow-listed public primary
+        # resolves, but switching to a sibling alias whose internal api_base is
+        # NOT allow-listed still fails closed at build.
+        config = _make_llm_config(
+            default_model="pub",
+            model_list=[_PUBLIC_ENTRY, _INTERNAL_ENTRY],
+            allowed_api_hosts=["api.openai.com"],
+        )
+        router = LLMRouter(config)
+        assert isinstance(router.resolve_model(), OpenAIChatModel)
+        with pytest.raises(LLMConfigError):
+            router.resolve_model("internal")
+
+
+class TestApiKeySecretResolution:
+    """SLICE 6: a ${ENV_VAR} / SecretRef api_key resolves through the
+    SecretResolver at build time; a plain string passes through unchanged."""
+
+    def _openai_entry(self, api_key: object) -> dict[str, object]:
+        return {
+            "model_name": "m",
+            "litellm_params": {
+                "model": "openai/gpt-4o",
+                "api_base": "https://api.openai.com/v1",
+                "api_key": api_key,
+            },
+        }
+
+    def test_env_ref_api_key_resolved_at_build(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("FORGE_TEST_LLM_KEY", "resolved-secret")
+        config = _make_llm_config(
+            default_model="m",
+            model_list=[self._openai_entry("${FORGE_TEST_LLM_KEY}")],
+            allowed_api_hosts=["api.openai.com"],
+        )
+        model = LLMRouter(config).resolve_model()
+        assert model.client.api_key == "resolved-secret"
+
+    def test_secretref_dict_api_key_resolved_at_build(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("FORGE_TEST_LLM_KEY2", "dict-secret")
+        config = _make_llm_config(
+            default_model="m",
+            model_list=[self._openai_entry({"source": "env", "name": "FORGE_TEST_LLM_KEY2"})],
+            allowed_api_hosts=["api.openai.com"],
+        )
+        model = LLMRouter(config).resolve_model()
+        assert model.client.api_key == "dict-secret"
+
+    def test_env_ref_default_used_when_var_unset(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("FORGE_UNSET_LLM_KEY", raising=False)
+        config = _make_llm_config(
+            default_model="m",
+            model_list=[self._openai_entry("${FORGE_UNSET_LLM_KEY:fallback-key}")],
+            allowed_api_hosts=["api.openai.com"],
+        )
+        model = LLMRouter(config).resolve_model()
+        assert model.client.api_key == "fallback-key"
+
+    def test_plain_string_api_key_passthrough(self) -> None:
+        config = _make_llm_config(
+            default_model="m",
+            model_list=[self._openai_entry("sk-plain")],
+            allowed_api_hosts=["api.openai.com"],
+        )
+        model = LLMRouter(config).resolve_model()
+        assert model.client.api_key == "sk-plain"

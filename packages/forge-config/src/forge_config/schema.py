@@ -114,6 +114,18 @@ class LiteLLMConfig(BaseModel):
     timeout: float = 30.0
     max_retries: int = 3
 
+    # ADR-0006 (SLICE 6): positive allow-list of provider API hosts that a
+    # ``model_list`` entry's ``litellm_params.api_base`` may target (exact
+    # host / ``host:port`` / ``*.suffix``). This is the escape hatch for a
+    # *trusted* internal endpoint (e.g. an in-cluster/on-LAN vLLM): a host
+    # named here is permitted even though it resolves to a private address.
+    # EMPTY (the default) => no positive allow-list, so the IP-layer guard
+    # applies and any ``api_base`` pointing at an internal/metadata address
+    # is rejected at model-build time (fail closed). When NON-EMPTY it is a
+    # strict allow-list: an ``api_base`` whose host is not listed is rejected
+    # even if it is a public host.
+    allowed_api_hosts: list[str] = Field(default_factory=list)
+
     @model_validator(mode="after")
     def validate_endpoint(self) -> LiteLLMConfig:
         if self.mode in (LiteLLMMode.SIDECAR, LiteLLMMode.EXTERNAL) and not self.endpoint:

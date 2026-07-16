@@ -60,6 +60,7 @@ def _deployed_llm_config(*, default_model: str = "nemotron") -> LLMConfig:
                 },
             ],
             fallback_models=["claude-sonnet"],
+            allowed_api_hosts=["192.168.86.42"],
         ),
     )
 

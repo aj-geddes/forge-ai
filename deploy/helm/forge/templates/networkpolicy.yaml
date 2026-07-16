@@ -1,0 +1,109 @@
+{{- /*
+Default-deny egress NetworkPolicy -- a network-layer (L3/L4) defense-in-depth
+backstop that MIRRORS the app-layer egress guard (ADR-0006, slices 3-7). The app
+guard is necessary but not sufficient: a bug, a mis-config, or a compromised
+dependency could still open a socket the guard did not vet. This policy makes the
+kernel/CNI enforce the same intent regardless of what the process attempts.
+
+Selecting a pod for Egress flips it to default-deny: only the traffic explicitly
+allowed below can leave. The rules permit exactly the dependencies this agent
+actually uses:
+  (a) DNS (CoreDNS/kube-dns) -- required or nothing else resolves.
+  (b) in-cluster dependencies: everything in this release's own namespace (redis,
+      postiz + postiz-redis, A2A peers) plus a configurable set of other
+      namespaces (opa for AgentWeave authz; dex/gateway for OIDC if reached
+      in-cluster).
+  (c) the public internet for LLM/tool egress, with the dangerous internal ranges
+      carved OUT via ipBlock.except -- RFC1918, link-local (169.254, incl. cloud
+      metadata 169.254.169.254), and CGNAT (100.64/10). Trusted LAN infra that
+      falls inside those excepted ranges (the on-LAN vLLM model provider at
+      192.168.86.42 and the hvslocal gateway VIP serving Dex/OIDC) is RE-PERMITTED
+      by the explicit allowedCIDRs rules -- NetworkPolicy egress is a union, so an
+      explicit ipBlock allow overrides an except in a different rule.
+*/ -}}
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "forge.fullname" . }}
+  labels:
+    {{- include "forge.labels" . | nindent 4 }}
+    app.kubernetes.io/component: agent
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "forge.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: agent
+  policyTypes:
+    - Egress
+    {{- if .Values.networkPolicy.ingress.enabled }}
+    - Ingress
+    {{- end }}
+  {{- if .Values.networkPolicy.ingress.enabled }}
+  # Ingress is normally left to the Gateway/HTTPRoute layer; enable this only to
+  # additionally restrict who may reach :8000 to pods in the gateway namespace.
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.ingress.fromNamespace }}
+      ports:
+        - protocol: TCP
+          port: 8000
+  {{- end }}
+  egress:
+    {{- if .Values.networkPolicy.egress.dns.enabled }}
+    # (a) DNS resolution (CoreDNS/kube-dns)
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.egress.dns.namespace }}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    {{- end }}
+    {{- if .Values.networkPolicy.egress.sameNamespace }}
+    # (b) in-namespace dependencies (redis, postiz + postiz-redis, A2A peers)
+    - to:
+        - podSelector: {}
+    {{- end }}
+    {{- range .Values.networkPolicy.egress.allowedNamespaces }}
+    # (b) additional in-cluster namespace (opa / dex / gateway)
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ . }}
+    {{- end }}
+    {{- range .Values.networkPolicy.egress.allowedCIDRs }}
+    # (c) explicit trusted LAN/infra CIDR (model provider + gateway/Dex VIP)
+    - to:
+        - ipBlock:
+            cidr: {{ . }}
+    {{- end }}
+    {{- if .Values.networkPolicy.egress.publicInternet.enabled }}
+    # (c) public internet, RFC1918/link-local(metadata)/CGNAT carved out
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            {{- with .Values.networkPolicy.egress.publicInternet.exceptCIDRs }}
+            except:
+              {{- range . }}
+              - {{ . }}
+              {{- end }}
+            {{- end }}
+    {{- if .Values.networkPolicy.egress.publicInternet.ipv6.enabled }}
+    # (c) public internet (IPv6), ULA/link-local carved out (dual-stack only)
+    - to:
+        - ipBlock:
+            cidr: ::/0
+            {{- with .Values.networkPolicy.egress.publicInternet.ipv6.exceptCIDRs }}
+            except:
+              {{- range . }}
+              - {{ . }}
+              {{- end }}
+            {{- end }}
+    {{- end }}
+    {{- end }}
+{{- end }}

@@ -52,6 +52,42 @@ class TestOverlayDocumentAcceptsRuntimeSafeFields:
         assert doc.tools.manual_tools is not None
         assert len(doc.tools.manual_tools) == 1
 
+    def test_tool_destination_edit_validates(self) -> None:
+        # SLICE 7: url/base_url/endpoint are now runtime-editable.
+        doc = OverlayDocument.model_validate(
+            {
+                "tools": {
+                    "manual_tools": [
+                        {"name": "echo", "api": {"url": "https://new.example.com/echo"}},
+                        {
+                            "name": "e2",
+                            "api": {"base_url": "https://h.example.com", "endpoint": "/x"},
+                        },
+                    ]
+                }
+            }
+        )
+        assert doc.tools is not None
+        validate_overlay_content(
+            {"tools": {"manual_tools": [{"name": "echo", "api": {"url": "https://x.example.com"}}]}}
+        )
+
+    def test_openapi_url_edit_validates(self) -> None:
+        # SLICE 7: an openapi source's remote-spec url is runtime-editable.
+        doc = OverlayDocument.model_validate(
+            {
+                "tools": {
+                    "openapi_sources": [
+                        {"name": "petstore", "url": "https://p.example.com/openapi.json"}
+                    ]
+                }
+            }
+        )
+        assert doc.tools is not None
+        validate_overlay_content(
+            {"tools": {"openapi_sources": [{"name": "petstore", "url": "https://p.example.com/x"}]}}
+        )
+
     def test_openapi_filter_edit_validates(self) -> None:
         doc = OverlayDocument.model_validate(
             {
@@ -174,15 +210,11 @@ class TestOverlayDocumentRejectsBaseOnlyFields:
     @pytest.mark.parametrize(
         "payload",
         [
-            {"tools": {"manual_tools": [{"name": "t", "api": {"url": "http://x"}}]}},
-            {"tools": {"manual_tools": [{"name": "t", "api": {"base_url": "http://x"}}]}},
-            {"tools": {"manual_tools": [{"name": "t", "api": {"endpoint": "/y"}}]}},
             {"tools": {"manual_tools": [{"name": "t", "api": {"method": "POST"}}]}},
             {"tools": {"manual_tools": [{"name": "t", "api": {"headers": {"A": "b"}}}]}},
             {"tools": {"manual_tools": [{"name": "t", "api": {"auth": {"type": "bearer"}}}]}},
             {"tools": {"manual_tools": [{"name": "t", "api": {"body_template": {}}}]}},
             {"tools": {"manual_tools": [{"name": "t", "requires_approval": False}]}},
-            {"tools": {"openapi_sources": [{"name": "s", "url": "http://x"}]}},
             {"tools": {"openapi_sources": [{"name": "s", "path": "/spec"}]}},
             {"tools": {"openapi_sources": [{"name": "s", "spec": "http://x"}]}},
             {"tools": {"openapi_sources": [{"name": "s", "auth": {"type": "bearer"}}]}},
@@ -202,10 +234,10 @@ class TestOverlayDocumentRejectsBaseOnlyFields:
     def test_validate_overlay_content_message_names_field_and_promotion(self) -> None:
         with pytest.raises(OverlayFieldError) as exc:
             validate_overlay_content(
-                {"tools": {"manual_tools": [{"name": "t", "api": {"url": "http://x"}}]}}
+                {"tools": {"manual_tools": [{"name": "t", "api": {"method": "POST"}}]}}
             )
         msg = str(exc.value)
-        assert "url" in msg
+        assert "method" in msg
         assert "promote" in msg.lower()
         assert "git" in msg.lower()
         assert exc.value.locations
@@ -273,7 +305,7 @@ class TestProjectOverlaySafe:
         assert tool == {
             "name": "echo",
             "description": "d",
-            "api": {"response_mapping": {"result_path": "$"}},
+            "api": {"url": "http://x", "response_mapping": {"result_path": "$"}},
         }
 
     def test_drops_llm_model_list_and_endpoint(self) -> None:
@@ -322,11 +354,19 @@ class TestSplitOverlayEditable:
         assert changed == []
         validate_overlay_content(safe)
 
-    def test_changed_tool_url_is_reported(self) -> None:
+    def test_changed_tool_url_is_not_reported(self) -> None:
+        # SLICE 7: url is now overlay-safe (runtime-editable, gated at write
+        # time by the binding check), so a url change is NOT surfaced here.
         eff = {"tools": {"manual_tools": [{"name": "t", "api": {"url": "http://good"}}]}}
         inc = {"tools": {"manual_tools": [{"name": "t", "api": {"url": "http://evil"}}]}}
         _, changed = split_overlay_editable(inc, incoming_for_diff=inc, effective_for_diff=eff)
-        assert any("url" in c for c in changed)
+        assert not any("url" in c for c in changed)
+
+    def test_changed_tool_auth_is_reported(self) -> None:
+        eff = {"tools": {"manual_tools": [{"name": "t", "api": {"auth": {"type": "none"}}}]}}
+        inc = {"tools": {"manual_tools": [{"name": "t", "api": {"auth": {"type": "bearer"}}}]}}
+        _, changed = split_overlay_editable(inc, incoming_for_diff=inc, effective_for_diff=eff)
+        assert any("auth" in c for c in changed)
 
     def test_new_peer_endpoint_is_reported(self) -> None:
         eff: dict = {"agents": {"peers": []}}

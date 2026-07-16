@@ -117,6 +117,10 @@ forgeConfig:
             api_key: ${ANTHROPIC_API_KEY}
       fallback_models:
         - claude-sonnet
+      # SLICE 6 (ADR-0006): positively trust the on-LAN vLLM host so its
+      # internal api_base is not rejected by the fail-closed egress guard.
+      allowed_api_hosts:
+        - 192.168.86.42
       timeout: 60.0
       max_retries: 3
   # First real tool surface for the agent. Every endpoint here is keyless and
@@ -538,3 +542,31 @@ agentweave:
   enabled: true
   socketMountPath: /spiffe-workload-api
   opaEndpoint: http://opa.opa.svc.cluster.local:8181
+
+# Network-layer egress backstop (see templates/networkpolicy.yaml). ON for this
+# cluster. The union of the rules below is the ONLY outbound traffic the agent
+# pod can send; everything else is dropped by the CNI.
+#   ALLOWED: DNS (kube-system 53) | own namespace dev-aj-geddes (redis, postiz,
+#     postiz-redis, A2A peers) | opa/dex namespaces (AgentWeave authz, OIDC) |
+#     the trusted 192.168.86.0/24 LAN (vLLM model provider 192.168.86.42 that
+#     backs default_model nemotron, AND the hvslocal gateway VIP that fronts
+#     dex.hvslocal / forgeai.hvslocal) | the public internet for the manual_tools
+#     (wttr.in, ip-api.com, api.github.com, api.coinbase.com, open.er-api.com,
+#     dictionaryapi.dev).
+#   DENIED: the rest of RFC1918 (10/8, 172.16/12, other 192.168 subnets),
+#     link-local incl. 169.254.169.254 metadata, and 100.64/10 CGNAT.
+# The 192.168.86.0/24 allow is what keeps model egress AND OIDC working despite
+# the 192.168.0.0/16 except -- it re-permits only the trusted home-lab segment,
+# while the app-layer guard still pins tool egress to 192.168.86.42 exactly.
+networkPolicy:
+  enabled: true
+  egress:
+    allowedNamespaces:
+      - opa       # AgentWeave OPA authz (opa.opa.svc:8181)
+      - dex       # OIDC, in case dex.hvslocal is resolved to the in-cluster Dex pod
+      - gateway   # shared Gateway API data-plane: server-side OIDC token-exchange to
+                  # dex.hvslocal/forgeai.hvslocal survives even if the CNI hairpins the
+                  # LoadBalancer VIP to a 10.x gateway pod IP (else it hits the public
+                  # rule's 10.0.0.0/8 except and login breaks). Additive/defensive.
+    allowedCIDRs:
+      - 192.168.86.0/24

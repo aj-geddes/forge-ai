@@ -184,9 +184,9 @@ class TestPeerCallerOutboundMTLS:
         """When an ``identity`` provider is supplied and no explicit
         ``http_client`` override is given, PeerCaller builds its httpx
         client with the mTLS SSLContext from
-        ``identity.create_tls_context(server=False)``, and pre-send
-        verifies the peer's SPIFFE ID over that same context (ADR-0004
-        SS6) before the real request is sent."""
+        ``identity.create_tls_context(server=False)`` (via the SSRF-guarded
+        client, ADR-0006), and pre-send verifies the peer's SPIFFE ID over
+        that same context (ADR-0004 SS6) before the real request is sent."""
         from forge_agent.agent import peers as peers_module
 
         expected_id = "spiffe://hvslocal/ns/dev/sa/data-forge"
@@ -210,7 +210,10 @@ class TestPeerCallerOutboundMTLS:
         mock_client_instance.post.return_value = response
 
         with (
-            patch("forge_agent.agent.peers.httpx.AsyncClient") as mock_client_cls,
+            patch(
+                "forge_agent.agent.peers.make_guarded_client",
+                return_value=mock_client_instance,
+            ) as mock_make_client,
             patch.object(
                 peers_module,
                 "_probe_peer_tls_identity",
@@ -218,15 +221,15 @@ class TestPeerCallerOutboundMTLS:
             ) as mock_probe,
             patch.object(peers_module, "extract_spiffe_id_from_cert", return_value=expected_id),
         ):
-            mock_client_cls.return_value = mock_client_instance
-
             caller = PeerCaller([peer], identity=identity)
             result = await caller.call_peer("data-forge", "task", {})
 
         assert result.status == "completed"
         identity.create_tls_context.assert_awaited_once_with(server=False)
-        mock_client_cls.assert_called_once()
-        assert mock_client_cls.call_args.kwargs["verify"] == "fake-mtls-ssl-context"
+        # ADR-0006: the mTLS client is built via the SSRF guard, and the
+        # workload SSLContext is preserved through ``verify`` (SNI/cert-verify).
+        mock_make_client.assert_called_once()
+        assert mock_make_client.call_args.kwargs["verify"] == "fake-mtls-ssl-context"
         mock_probe.assert_awaited_once()
 
     @pytest.mark.anyio

@@ -51,7 +51,8 @@ from urllib.parse import urlsplit
 
 import httpx
 from agentweave.transport.channel import PeerVerificationError
-from forge_config.schema import PeerAgent
+from forge_config.schema import EgressPolicy, PeerAgent
+from forge_security.egress import make_guarded_client
 from forge_security.workload import extract_spiffe_id_from_cert
 from pydantic import BaseModel, Field
 from pydantic_ai.tools import Tool
@@ -265,6 +266,15 @@ class PeerCaller:
             must have a pinned ``spiffe_id`` (mandatory pinning --
             :class:`PeerPinningRequiredError` otherwise), and the peer's
             SPIFFE ID is verified BEFORE the request is sent.
+        egress_policy: Optional SSRF/egress policy (ADR-0006), threaded
+            from ``config.security.egress``. Both the internally managed
+            mTLS client and the non-mTLS fallback client are built via
+            :func:`make_guarded_client`, so every peer connection gets
+            connect-time pinned-IP internal-address blocking -- closing
+            the DNS-rebind window between ``validate_peer_endpoint`` at
+            write time and the actual connect. Ignored for an injected
+            ``http_client`` (test/DI seam). ``None`` => a default-safe
+            :class:`EgressPolicy` is applied by the guarded transport.
     """
 
     def __init__(
@@ -273,10 +283,12 @@ class PeerCaller:
         http_client: httpx.AsyncClient | None = None,
         *,
         identity: WorkloadIdentityProvider | None = None,
+        egress_policy: EgressPolicy | None = None,
     ) -> None:
         self._peers = {peer.name: peer for peer in peers}
         self._http_client = http_client
         self._identity = identity
+        self._egress_policy = egress_policy
         self._mtls_client: httpx.AsyncClient | None = None
         self._mtls_ssl_context: Any = None
 
@@ -312,8 +324,11 @@ class PeerCaller:
         closed here. Otherwise, when a workload ``identity`` provider was
         supplied, a single mTLS client (ADR-0004 SS6) is built once from
         ``identity.create_tls_context(server=False)`` and cached for
-        reuse across calls. With neither, falls back to a plain ephemeral
-        client, closed after the single call that uses it.
+        reuse across calls. With neither, falls back to an ephemeral guarded
+        client, closed after the single call that uses it. Both internally
+        built clients (mTLS and fallback) go through
+        :func:`make_guarded_client` (ADR-0006) for connect-time internal-IP
+        blocking; an injected ``http_client`` is used verbatim.
         """
         if self._http_client is not None:
             return self._http_client, False
@@ -321,10 +336,19 @@ class PeerCaller:
         if self._identity is not None:
             if self._mtls_client is None:
                 self._mtls_ssl_context = await self._identity.create_tls_context(server=False)
-                self._mtls_client = httpx.AsyncClient(verify=self._mtls_ssl_context)
+                # ADR-0006: route the mTLS peer client through the SSRF guard too.
+                # ``verify`` preserves the workload SSLContext (SNI + cert
+                # verification bind to the peer hostname); the guard adds
+                # connect-time pinned-IP internal-address blocking on top.
+                self._mtls_client = make_guarded_client(
+                    policy=self._egress_policy, verify=self._mtls_ssl_context
+                )
             return self._mtls_client, False
 
-        return httpx.AsyncClient(), True
+        # ADR-0006: the non-mTLS fallback must not open a bare, unguarded
+        # client -- build the sanctioned guarded client so a peer endpoint
+        # that (re)binds to an internal IP is refused at connect.
+        return make_guarded_client(policy=self._egress_policy), True
 
     def _require_pinned_spiffe_id(self, peer: PeerAgent) -> None:
         """Mandatory pinning (ADR-0004 SS7.3): when this caller has a

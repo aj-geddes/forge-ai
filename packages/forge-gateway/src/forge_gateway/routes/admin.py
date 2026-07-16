@@ -27,6 +27,7 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import yaml
 from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query, Response
@@ -50,6 +51,7 @@ from forge_config.overlay import (
 )
 from forge_config.schema import PERMISSION_WILDCARD, ForgeConfig, MutationPolicy, Permission
 from forge_config.writable_store import OverlayConflictError, OverlayStore
+from forge_security.egress import host_matches, validate_endpoint
 from forge_security.oidc.principal import Principal
 from pydantic import ValidationError
 
@@ -274,6 +276,30 @@ async def apply_overlay_mutation(
                     }
                 )
                 raise HTTPException(status_code=400, detail=str(e)) from e
+
+            # SECURITY (SLICE 7): destinations are now runtime-editable, so
+            # every repointed tool/openapi destination is gated here at write
+            # time -- reject an internal literal (SSRF classifier) and, for a
+            # credentialed tool, any host outside its BASE credential binding.
+            # The connect-time GuardedBackend remains the authority.
+            try:
+                _enforce_destination_binding(new_overlay_content, base_raw)
+            except HTTPException:
+                await txn.append_audit(
+                    {
+                        "actor_sub": principal.sub,
+                        "actor_email": principal.email,
+                        "permission_used": permission_used,
+                        "section": section,
+                        "op": op,
+                        "outcome": "denied",
+                        "rev": current_rev,
+                        "base_rev": base_rev,
+                        "diff": {},
+                        "reason": "destination_binding",
+                    }
+                )
+                raise
 
             # SECURITY (secret exfiltration, Vector B / root cause): after
             # the Phase-1 field-level split NO overlay-editable field is a
@@ -856,6 +882,190 @@ def _validate_overlay_peers(overlay_content: dict[str, Any], principal: Principa
                         "only be pinned within this deployment's trust domain"
                     ),
                 )
+
+
+# --- SLICE 7: runtime-editable destinations, binding-gated ---
+#
+# Phase 1 made tool destinations (url/base_url/endpoint) structurally
+# BASE-ONLY. SLICE 7 relaxes the OverlayDocument schema to ALLOW those
+# destination fields at runtime, and moves the safety from "structurally
+# un-representable" to this WRITE-TIME gate: a destination edit may never
+# become an SSRF or credential-exfiltration primitive.
+#
+# Two independent checks per repointed destination:
+#   1. SSRF classifier (defense-in-depth) -- reject an internal/private/
+#      metadata/blocked literal early. The connect-time GuardedBackend
+#      remains the authority; this is the cheap first-line write-time gate.
+#   2. Credential binding -- a tool that carries a credential in BASE
+#      (auth.type != none) may only be repointed WITHIN its bound host set
+#      (BASE auth.allowed_hosts, or the BASE-declared origin host when
+#      allowed_hosts is empty -- "pin to where you were pointed"). A tool
+#      with NO credential may move to any PUBLIC host (check 1 still blocks
+#      internal). Secrets stay git-only, so a runtime-created tool can never
+#      acquire a credential and is forever bound only by check 1.
+
+
+def _index_by_name(items: Any) -> dict[str, Any]:
+    """Index a list of name-keyed dicts by their ``name`` (skipping any
+    entry without a string ``name``, e.g. a tombstone)."""
+    if not isinstance(items, list):
+        return {}
+    result: dict[str, Any] = {}
+    for e in items:
+        if isinstance(e, dict) and isinstance(e.get("name"), str):
+            result[e["name"]] = e
+    return result
+
+
+def _resolved_host_from_manual_api(api: dict[str, Any]) -> tuple[str | None, str | None]:
+    """Return ``(hostname, resolved_url)`` for a manual-tool ``api`` dict,
+    mirroring ``ManualToolAPI.resolved_url`` (``base_url`` + ``endpoint``
+    take precedence over ``url``)."""
+    if not isinstance(api, dict):
+        return (None, None)
+    base_url = api.get("base_url")
+    endpoint = api.get("endpoint")
+    url = api.get("url")
+    if isinstance(base_url, str) and isinstance(endpoint, str):
+        target = base_url.rstrip("/") + endpoint
+    elif isinstance(url, str):
+        target = url
+    else:
+        return (None, None)
+    return (urlsplit(target).hostname, target)
+
+
+def _manual_credential_binding(base_tool: dict[str, Any] | None) -> tuple[bool, frozenset[str]]:
+    """``(has_credential, bound_hosts)`` for a BASE manual tool.
+
+    A tool "carries a credential" iff its BASE ``api.auth.type`` is not
+    ``none``. The bound host set is ``auth.allowed_hosts`` (lowercased) when
+    non-empty, else the single BASE-declared origin host.
+    """
+    if not isinstance(base_tool, dict):
+        return (False, frozenset())
+    api = base_tool.get("api")
+    if not isinstance(api, dict):
+        return (False, frozenset())
+    auth = api.get("auth")
+    if not isinstance(auth, dict):
+        return (False, frozenset())
+    if (auth.get("type") or "none") == "none":
+        return (False, frozenset())
+    allowed = auth.get("allowed_hosts")
+    if isinstance(allowed, list) and allowed:
+        return (True, frozenset(str(h).lower() for h in allowed))
+    origin = _resolved_host_from_manual_api(api)[0]
+    return (True, frozenset({origin.lower()}) if origin else frozenset())
+
+
+def _openapi_credential_binding(base_src: dict[str, Any] | None) -> tuple[bool, frozenset[str]]:
+    """``(has_credential, bound_hosts)`` for a BASE OpenAPI source -- the
+    same rule as :func:`_manual_credential_binding`, with the origin taken
+    from the BASE-declared ``url`` host."""
+    if not isinstance(base_src, dict):
+        return (False, frozenset())
+    auth = base_src.get("auth")
+    if not isinstance(auth, dict):
+        return (False, frozenset())
+    if (auth.get("type") or "none") == "none":
+        return (False, frozenset())
+    allowed = auth.get("allowed_hosts")
+    if isinstance(allowed, list) and allowed:
+        return (True, frozenset(str(h).lower() for h in allowed))
+    url = base_src.get("url")
+    origin = urlsplit(url).hostname if isinstance(url, str) else None
+    return (True, frozenset({origin.lower()}) if origin else frozenset())
+
+
+def _reject_internal_destination(name: Any, url: str) -> None:
+    """Raise ``HTTP 400`` if *url* targets an internal/private/blocked
+    address (SSRF classifier, defense-in-depth; the connect-time guard is
+    the authority)."""
+    if not validate_endpoint(url):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"destination for tool {name!r} ({url!r}) targets an internal, "
+                "private, or blocked address -- rejected by the SSRF classifier at "
+                "write time; point it at a public host or promote via git"
+            ),
+        )
+
+
+def _enforce_destination_binding(overlay_content: dict[str, Any], base_raw: dict[str, Any]) -> None:
+    """SLICE 7 write-time gate: a runtime destination edit must never become
+    an SSRF or credential-exfiltration primitive.
+
+    For every ``manual_tool`` whose overlay entry sets a destination field
+    (``url``/``base_url``/``endpoint``) and every ``openapi_source`` whose
+    overlay entry sets ``url``: reject an internal destination
+    (defense-in-depth) and, if the tool carries a BASE credential, reject
+    unless the new host is within that credential's binding. A tool with no
+    BASE credential may move to any public host.
+    """
+    tools = overlay_content.get("tools")
+    if not isinstance(tools, dict):
+        return
+
+    base_tools = base_raw.get("tools") if isinstance(base_raw, dict) else {}
+    if not isinstance(base_tools, dict):
+        base_tools = {}
+
+    base_manual = _index_by_name(base_tools.get("manual_tools"))
+    for entry in tools.get("manual_tools") or []:
+        if not isinstance(entry, dict) or set(entry) == {"__deleted__"}:
+            continue
+        api = entry.get("api")
+        if not isinstance(api, dict):
+            continue
+        if not any(k in api for k in ("url", "base_url", "endpoint")):
+            continue
+        name = entry.get("name")
+        base_tool = base_manual.get(name) if isinstance(name, str) else None
+        base_api = base_tool.get("api") if isinstance(base_tool, dict) else None
+        eff_api = {**(base_api if isinstance(base_api, dict) else {}), **api}
+        new_host, target_url = _resolved_host_from_manual_api(eff_api)
+        if new_host is None or target_url is None:
+            continue
+        _reject_internal_destination(name, target_url)
+        has_cred, bound = _manual_credential_binding(base_tool)
+        if has_cred and bound and not host_matches(new_host, bound):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"tool {name!r} may not be repointed to host {new_host!r}: it "
+                    f"carries a credential bound to {sorted(bound)} (its BASE "
+                    "auth.allowed_hosts or origin host); a credentialed tool may only "
+                    "be repointed within its bound host set -- move the binding in BASE "
+                    "and promote via git"
+                ),
+            )
+
+    base_openapi = _index_by_name(base_tools.get("openapi_sources"))
+    for entry in tools.get("openapi_sources") or []:
+        if not isinstance(entry, dict) or set(entry) == {"__deleted__"}:
+            continue
+        if "url" not in entry:
+            continue
+        url = entry.get("url")
+        if not isinstance(url, str):
+            continue
+        name = entry.get("name")
+        base_src = base_openapi.get(name) if isinstance(name, str) else None
+        _reject_internal_destination(name, url)
+        has_cred, bound = _openapi_credential_binding(base_src)
+        new_host = urlsplit(url).hostname
+        if has_cred and bound and new_host and not host_matches(new_host, bound):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"openapi source {name!r} may not be repointed to host "
+                    f"{new_host!r}: it carries a credential bound to {sorted(bound)}; a "
+                    "credentialed source may only be repointed within its bound host "
+                    "set -- promote via git"
+                ),
+            )
 
 
 # --- Config endpoints ---

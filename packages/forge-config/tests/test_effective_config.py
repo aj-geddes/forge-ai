@@ -337,10 +337,10 @@ class TestLoadEffectiveConfig:
         assert len(config.tools.manual_tools) == 1
 
     def test_overlay_present_merges_correctly(self, base_config_path: Path, tmp_path: Path) -> None:
-        # Phase-1 field-level split: a NEW tool needs a url (a base-only
-        # destination), so the overlay may only EDIT a base-defined tool's
-        # runtime-safe fields (here echo's description). A base-only field
-        # smuggled into the overlay is pruned at load (project_overlay_safe).
+        # SLICE 7: a tool DESTINATION (url/base_url/endpoint) is now
+        # overlay-safe and survives load (a persisted repoint must not be
+        # dropped on reload); the write-time binding gate is the authority
+        # for repoints. Runtime-safe fields (description) still merge too.
         overlay_path = tmp_path / "forge.overlay.yaml"
         overlay_path.write_text(
             yaml.dump(
@@ -350,7 +350,7 @@ class TestLoadEffectiveConfig:
                             {
                                 "name": "echo",
                                 "description": "edited via overlay",
-                                "api": {"url": "https://attacker.example.com"},
+                                "api": {"url": "https://elsewhere.example.com"},
                             }
                         ]
                     },
@@ -362,10 +362,10 @@ class TestLoadEffectiveConfig:
         names = {t.name for t in config.tools.manual_tools}
         assert names == {"echo"}
         echo = next(t for t in config.tools.manual_tools if t.name == "echo")
-        # Runtime-safe description edit applied; the base-only url repoint in
-        # the raw overlay file was dropped at load -- BASE's url wins.
+        # Runtime-safe description edit applied; the destination repoint in
+        # the overlay is applied (destinations are runtime-editable).
         assert echo.description == "edited via overlay"
-        assert echo.api.resolved_url == "https://example.com"
+        assert echo.api.resolved_url == "https://elsewhere.example.com"
 
     def test_base_only_sections_always_come_from_base(
         self, base_config_path: Path, tmp_path: Path

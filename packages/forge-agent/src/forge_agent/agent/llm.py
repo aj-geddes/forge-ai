@@ -24,15 +24,29 @@ upstream model id and credentials.
 
 from __future__ import annotations
 
+import re
 from typing import Any
+from urllib.parse import urlsplit
 
-from forge_config.schema import LiteLLMConfig, LiteLLMMode, LLMConfig
+from forge_config.exceptions import SecretResolutionError
+from forge_config.schema import LiteLLMConfig, LiteLLMMode, LLMConfig, SecretRef, SecretSource
+from forge_config.secret_resolver import CompositeSecretResolver, SecretResolver
+from forge_security.egress import host_matches, validate_endpoint
 from pydantic_ai.models import Model
 from pydantic_ai.models.anthropic import AnthropicModel
 from pydantic_ai.models.fallback import FallbackModel
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.anthropic import AnthropicProvider
 from pydantic_ai.providers.openai import OpenAIProvider
+
+# A ``model_list`` entry's ``litellm_params.api_key`` may be a literal
+# ``${VAR}`` / ``${VAR:default}`` reference (the same encoding forge-config's
+# loader substitutes and the admin choke point scrubs). When the whole string
+# is exactly one such reference it is resolved through the SecretResolver at
+# build time -- so it participates in secret handling instead of sitting as
+# cleartext in overlay/promotion surfaces -- rather than handed to the
+# provider verbatim. A plain string is passed through unchanged (back-compat).
+_ENV_REF_FULL = re.compile(r"\$\{(\w+)(?::([^}]*))?\}")
 
 # LiteLLM-style provider prefixes (the part before "/" in
 # ``litellm_params.model``, e.g. "openai/nemotron-puzzle") that speak the
@@ -90,8 +104,12 @@ class LLMRouter:
     entry uses a provider prefix this router cannot translate.
     """
 
-    def __init__(self, config: LLMConfig) -> None:
+    def __init__(self, config: LLMConfig, *, secret_resolver: SecretResolver | None = None) -> None:
         self._config = config
+        # SLICE 6: an env-backed resolver so a ``${ENV_VAR}`` / SecretRef
+        # ``api_key`` is resolved at build time (same mechanism as tool auth).
+        # A plain-string api_key never touches the resolver.
+        self._secret_resolver: SecretResolver = secret_resolver or CompositeSecretResolver()
 
     @property
     def model_settings(self) -> dict[str, Any]:
@@ -180,8 +198,7 @@ class LLMRouter:
         ]
         return FallbackModel(primary, *fallbacks)
 
-    @classmethod
-    def _resolve_alias(cls, model_list: list[dict[str, Any]], alias: str) -> Model:
+    def _resolve_alias(self, model_list: list[dict[str, Any]], alias: str) -> Model:
         """Look up ``alias`` in ``model_list`` and build its PydanticAI ``Model``."""
         entry = next((m for m in model_list if m.get("model_name") == alias), None)
         if entry is None:
@@ -198,16 +215,29 @@ class LLMRouter:
             msg = f"llm.litellm.model_list entry {alias!r} is missing litellm_params.model"
             raise LLMConfigError(msg)
 
-        return cls._build_model(alias, litellm_model, params.get("api_base"), params.get("api_key"))
+        return self._build_model(
+            alias, litellm_model, params.get("api_base"), params.get("api_key")
+        )
 
-    @staticmethod
     def _build_model(
+        self,
         alias: str,
         litellm_model: str,
         api_base: str | None,
-        api_key: str | None,
+        api_key: Any,
     ) -> Model:
-        """Translate one LiteLLM-style ``<provider>/<model>`` id into a PydanticAI ``Model``."""
+        """Translate one LiteLLM-style ``<provider>/<model>`` id into a PydanticAI ``Model``.
+
+        SLICE 6 (ADR-0006): the entry's ``api_base`` host is validated
+        (fail-closed against internal/metadata addresses, subject to
+        ``allowed_api_hosts``) and its ``api_key`` is resolved through the
+        SecretResolver -- BEFORE any provider/socket is constructed, because
+        litellm is embedded and owns its own HTTP socket, so the guard has to
+        sit at build/config time rather than at connect time.
+        """
+        self._validate_api_base(alias, api_base)
+        resolved_key = self._resolve_api_key(api_key)
+
         provider_prefix, sep, upstream_model = litellm_model.partition("/")
         if not sep:
             # No "<provider>/" prefix -- treat the whole string as an
@@ -217,13 +247,13 @@ class LLMRouter:
         if provider_prefix == "anthropic":
             return AnthropicModel(
                 upstream_model,
-                provider=AnthropicProvider(api_key=api_key, base_url=api_base),
+                provider=AnthropicProvider(api_key=resolved_key, base_url=api_base),
             )
 
         if provider_prefix in _OPENAI_COMPATIBLE_PREFIXES:
             return OpenAIChatModel(
                 upstream_model,
-                provider=OpenAIProvider(base_url=api_base, api_key=api_key),
+                provider=OpenAIProvider(base_url=api_base, api_key=resolved_key),
             )
 
         msg = (
@@ -232,3 +262,73 @@ class LLMRouter:
             f"anthropic, {sorted(_OPENAI_COMPATIBLE_PREFIXES)}."
         )
         raise LLMConfigError(msg)
+
+    def _validate_api_base(self, alias: str, api_base: str | None) -> None:
+        """Reject a ``model_list`` entry whose ``api_base`` targets an internal
+        or metadata host (SLICE 6, fail-closed).
+
+        ``allowed_api_hosts`` (when set) is a strict positive allow-list AND the
+        escape hatch for a trusted internal endpoint: a host named there is
+        permitted even if it resolves to a private address; a host not named
+        there is rejected even if public. When ``allowed_api_hosts`` is empty
+        the IP-layer classifier (``validate_endpoint``) rejects any
+        internal/metadata/blocked ``api_base``. ``api_base is None`` (the
+        provider's own default host) needs no validation.
+        """
+        if not api_base:
+            return
+        host = urlsplit(api_base).hostname
+        if not host:
+            msg = (
+                f"llm.litellm.model_list alias {alias!r} has an api_base with no "
+                f"host ({api_base!r})."
+            )
+            raise LLMConfigError(msg)
+
+        allowed = self._config.litellm.allowed_api_hosts
+        if allowed:
+            if host_matches(host, frozenset(allowed)):
+                return
+            msg = (
+                f"llm.litellm.model_list alias {alias!r} api_base host {host!r} is "
+                f"not in llm.litellm.allowed_api_hosts ({allowed}). Add it to "
+                "positively allow this provider host."
+            )
+            raise LLMConfigError(msg)
+
+        if not validate_endpoint(api_base):
+            msg = (
+                f"llm.litellm.model_list alias {alias!r} api_base {api_base!r} "
+                "targets an internal/metadata/blocked host. Point it at a public "
+                "provider, or add its host to llm.litellm.allowed_api_hosts to "
+                "trust an internal endpoint."
+            )
+            raise LLMConfigError(msg)
+
+    def _resolve_api_key(self, api_key: Any) -> str | None:
+        """Resolve a ``model_list`` entry's ``api_key`` at build time (SLICE 6).
+
+        Accepts a ``SecretRef``-shaped mapping, a whole-string ``${ENV_VAR}`` /
+        ``${ENV_VAR:default}`` reference (resolved through the SecretResolver),
+        or a plain string (passed through unchanged for backward compatibility).
+        """
+        if api_key is None:
+            return None
+        if isinstance(api_key, dict):
+            return self._secret_resolver.resolve(SecretRef.model_validate(api_key))
+        if isinstance(api_key, str):
+            match = _ENV_REF_FULL.fullmatch(api_key.strip())
+            if match:
+                return self._resolve_env_ref(match.group(1), match.group(2))
+            return api_key
+        return str(api_key)
+
+    def _resolve_env_ref(self, name: str, default: str | None) -> str:
+        """Resolve a ``${ENV_VAR}`` reference via the SecretResolver, honoring a
+        ``${ENV_VAR:default}`` fallback when the variable is unset."""
+        try:
+            return self._secret_resolver.resolve(SecretRef(source=SecretSource.ENV, name=name))
+        except SecretResolutionError:
+            if default is not None:
+                return default
+            raise

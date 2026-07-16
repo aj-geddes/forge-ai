@@ -117,3 +117,53 @@ agentweave:
   enabled: false
   socketMountPath: /spiffe-workload-api
   opaEndpoint: http://opa.opa.svc.cluster.local:8181
+
+# --- NetworkPolicy (default-deny egress backstop) ---
+# Network-layer (L3/L4) defense-in-depth that mirrors the app-layer egress guard
+# (ADR-0006). Selecting the agent pod for Egress makes the CNI default-deny all
+# outbound traffic except the rules below. Off in the base profile (many clusters
+# have no NetworkPolicy-enforcing CNI); hvs-k8s turns it on. See
+# templates/networkpolicy.yaml for the full rationale.
+networkPolicy:
+  enabled: false
+  ingress:
+    # Optional: also restrict who may reach :8000 to the gateway namespace.
+    # Ingress is normally governed by the Gateway/HTTPRoute layer, so this is off.
+    enabled: false
+    fromNamespace: gateway
+  egress:
+    # (a) DNS -- required, or nothing else resolves.
+    dns:
+      enabled: true
+      namespace: kube-system
+    # (b) Allow egress to every pod in this release's own namespace (redis,
+    # postiz + postiz-redis, A2A peers).
+    sameNamespace: true
+    # (b) Additional in-cluster namespaces the agent must reach, matched on the
+    # auto-applied `kubernetes.io/metadata.name` label. Empty in the base profile.
+    allowedNamespaces: []
+    # (c) Explicit CIDR allow-list, added as-is and UNIONed with the public rule
+    # below. Use for trusted LAN/infra endpoints that fall inside the excepted
+    # private ranges -- e.g. the on-LAN vLLM model provider and the gateway VIP
+    # that serves Dex/OIDC. Mirrors forgeConfig ...litellm.allowed_api_hosts.
+    allowedCIDRs: []
+    # (c) Public-internet egress (LLM/tool calls) with the dangerous internal
+    # ranges carved out at L3.
+    publicInternet:
+      enabled: true
+      # RFC1918 + link-local (incl. cloud metadata 169.254.169.254) + CGNAT.
+      # Add the cluster pod/service CIDRs here too if they are not already
+      # covered by 10.0.0.0/8 / 172.16.0.0/12.
+      exceptCIDRs:
+        - 10.0.0.0/8
+        - 172.16.0.0/12
+        - 192.168.0.0/16
+        - 169.254.0.0/16
+        - 100.64.0.0/10
+      # Dual-stack only. Off unless the cluster hands out IPv6 pod IPs; enabling
+      # ::/0 egress on a single-stack v4 cluster is harmless but pointless.
+      ipv6:
+        enabled: false
+        exceptCIDRs:
+          - fc00::/7   # ULA (IPv6 RFC1918 equivalent)
+          - fe80::/10  # link-local

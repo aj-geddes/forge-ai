@@ -4,12 +4,14 @@ FIELD-LEVEL split.
 The overlay may only carry runtime-safe fields (agent full CRUD; tool
 description/parameters/response_mapping; llm default_model/temperature/
 max_tokens/system_prompt/fallback_models; peer capabilities/trust_level/
-spiffe_id on an EXISTING base peer; metadata.description). Every base-only
-FIELD -- a destination (tool url/base_url/endpoint, openapi url, llm
-model_list api_base, llm.litellm.endpoint/mode, peer endpoint), a secret or
-secret-binding (api_key/auth/SecretRef/secret header), or a security control
-(requires_approval) -- is structurally un-representable in an OverlayDocument,
-so a config:write caller is rejected with a clear promote-via-git 400.
+spiffe_id on an EXISTING base peer; metadata.description).
+SLICE 7 opens tool/openapi DESTINATIONS (url/base_url/endpoint) to runtime edits,
+gated at write time by the binding check (SSRF classifier + credential
+binding). Every remaining base-only FIELD -- a secret or secret-binding
+(api_key/auth/SecretRef/secret header), the llm model_list/endpoint/mode
+registry, a peer endpoint, or a security control (requires_approval) -- is
+still structurally un-representable in an OverlayDocument, so a config:write
+caller is rejected with a clear promote-via-git 400.
 
 **SECURITY**-tagged classes cover the mandatory requirements: the three
 original attacks (move-secret-to-attacker-host, SSRF-via-any-sink,
@@ -117,7 +119,28 @@ def _seeded_config(**overrides: Any) -> ForgeConfig:
                             "token": {"source": "env", "name": "LEGIT_TOOL_KEY"},
                         },
                     },
-                }
+                },
+                {
+                    # Credentialed, with an explicit multi-host binding: a
+                    # runtime repoint is allowed WITHIN {a,b}, rejected elsewhere.
+                    "name": "multi",
+                    "description": "multi-host",
+                    "api": {
+                        "url": "https://a.example.com/x",
+                        "auth": {
+                            "type": "bearer",
+                            "token": {"source": "env", "name": "MULTI_KEY"},
+                            "allowed_hosts": ["a.example.com", "b.example.com"],
+                        },
+                    },
+                },
+                {
+                    # No credential: may be repointed to any PUBLIC host (the
+                    # connect-time guard still blocks internal).
+                    "name": "pinger",
+                    "description": "public pinger",
+                    "api": {"url": "https://pub.example.com/ping"},
+                },
             ]
         },
         "agents": {
@@ -388,12 +411,15 @@ class TestPeerSafeFieldEdits:
 
 
 @pytest.mark.usefixtures("_wire_auth")
-class TestToolDestinationIsBaseOnly:
-    """**SECURITY** [CRITICAL]: a tool destination (url/base_url/endpoint) can
-    never be set or repointed via the overlay. This is the fix for the
-    SSRF/exfil primitive the section-level design left open."""
+class TestDestinationBindingGate:
+    """**SECURITY** [CRITICAL] SLICE 7: tool DESTINATIONS are now
+    runtime-editable, gated so an edit can never become an SSRF/exfil
+    primitive. A credentialed tool may only be repointed within its BASE
+    credential binding; a non-credentialed tool may move to any PUBLIC host
+    (the connect-time guard still blocks internal); any tool repointed to an
+    internal host is rejected; and secrets stay git-only."""
 
-    async def test_create_tool_with_url_is_rejected(
+    async def test_create_public_tool_without_credential_is_allowed(
         self, async_client: httpx.AsyncClient, auth_headers: dict[str, str], overlay_env: Any
     ) -> None:
         resp = await async_client.post(
@@ -401,11 +427,10 @@ class TestToolDestinationIsBaseOnly:
             json={"name": "new", "description": "d", "api": {"url": "https://x.example.com"}},
             headers=auth_headers,
         )
-        assert resp.status_code == 400
-        detail = resp.json()["detail"].lower()
-        assert "base-only" in detail and "promote" in detail
+        assert resp.status_code == 201
+        assert resp.json()["persisted"] is True
 
-    async def test_create_tool_with_base_url_and_endpoint_is_rejected(
+    async def test_create_public_tool_base_url_endpoint_is_allowed(
         self, async_client: httpx.AsyncClient, auth_headers: dict[str, str], overlay_env: Any
     ) -> None:
         resp = await async_client.post(
@@ -417,17 +442,58 @@ class TestToolDestinationIsBaseOnly:
             },
             headers=auth_headers,
         )
+        assert resp.status_code == 201
+
+    async def test_repoint_credentialed_tool_to_unbound_host_is_rejected(
+        self, async_client: httpx.AsyncClient, auth_headers: dict[str, str], seeded_env: Path
+    ) -> None:
+        resp = await async_client.patch(
+            "/v1/admin/tools/echo",
+            json={"api": {"url": "https://attacker.example/collect"}},
+            headers=auth_headers,
+        )
         assert resp.status_code == 400
+        assert "bound" in resp.json()["detail"].lower()
+        # BASE destination is untouched.
+        cfg = (await async_client.get("/v1/admin/config", headers=auth_headers)).json()["config"]
+        echo = next(t for t in cfg["tools"]["manual_tools"] if t["name"] == "echo")
+        assert echo["api"]["url"] == "https://base.example.com/echo"
+
+    async def test_repoint_credentialed_tool_within_binding_is_allowed(
+        self, async_client: httpx.AsyncClient, auth_headers: dict[str, str], seeded_env: Path
+    ) -> None:
+        resp = await async_client.patch(
+            "/v1/admin/tools/multi",
+            json={"api": {"url": "https://b.example.com/y"}},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200
+        assert resp.json()["persisted"] is True
+        cfg = (await async_client.get("/v1/admin/config", headers=auth_headers)).json()["config"]
+        multi = next(t for t in cfg["tools"]["manual_tools"] if t["name"] == "multi")
+        assert multi["api"]["url"] == "https://b.example.com/y"
+
+    async def test_repoint_noncredentialed_tool_to_public_host_is_allowed(
+        self, async_client: httpx.AsyncClient, auth_headers: dict[str, str], seeded_env: Path
+    ) -> None:
+        resp = await async_client.patch(
+            "/v1/admin/tools/pinger",
+            json={"api": {"url": "https://other-public.example.com/ping"}},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200
+        cfg = (await async_client.get("/v1/admin/config", headers=auth_headers)).json()["config"]
+        pinger = next(t for t in cfg["tools"]["manual_tools"] if t["name"] == "pinger")
+        assert pinger["api"]["url"] == "https://other-public.example.com/ping"
 
     @pytest.mark.parametrize(
         "api",
         [
-            {"url": "http://attacker.example"},
-            {"base_url": "http://attacker.example"},
-            {"endpoint": "/exfil"},
+            {"url": "http://169.254.169.254/latest/meta-data"},
+            {"base_url": "http://kubernetes.default.svc", "endpoint": "/api"},
         ],
     )
-    async def test_patch_tool_repoint_is_rejected(
+    async def test_repoint_noncredentialed_tool_to_internal_host_is_rejected(
         self,
         async_client: httpx.AsyncClient,
         auth_headers: dict[str, str],
@@ -435,21 +501,38 @@ class TestToolDestinationIsBaseOnly:
         api: dict[str, str],
     ) -> None:
         resp = await async_client.patch(
-            "/v1/admin/tools/echo", json={"api": api}, headers=auth_headers
+            "/v1/admin/tools/pinger", json={"api": api}, headers=auth_headers
         )
         assert resp.status_code == 400
-        assert "base-only" in resp.json()["detail"].lower()
+        assert "internal" in resp.json()["detail"].lower()
 
-        # BASE destination is untouched.
-        cfg = (await async_client.get("/v1/admin/config", headers=auth_headers)).json()["config"]
-        echo = next(t for t in cfg["tools"]["manual_tools"] if t["name"] == "echo")
-        assert echo["api"]["url"] == "https://base.example.com/echo"
+    async def test_repoint_credentialed_tool_to_internal_host_is_rejected(
+        self, async_client: httpx.AsyncClient, auth_headers: dict[str, str], seeded_env: Path
+    ) -> None:
+        resp = await async_client.patch(
+            "/v1/admin/tools/echo",
+            json={"api": {"url": "http://169.254.169.254/"}},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 400
 
-    async def test_patch_tool_requires_approval_downgrade_is_rejected(
+    async def test_requires_approval_downgrade_is_still_rejected(
         self, async_client: httpx.AsyncClient, auth_headers: dict[str, str], seeded_env: Path
     ) -> None:
         resp = await async_client.patch(
             "/v1/admin/tools/echo", json={"requires_approval": False}, headers=auth_headers
+        )
+        assert resp.status_code == 400
+
+    async def test_secret_edit_is_still_rejected(
+        self, async_client: httpx.AsyncClient, auth_headers: dict[str, str], seeded_env: Path
+    ) -> None:
+        # SLICE 7 opened destinations, but a runtime secret edit stays a
+        # promote-via-git 400 (auth is base-only; ${VAR}/SecretRef rejected).
+        resp = await async_client.patch(
+            "/v1/admin/tools/echo",
+            json={"api": {"auth": {"type": "bearer", "token": {"source": "env", "name": "X"}}}},
+            headers=auth_headers,
         )
         assert resp.status_code == 400
 
@@ -660,8 +743,9 @@ class TestOriginalAttacksStructurallyImpossible:
         self, async_client: httpx.AsyncClient, auth_headers: dict[str, str], seeded_env: Path
     ) -> None:
         """Attack 1: repoint a base tool's url to an attacker host so its
-        base-allowlisted credential is shipped there. The url field is not
-        overlay-representable -> 400, and BASE is untouched."""
+        base-derived credential is shipped there. The url is now runtime-
+        editable, but the WRITE-TIME binding check rejects a repoint outside
+        the credential's bound host set -> 400, and BASE is untouched."""
         resp = await async_client.patch(
             "/v1/admin/tools/echo",
             json={"api": {"url": "https://attacker.example/collect"}},
@@ -675,16 +759,17 @@ class TestOriginalAttacksStructurallyImpossible:
     async def test_ssrf_via_any_sink_is_impossible(
         self, async_client: httpx.AsyncClient, auth_headers: dict[str, str], seeded_env: Path
     ) -> None:
-        """Attack 2: point a sink at 169.254.169.254 / *.svc for SSRF. Every
-        destination sink (here a tool base_url) is un-representable, so the
-        request never even reaches the SSRF policy check -> 400."""
+        """Attack 2: point a sink at 169.254.169.254 / *.svc for SSRF. A
+        destination edit runs through the SSRF classifier at write time,
+        which rejects an internal literal -> 400 (the connect-time guard
+        remains the authority)."""
         resp = await async_client.patch(
             "/v1/admin/tools/echo",
             json={"api": {"base_url": "http://169.254.169.254", "endpoint": "/latest"}},
             headers=auth_headers,
         )
         assert resp.status_code == 400
-        assert "base-only" in resp.json()["detail"].lower()
+        assert "internal" in resp.json()["detail"].lower()
 
     async def test_positional_clobber_via_model_list_reorder_is_impossible(
         self, async_client: httpx.AsyncClient, auth_headers: dict[str, str], seeded_env: Path
@@ -1201,10 +1286,17 @@ class TestBaseOnlySectionRejection:
 @pytest.mark.usefixtures("_wire_auth")
 class TestReadPathFieldPrune:
     """**SECURITY** [defense-in-depth, design layer D]: a hand-edited PVC
-    overlay that smuggled a base-only FIELD onto disk has it pruned at load,
-    never merged into the effective config."""
+    overlay that smuggled a STILL-base-only field (a SECRET binding, a peer
+    endpoint) onto disk has it pruned at load, never merged into the
+    effective config. SLICE 7: DESTINATIONS (url/base_url/endpoint) are now
+    overlay-safe and DO survive load -- a persisted repoint would otherwise
+    be silently lost on the next reload; the write-time binding gate is the
+    authority for repoints, and the connect-time guard still blocks internal
+    SSRF regardless."""
 
-    def test_raw_overlay_base_only_field_is_dropped_at_load(self, tmp_path: Path) -> None:
+    def test_destination_survives_but_secret_and_peer_endpoint_pruned_at_load(
+        self, tmp_path: Path
+    ) -> None:
         from forge_config.loader import compute_base_rev, load_effective_config
 
         config = _seeded_config()
@@ -1221,7 +1313,14 @@ class TestReadPathFieldPrune:
                             {
                                 "name": "echo",
                                 "description": "edited",
-                                "api": {"url": "http://attacker.example"},
+                                "api": {
+                                    "url": "https://elsewhere.example.com/echo",
+                                    # Smuggled SECRET binding change -- must be pruned.
+                                    "auth": {
+                                        "type": "bearer",
+                                        "token": {"source": "env", "name": "ATTACKER_KEY"},
+                                    },
+                                },
                             }
                         ]
                     },
@@ -1233,9 +1332,12 @@ class TestReadPathFieldPrune:
 
         effective = load_effective_config(base_path, overlay_path)
         echo = next(t for t in effective.tools.manual_tools if t.name == "echo")
-        # Safe description edit applied; base-only url repoint dropped.
+        # Safe description edit applied; the DESTINATION repoint now survives.
         assert echo.description == "edited"
-        assert echo.api.resolved_url == "https://base.example.com/echo"
+        assert echo.api.resolved_url == "https://elsewhere.example.com/echo"
+        # Smuggled SECRET binding pruned -- the BASE credential is unchanged.
+        assert echo.api.auth.token is not None
+        assert echo.api.auth.token.name == "LEGIT_TOOL_KEY"
         # Peer endpoint repoint dropped -- BASE endpoint wins.
         p1 = next(p for p in effective.agents.peers if p.name == "p1")
         assert p1.endpoint == "https://p1.example.com"

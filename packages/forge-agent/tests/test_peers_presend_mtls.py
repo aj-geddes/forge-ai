@@ -227,11 +227,24 @@ class TestPreSendPeerVerificationPoC:
             await server.stop()
 
     @pytest.mark.anyio
-    async def test_correctly_pinned_peer_completes_normally(self, tmp_path: Path) -> None:
+    async def test_correctly_pinned_peer_completes_normally(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """The mirror-image case: when the peer's verified SPIFFE ID
         DOES match the pinned value, the call proceeds and succeeds --
         pre-send verification must not false-positive-block a
-        legitimate peer."""
+        legitimate peer.
+
+        ADR-0006: the real (payload-carrying) request now goes through the
+        SSRF-guarded client, whose ``GuardedBackend`` would refuse the
+        127.0.0.1 loopback test server as an internal IP. Loopback is an
+        artefact of the in-process test harness, not the property under
+        test (SPIFFE pre-send verification), so the guard's internal-IP
+        classifier is relaxed here; the probe path is unaffected."""
+        from forge_security.egress import transport as transport_mod
+
+        monkeypatch.setattr(transport_mod, "is_internal_ip", lambda ip: False)
+
         ca_key, ca_cert = _self_signed_ca()
         pinned_id = "spiffe://hvslocal/ns/dev/sa/data-forge"
 

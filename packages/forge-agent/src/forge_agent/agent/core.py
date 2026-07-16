@@ -205,8 +205,10 @@ class ForgeAgent:
         conversation_store: ConversationStore | None = None,
     ) -> None:
         self._config = config
-        self._llm_router = LLMRouter(config.llm)
         self._secret_resolver: SecretResolver = secret_resolver or build_default_secret_resolver()
+        # SLICE 6: the router resolves ``api_key`` refs through the same
+        # resolver used for tool auth.
+        self._llm_router = LLMRouter(config.llm, secret_resolver=self._secret_resolver)
         self._registry = ToolSurfaceRegistry(secret_resolver=self._secret_resolver)
         self._context: ConversationStore = conversation_store or InMemoryConversationStore()
         self._model_override = model_override

@@ -178,6 +178,10 @@ class ToolSurfaceRegistry:
             peer_caller = PeerCaller(
                 peers=config.agents.peers,
                 identity=self._workload_identity,
+                # ADR-0006: thread the SSRF/egress policy so both the mTLS and
+                # non-mTLS peer clients are guarded (connect-time internal-IP
+                # blocking on the A2A egress sink).
+                egress_policy=config.security.egress,
             )
             tools.extend(peer_caller.build_tools())
 
