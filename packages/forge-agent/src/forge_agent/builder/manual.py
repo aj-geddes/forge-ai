@@ -11,14 +11,23 @@ import re
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
-from forge_config.schema import HTTPMethod, ManualTool, ManualToolAPI, ParamType, ResponseMapping
+from forge_config.schema import (
+    EgressPolicy,
+    HTTPMethod,
+    ManualTool,
+    ManualToolAPI,
+    ParamType,
+    ResponseMapping,
+)
 from forge_config.secret_resolver import SecretResolver
+from forge_security.egress import BoundCredential, enforce_binding, make_guarded_client
 from pydantic_ai.tools import Tool
 
 from forge_agent.active.gate import ToolGate
-from forge_agent.builder.openapi import _resolve_auth_headers
+from forge_agent.builder.openapi import resolve_bound_credential
 
 
 class ToolResponseError(Exception):
@@ -66,6 +75,7 @@ class ManualToolBuilder:
         secret_resolver: SecretResolver | None = None,
         tool_gate: ToolGate | None = None,
         *,
+        egress_policy: EgressPolicy | None = None,
         requested_by: str | None = None,
         run_id: str | None = None,
     ) -> None:
@@ -73,6 +83,10 @@ class ManualToolBuilder:
         self._http_client = http_client
         self._secret_resolver = secret_resolver
         self._tool_gate = tool_gate
+        # ADR-0006: SSRF/egress policy threaded from the registry
+        # (config.security.egress). ``None`` => a default-safe EgressPolicy()
+        # is used at call time (IP-layer deny + require_https, pin-to-BASE).
+        self._egress_policy = egress_policy
         self._requested_by = requested_by
         self._run_id = run_id
 
@@ -95,8 +109,21 @@ class ManualToolBuilder:
         param_defs = self._config.parameters
         http_client = self._http_client
 
-        # Resolve auth headers once at build time (fail-fast).
-        auth_headers = _resolve_auth_headers(api_config.auth, self._secret_resolver)
+        # STRUCTURAL HARDENING (ADR-0006): a {{param}} placeholder may only
+        # touch the path/query, never the scheme or host -- otherwise a caller
+        # could redirect the credentialed request to an arbitrary host,
+        # independent of the runtime binding check. Reject at build time.
+        _reject_templated_authority(api_config.resolved_url)
+
+        # Resolve the bound credential once at build time (fail-fast). The
+        # credential is pinned to auth.allowed_hosts, or -- when empty -- to
+        # the BASE-declared destination host ("pin to where you were pointed").
+        declared_host = urlsplit(api_config.resolved_url).hostname
+        bound = resolve_bound_credential(
+            api_config.auth,
+            self._secret_resolver,
+            declared_host=declared_host,
+        )
 
         # Build the parameter list for the function signature.
         params: list[inspect.Parameter] = []
@@ -120,7 +147,9 @@ class ManualToolBuilder:
             annotations[pdef.name] = _PARAM_TYPE_MAP.get(pdef.type, str)
 
         async def tool_func(**kwargs: Any) -> Any:
-            return await _execute_api_call(api_config, kwargs, auth_headers, http_client)
+            return await _execute_api_call(
+                api_config, kwargs, bound, self._egress_policy, http_client
+            )
 
         # Assign the constructed signature and metadata.
         tool_func.__signature__ = sig  # type: ignore[attr-defined]
@@ -275,10 +304,38 @@ def _resolve_template(template: Any, params: dict[str, Any]) -> Any:
 _QUERY_METHODS = frozenset({HTTPMethod.GET.value, HTTPMethod.DELETE.value})
 
 
+def _reject_templated_authority(url: str) -> None:
+    """Reject a manual-tool URL that templates its scheme or host (ADR-0006).
+
+    ``{{param}}`` placeholders are permitted only in the path/query. Allowing
+    them in the scheme or authority would let a caller-supplied argument
+    redirect the credentialed request to an arbitrary host, bypassing the
+    binding check at its source.
+
+    Raises:
+        ValueError: If a placeholder appears in the scheme or authority.
+    """
+    scheme, sep, rest = url.partition("://")
+    if sep:
+        authority = rest.split("/", 1)[0]
+    else:
+        # No scheme separator: treat the leading path segment as the authority.
+        scheme = ""
+        authority = url.split("/", 1)[0]
+    if "{{" in scheme or "{{" in authority:
+        msg = (
+            f"manual tool URL may not template the scheme/host portion ({url!r}); "
+            "{{param}} placeholders are permitted only in the path/query. This "
+            "closes the caller-supplied-host SSRF vector at the source."
+        )
+        raise ValueError(msg)
+
+
 async def _execute_api_call(
     api_config: ManualToolAPI,
     params: dict[str, Any],
-    auth_headers: dict[str, str],
+    bound: BoundCredential,
+    egress_policy: EgressPolicy | None = None,
     http_client: httpx.AsyncClient | None = None,
 ) -> Any:
     """Execute an HTTP API call based on ManualToolAPI configuration.
@@ -294,8 +351,11 @@ async def _execute_api_call(
     Args:
         api_config: The API call configuration.
         params: Parameter values from the tool invocation.
-        auth_headers: Pre-resolved authentication headers.
-        http_client: Optional pre-configured httpx client.
+        bound: The resolved, host-bound credential (ADR-0006).
+        egress_policy: The SSRF/egress policy; ``None`` uses a default-safe
+            ``EgressPolicy()`` and a guarded outbound client.
+        http_client: Optional pre-configured httpx client (bypasses the
+            guarded client -- used only by tests/callers that inject one).
 
     Returns:
         The parsed JSON response or raw text.
@@ -303,8 +363,12 @@ async def _execute_api_call(
     url = _resolve_template_string(api_config.resolved_url, params)
     consumed = _collect_template_param_names(api_config.resolved_url)
 
-    # Start with pre-resolved auth headers, then layer on config headers.
-    headers = dict(auth_headers)
+    # ADR-0006: enforce the secret->destination binding against the FINAL,
+    # fully-resolved URL. Raises EgressViolationError (REJECT) or returns the
+    # credential minus its headers (DROP) if the host is out of bounds. Then
+    # layer on config headers (which are not credential-bound).
+    policy = egress_policy or EgressPolicy()
+    headers = dict(enforce_binding(url, bound, policy=policy))
     for k, v in api_config.headers.items():
         headers[k] = _resolve_template_string(v, params)
         consumed |= _collect_template_param_names(v)
@@ -335,7 +399,9 @@ async def _execute_api_call(
         # else: body_template already explicitly defines the body shape;
         # leave any additional declared params unforwarded.
 
-    client = http_client or httpx.AsyncClient()
+    # An injected client is used verbatim; otherwise build the sanctioned
+    # SSRF-guarded client (connect-time pinned-IP enforcement, ADR-0006).
+    client = http_client or make_guarded_client(policy=egress_policy)
     should_close = http_client is None
 
     try:

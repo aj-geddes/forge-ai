@@ -145,6 +145,31 @@ class ParameterDef(BaseModel):
     default: Any = None
 
 
+class EgressAction(str, Enum):
+    """What to do when an outbound request violates its egress binding
+    (ADR-0006). ``reject`` is the fail-closed default."""
+
+    REJECT = "reject"  # raise before sending (default, fail-closed)
+    DROP = "drop"  # send the request but strip the bound credential
+
+
+class EgressPolicy(BaseModel):
+    """SSRF / credential-egress policy (ADR-0006).
+
+    Default-safe: ``enabled`` on with an EMPTY ``allowed_hosts`` means the
+    IP-layer guard (reject internal/metadata addresses at connect) applies but
+    no positive host allow-list is imposed -- every pre-existing config keeps
+    working, with each credential pinned to its BASE-declared destination host.
+    """
+
+    enabled: bool = True
+    allowed_hosts: list[str] = Field(default_factory=list)
+    """Exact host / ``host:port`` / ``*.suffix``. Empty => IP-layer deny only,
+    no positive allow-list."""
+    require_https: bool = True
+    default_action: EgressAction = EgressAction.REJECT
+
+
 class AuthConfig(BaseModel):
     """Authentication configuration for API calls."""
 
@@ -153,6 +178,14 @@ class AuthConfig(BaseModel):
     header_name: str = "Authorization"
     username: SecretRef | None = None
     password: SecretRef | None = None
+    allowed_hosts: list[str] = Field(default_factory=list)
+    """Hosts this credential may be sent to (exact / host:port / "*.suffix").
+    Empty => DERIVE the bound host from the BASE-declared destination at build
+    time ("pin to where you were pointed"), so every existing config is safe
+    with no rewrite (ADR-0006)."""
+    on_egress_violation: EgressAction = EgressAction.REJECT
+    """Per-credential action when the resolved destination host is out of
+    bounds: ``reject`` (raise, default) or ``drop`` (send minus the credential)."""
 
     @model_validator(mode="after")
     def validate_auth_fields(self) -> AuthConfig:
@@ -671,6 +704,9 @@ class SecurityConfig(BaseModel):
     oidc: OIDCConfig = Field(default_factory=OIDCConfig)
     service_tokens: ServiceTokenConfig = Field(default_factory=ServiceTokenConfig)
     authorization: AuthorizationConfig = Field(default_factory=AuthorizationConfig)
+
+    # ADR-0006: SSRF-safe egress + secret->destination binding policy.
+    egress: EgressPolicy = Field(default_factory=EgressPolicy)
 
     rate_limit_rpm: int = 60
     allowed_origins: list[str] = Field(default_factory=lambda: ["https://forgeai.hvslocal"])

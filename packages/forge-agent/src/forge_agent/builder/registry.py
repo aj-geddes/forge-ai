@@ -152,6 +152,9 @@ class ToolSurfaceRegistry:
                 manual,
                 secret_resolver=resolver,
                 tool_gate=self._tool_gate,
+                # ADR-0006: thread the SSRF/egress policy so the manual sink's
+                # outbound client is guarded and its credential is host-bound.
+                egress_policy=config.security.egress,
             )
             tools.append(manual_builder.build())
 

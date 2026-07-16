@@ -18,6 +18,7 @@ import httpx
 from forge_config.exceptions import SecretResolutionError
 from forge_config.schema import AuthConfig, AuthType, OpenAPISource
 from forge_config.secret_resolver import SecretResolver
+from forge_security.egress import BoundCredential
 from pydantic_ai.tools import Tool
 
 from forge_agent.active.gate import ToolGate
@@ -724,6 +725,48 @@ def _resolve_basic_headers(auth: AuthConfig, resolver: SecretResolver) -> dict[s
     password = resolver.resolve(auth.password)
     creds = base64.b64encode(f"{username}:{password}".encode()).decode()
     return {auth.header_name: f"Basic {creds}"}
+
+
+def resolve_bound_credential(
+    auth: AuthConfig,
+    resolver: SecretResolver | None,
+    *,
+    declared_host: str | None,
+) -> BoundCredential:
+    """Resolve auth headers once (fail-fast) and compute the destination host
+    set the resulting credential is bound to (ADR-0006).
+
+    If ``auth.allowed_hosts`` is set it wins; otherwise the credential is
+    pinned to ``declared_host`` -- the BASE-declared destination -- so every
+    existing config is safe with no rewrite ("pin to where you were pointed").
+    A no-auth config yields ``BoundCredential.none()``.
+
+    Args:
+        auth: The authentication configuration.
+        resolver: Secret resolver for looking up secret values.
+        declared_host: Host of the BASE-declared destination URL.
+
+    Returns:
+        A ``BoundCredential`` pairing the resolved headers with their allowed
+        host set and the configured on-violation action.
+
+    Raises:
+        SecretResolutionError: If auth requires a secret that cannot resolve.
+    """
+    headers = _resolve_auth_headers(auth, resolver)
+    if not headers:
+        return BoundCredential.none()
+    if auth.allowed_hosts:
+        allowed = frozenset(h.lower() for h in auth.allowed_hosts)
+    elif declared_host:
+        allowed = frozenset({declared_host.lower()})
+    else:
+        allowed = frozenset()
+    return BoundCredential(
+        headers=headers,
+        allowed_hosts=allowed,
+        action=auth.on_egress_violation,
+    )
 
 
 async def _execute_openapi_call(
