@@ -9,32 +9,42 @@ The safety moved from "structurally un-representable" to a WRITE-TIME gate in
 literal is rejected by the SSRF classifier, and a credentialed tool may only
 be repointed within its BASE credential binding. SECRETS remain git-only.
 
-This is the *structural* half of the Phase-1 field-level split. A config
-field is runtime-editable via the overlay only if it provably cannot reach
-(a) an outbound DESTINATION it did not already have in BASE (any
-url/host/api_base/endpoint) or (b) a SECRET value/binding (``SecretRef`` in
-any encoding, ``api_key``, ``AuthConfig`` token/username/password,
-secret-bearing headers). Everything that IS a destination, IS a
-secret/secret-binding, or CREATES a new entity that carries one, is
-BASE-ONLY (git-promoted, human-reviewed).
+VOCABULARY (used verbatim throughout this module and the admin routes).
+Two tiers of protection, and they are NOT interchangeable:
 
-The split is enforced BY CONSTRUCTION, not by a runtime "is-this-a-create"
-check: the field-scoped overlay sub-models below simply do not DECLARE the
-base-only fields, and every one is ``extra="forbid"``. So a payload that
-carries ``tools.manual_tools[].api.url``/``base_url``/``endpoint``/
-``headers``/``auth``/``method``/``body_template``/``requires_approval``, an
-``openapi_source`` ``url``/``path``/``spec``/``auth``, an
-``llm.litellm.model_list``/``endpoint``/``mode``, or a ``peers[].endpoint``
-is a ``pydantic.ValidationError`` at parse time -- exactly the mechanism by
-which :class:`OverlayMetadata` already rejects ``metadata.name``. Two crisp
-asymmetries fall out:
+* **STRUCTURAL** -- un-representable in a valid ``OverlayDocument``. The
+  field-scoped sub-models below simply do not DECLARE the field and every one
+  is ``extra="forbid"``, so a payload carrying it is a
+  ``pydantic.ValidationError`` at parse time -- exactly the mechanism by which
+  :class:`OverlayMetadata` already rejects ``metadata.name``. STRUCTURAL
+  covers: SECRETS and secret bindings (``SecretRef`` in any encoding,
+  ``api_key``, ``AuthConfig`` token/username/password, secret-bearing
+  ``headers``), the ``llm.litellm`` ``model_list``/``endpoint``/``mode``
+  registry, ``peers[].endpoint`` (hence peer creation), ``requires_approval``,
+  a manual tool's ``method``/``body_template``/``timeout``, and an
+  ``openapi_source``'s ``path``/``spec``.
+* **GATED** -- representable in the overlay, but policed at WRITE time by
+  ``forge_gateway.routes.admin._enforce_destination_binding``. GATED covers
+  exactly the tool/openapi DESTINATIONS
+  (``tools.manual_tools[].api.url``/``base_url``/``endpoint`` and
+  ``tools.openapi_sources[].url``): an internal literal is rejected by the
+  SSRF classifier, and a tool carrying a BASE credential may only be
+  repointed within that credential's bound host set.
+
+So a runtime edit may move WHERE a base-vetted call goes (within policy) but
+never WHICH credential it carries. Everything that IS a secret/secret-binding,
+or CREATES a new entity that structurally carries one, remains BASE-ONLY
+(git-promoted, human-reviewed). Two crisp asymmetries fall out:
 
 * SELECTION vs DEFINITION -- choosing an existing base-vetted tool/model/peer
-  by NAME is safe; defining or repointing where a call goes, or which
-  credential it carries, is base-only.
-* NEW-ENTITY asymmetry -- creating a ``manual_tool``/``openapi_source``/
-  ``peer``/``model_list`` entry is base-only because each REQUIRES a
-  url/endpoint/api_base (and usually a secret), whereas creating an
+  by NAME is inert; repointing where a call goes is GATED (allowed within the
+  binding policy); changing which credential it carries is base-only
+  (STRUCTURAL).
+* NEW-ENTITY asymmetry -- creating a ``peer``/``model_list`` entry is
+  STRUCTURALLY base-only because each REQUIRES an endpoint/api_base the
+  overlay cannot express (and usually a secret); a runtime-created
+  ``manual_tool``/``openapi_source`` can express a destination but never a
+  credential, so it is bound only by the GATED SSRF check. Creating an
   ``AgentDef`` or ``Workflow`` is runtime-safe because neither carries any
   url or secret -- they only compose/select base-defined destinations. Hence
   ``AgentDef`` and ``Workflow`` are reused WHOLE, while tools/llm/peers get a
@@ -71,11 +81,12 @@ EDITABLE_SECTIONS: tuple[str, ...] = ("tools", "agents", "llm", "metadata")
 
 
 class OverlayFieldError(ValueError):
-    """A base-only FIELD (destination/secret/secret-binding, or a
-    new-entity that structurally carries one) was present in overlay
-    content. Carries a ``promote via git`` message and the offending field
-    locations so the admin API can return a clear 400 that routes the UI to
-    the export/promotion flow rather than failing silently."""
+    """A STRUCTURALLY base-only FIELD (a secret/secret-binding, the
+    model_list registry, a peer endpoint, a security control, or a new-entity
+    that structurally carries one) was present in overlay content. Carries a
+    ``promote via git`` message and the offending field locations so the admin
+    API can return a clear 400 that routes the UI to the export/promotion flow
+    rather than failing silently."""
 
     def __init__(self, message: str, *, locations: list[str] | None = None) -> None:
         super().__init__(message)
@@ -159,7 +170,8 @@ class OverlayOpenAPISource(BaseModel):
 
 class OverlayToolsConfig(BaseModel):
     """The editable ``tools`` surface. ``manual_tools``/``openapi_sources``
-    use their field-scoped models (no destination/secret representable);
+    use their field-scoped models (no SECRET representable -- STRUCTURAL;
+    their destinations ARE representable and GATED at write time);
     ``workflows`` reuse the FULL :class:`~forge_config.schema.Workflow`
     because a workflow carries no url or secret -- it only composes existing
     base-defined tools by name."""
@@ -256,11 +268,18 @@ class OverlayDocument(BaseModel):
     ``_updated_at``). ``extra="forbid"`` at the top level PLUS the explicit
     :meth:`reject_base_only_keys` validator reject any base-only top-level
     key, and the field-scoped sub-models reject any base-only FIELD -- so a
-    caller can never construct a valid ``OverlayDocument`` that repoints a
-    destination, plants/changes a secret, ungates an approval, or defines a
-    new destination-carrying entity. That is what makes destination/secret
-    self-service through the overlay structurally impossible, not merely
-    policy-denied.
+    caller can never construct a valid ``OverlayDocument`` that plants/changes
+    a secret, ungates an approval, or defines a peer/model_list entry. That
+    is the STRUCTURAL tier: SECRET self-service through the overlay is
+    impossible by construction, not merely policy-denied.
+
+    DESTINATIONS are the other tier. Since slice 7 a tool/openapi destination
+    (``url``/``base_url``/``endpoint``) IS representable here -- it is GATED
+    at write time by
+    ``forge_gateway.routes.admin._enforce_destination_binding``, not blocked
+    by this schema. Do not read this model as a barrier against repointing:
+    removing that write-time gate would remove the only thing standing
+    between a ``config:write`` caller and an arbitrary public destination.
     """
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
@@ -328,11 +347,16 @@ def validate_overlay_content(content: dict[str, Any]) -> None:
     schema (:class:`OverlayDocument`), raising :class:`OverlayFieldError`
     with a clear promote-via-git message if any base-only field is present.
 
-    This is the load-bearing structural check the admin mutation choke point
-    runs before persisting -- it turns "a config:write caller repointed a
-    tool url / planted an api_key / added a model_list entry / created a peer
-    endpoint" from a silently-applied exfil/SSRF primitive into a 400 that
-    the UI routes to the promotion flow.
+    This is the load-bearing STRUCTURAL check the admin mutation choke point
+    runs before persisting -- it turns "a config:write caller planted an
+    api_key / added a model_list entry / created a peer endpoint" from a
+    silently-applied exfil/SSRF primitive into a 400 that the UI routes to
+    the promotion flow.
+
+    It does NOT cover a tool/openapi destination repoint: that is
+    overlay-representable since slice 7 and is GATED separately, immediately
+    after this call, by
+    ``forge_gateway.routes.admin._enforce_destination_binding``.
     """
     try:
         OverlayDocument.model_validate(content)
@@ -349,18 +373,21 @@ def validate_overlay_content(content: dict[str, Any]) -> None:
 # base-only field in one of them is simply a structural error (400 via
 # validate_overlay_content). The wholesale ``PUT /config`` path, however,
 # round-trips the WHOLE editable config (which came from a GET and therefore
-# always carries base-only fields -- a tool's url, the llm.litellm defaults,
-# a peer's endpoint). :func:`split_overlay_editable` projects that payload
-# down to the overlay-safe subset AND reports any base-only field whose value
+# always carries base-only fields -- the llm.litellm defaults, a peer's
+# endpoint). :func:`split_overlay_editable` projects that payload down to the
+# overlay-representable subset AND reports any base-only field whose value
 # actually CHANGED, so an honest round-trip is tolerated (unchanged base-only
-# fields are dropped) while a real repoint/secret-plant/new-destination is
-# surfaced as a promote-via-git action.
+# fields are dropped) while a real secret-plant / new peer endpoint is
+# surfaced as a promote-via-git action. NOTE: a tool/openapi DESTINATION is
+# NOT base-only here -- it is overlay-representable, so it flows through into
+# the safe patch and is policed by the GATED write-time check
+# (``_enforce_destination_binding``) instead.
 
 _MANUAL_TOOL_SAFE: frozenset[str] = frozenset({"name", "description", "parameters", "api"})
-_MANUAL_TOOL_API_SAFE: frozenset[str] = frozenset(
+_MANUAL_TOOL_API_OVERLAYABLE: frozenset[str] = frozenset(
     {"response_mapping", "url", "base_url", "endpoint"}
 )
-_OPENAPI_SAFE: frozenset[str] = frozenset(
+_OPENAPI_OVERLAYABLE: frozenset[str] = frozenset(
     {"name", "url", "route_map", "prefix", "namespace", "include_tags", "include_operations"}
 )
 _LLM_SAFE: frozenset[str] = frozenset(
@@ -381,15 +408,17 @@ def _by_name(items: Any) -> dict[str, Any]:
 
 def _project_entry(entry: Any, safe_keys: frozenset[str], *, api_safe: bool = False) -> Any:
     """Keep only *safe_keys* of a name-keyed entry (tombstones pass through);
-    when *api_safe*, also strip the nested ``api`` down to
-    ``response_mapping``."""
+    when *api_safe*, also strip the nested ``api`` down to the
+    overlay-representable subset :data:`_MANUAL_TOOL_API_OVERLAYABLE`
+    (``response_mapping`` plus the three GATED destination fields
+    ``url``/``base_url``/``endpoint``)."""
     if not isinstance(entry, dict):
         return entry
     if set(entry.keys()) == {"__deleted__"}:
         return entry
     projected: dict[str, Any] = {k: v for k, v in entry.items() if k in safe_keys}
     if api_safe and isinstance(projected.get("api"), dict):
-        api = {k: v for k, v in projected["api"].items() if k in _MANUAL_TOOL_API_SAFE}
+        api = {k: v for k, v in projected["api"].items() if k in _MANUAL_TOOL_API_OVERLAYABLE}
         if api:
             projected["api"] = api
         else:
@@ -420,7 +449,7 @@ def _diff_entry(
             if api_safe and key == "api" and isinstance(val, dict):
                 base_api = effective.get("api") if isinstance(effective, dict) else None
                 for api_key, api_val in val.items():
-                    if api_key in _MANUAL_TOOL_API_SAFE:
+                    if api_key in _MANUAL_TOOL_API_OVERLAYABLE:
                         continue
                     base_val = base_api.get(api_key) if isinstance(base_api, dict) else None
                     if base_val != api_val:
@@ -453,8 +482,10 @@ def _split_named_list(
 
 def project_overlay_safe(incoming: dict[str, Any]) -> dict[str, Any]:
     """Project an editable-sections (or overlay-content) dict down to only
-    the overlay-safe fields :class:`OverlayDocument` can carry -- dropping
-    every base-only destination/secret/security-control field.
+    the fields :class:`OverlayDocument` can carry -- dropping every
+    STRUCTURALLY base-only secret/registry/security-control field. Tool and
+    openapi DESTINATIONS are carried through (they are overlay-representable
+    since slice 7) and policed instead by the write-time GATE.
 
     Used both by the wholesale ``PUT /config`` split below and by the load
     path (``forge_config.loader.load_effective_config``) as belt-and-braces:
@@ -472,7 +503,9 @@ def project_overlay_safe(incoming: dict[str, Any]) -> dict[str, Any]:
                 tools["manual_tools"], _MANUAL_TOOL_SAFE, api_safe=True
             )
         if "openapi_sources" in tools:
-            safe_tools["openapi_sources"] = _project_list(tools["openapi_sources"], _OPENAPI_SAFE)
+            safe_tools["openapi_sources"] = _project_list(
+                tools["openapi_sources"], _OPENAPI_OVERLAYABLE
+            )
         if "workflows" in tools:
             safe_tools["workflows"] = tools["workflows"]
         if safe_tools:
@@ -548,7 +581,7 @@ def split_overlay_editable(
             _split_named_list(
                 tools_diff.get("openapi_sources"),
                 eff_tools.get("openapi_sources") if isinstance(eff_tools, dict) else None,
-                _OPENAPI_SAFE,
+                _OPENAPI_OVERLAYABLE,
                 "tools.openapi_sources",
                 changed,
             )

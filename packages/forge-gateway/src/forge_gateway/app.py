@@ -462,6 +462,18 @@ async def _init_auth(config: object | None) -> None:
     tx_key: bytes | None = None
 
     if sec_config.oidc.enabled:
+        # ADR-0006 exemption -- the ONE sanctioned raw egress client.
+        # The egress guard exists to stop a request whose DESTINATION is
+        # influenced by untrusted input (agent/tool/user-supplied URLs) from
+        # reaching internal or metadata addresses. This destination is
+        # ``sec_config.oidc.issuer``: operator-set deployment config, fixed at
+        # startup, never reachable by a request-time caller. Worse, guarding it
+        # would be actively wrong -- an OIDC issuer is very often a
+        # cluster-internal service (e.g. Dex on an in-cluster address), exactly
+        # what ``GuardedBackend`` is built to refuse. Trust is anchored instead
+        # by pinned CA verification (``_oidc_ca_verify``) plus issuer/signature
+        # validation on every token. Do NOT route this through
+        # ``make_guarded_client``.
         http_client = httpx.AsyncClient(verify=_httpx_verify_kwarg(_oidc_ca_verify()))
         discovery_doc = None
         if sec_config.oidc.discovery:

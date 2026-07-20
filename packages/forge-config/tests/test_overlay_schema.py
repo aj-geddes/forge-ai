@@ -380,6 +380,27 @@ class TestSplitOverlayEditable:
         _, changed = split_overlay_editable(inc, incoming_for_diff=inc, effective_for_diff=eff)
         assert any("model_list" in c for c in changed)
 
+    def test_changed_base_only_llm_field_is_reported(self) -> None:
+        """An llm.* key that is NOT overlay-safe and NOT under ``litellm``
+        (e.g. ``api_base``) is a privilege escalation if it could be written at
+        runtime -- it must be surfaced as requiring promotion via git."""
+        eff = {"llm": {"api_base": "https://llm.internal.example"}}
+        inc = {"llm": {"api_base": "https://attacker.example"}}
+        safe, changed = split_overlay_editable(inc, incoming_for_diff=inc, effective_for_diff=eff)
+        assert "llm.api_base" in changed
+        # ...and it is stripped from the overlay-safe projection.
+        assert "api_base" not in safe.get("llm", {})
+
+    def test_unchanged_base_only_llm_field_is_not_reported(self) -> None:
+        same = {"llm": {"api_base": "https://llm.internal.example"}}
+        _, changed = split_overlay_editable(same, incoming_for_diff=same, effective_for_diff=same)
+        assert changed == []
+
+    def test_base_only_llm_field_reported_when_absent_from_effective(self) -> None:
+        inc = {"llm": {"api_base": "https://attacker.example"}}
+        _, changed = split_overlay_editable(inc, incoming_for_diff=inc, effective_for_diff={})
+        assert "llm.api_base" in changed
+
     def test_safe_field_change_is_not_reported(self) -> None:
         eff = {"llm": {"default_model": "a", "temperature": 0.7}}
         inc = {"llm": {"default_model": "b", "temperature": 0.1}}

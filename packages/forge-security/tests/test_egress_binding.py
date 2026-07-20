@@ -7,6 +7,7 @@ from forge_config.schema import EgressAction, EgressPolicy
 from forge_security.egress.binding import (
     BoundCredential,
     EgressViolationError,
+    credential_binding_from_raw_auth,
     enforce_binding,
     host_matches,
 )
@@ -84,6 +85,13 @@ class TestEnforceBindingGlobalPolicy:
         with pytest.raises(EgressViolationError):
             enforce_binding("https://api.example.com/x", _cred(), policy=policy)
 
+    def test_global_allowlist_drop_strips_credential(self) -> None:
+        """The DROP counterpart of ``test_global_allowlist_reject``: the
+        request is still made, but WITHOUT the credential."""
+        policy = EgressPolicy(allowed_hosts=["only.example.com"], default_action=EgressAction.DROP)
+        out = enforce_binding("https://api.example.com/x", _cred(), policy=policy)
+        assert out == {}
+
     def test_disabled_policy_skips_global_gate(self) -> None:
         policy = EgressPolicy(enabled=False, require_https=True)
         out = enforce_binding("http://api.example.com/x", _cred(), policy=policy)
@@ -96,3 +104,52 @@ class TestEnforceBindingGlobalPolicy:
         policy = EgressPolicy(allowed_hosts=["*.example.com"])
         with pytest.raises(EgressViolationError):
             enforce_binding("https://other.example.com/x", _cred(), policy=policy)
+
+
+class TestCredentialBindingFromRawAuth:
+    """The ONE shared implementation of "does this auth carry a credential,
+    and which hosts is it bound to". Both the WRITE-time overlay gate
+    (raw-dict path) and the CONNECT-time typed path delegate here, so the
+    invariant cannot fork."""
+
+    def test_missing_auth_has_no_credential(self) -> None:
+        assert credential_binding_from_raw_auth(None, declared_host="api.example.com") == (
+            False,
+            frozenset(),
+        )
+
+    def test_non_dict_auth_has_no_credential(self) -> None:
+        assert credential_binding_from_raw_auth("bearer", declared_host="a.example.com") == (
+            False,
+            frozenset(),
+        )
+
+    def test_explicit_none_type_has_no_credential(self) -> None:
+        assert credential_binding_from_raw_auth(
+            {"type": "none"}, declared_host="api.example.com"
+        ) == (False, frozenset())
+
+    def test_absent_type_defaults_to_none(self) -> None:
+        assert credential_binding_from_raw_auth(
+            {"header_name": "Authorization"}, declared_host="api.example.com"
+        ) == (False, frozenset())
+
+    @pytest.mark.parametrize("auth_type", ["bearer", "api_key", "basic"])
+    def test_credential_pins_to_declared_host_when_allowed_hosts_empty(
+        self, auth_type: str
+    ) -> None:
+        assert credential_binding_from_raw_auth(
+            {"type": auth_type, "allowed_hosts": []}, declared_host="API.Example.com"
+        ) == (True, frozenset({"api.example.com"}))
+
+    def test_allowed_hosts_wins_over_declared_host(self) -> None:
+        assert credential_binding_from_raw_auth(
+            {"type": "bearer", "allowed_hosts": ["A.example.com", "*.B.com"]},
+            declared_host="other.example.com",
+        ) == (True, frozenset({"a.example.com", "*.b.com"}))
+
+    def test_credential_with_no_declared_host_is_unbound(self) -> None:
+        assert credential_binding_from_raw_auth({"type": "bearer"}, declared_host=None) == (
+            True,
+            frozenset(),
+        )

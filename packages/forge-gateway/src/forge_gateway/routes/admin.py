@@ -49,9 +49,20 @@ from forge_config.overlay import (
     split_overlay_editable,
     validate_overlay_content,
 )
-from forge_config.schema import PERMISSION_WILDCARD, ForgeConfig, MutationPolicy, Permission
+from forge_config.schema import (
+    PERMISSION_WILDCARD,
+    ForgeConfig,
+    ManualToolAPI,
+    MutationPolicy,
+    Permission,
+)
 from forge_config.writable_store import OverlayConflictError, OverlayStore
-from forge_security.egress import host_matches, validate_endpoint
+from forge_security.egress import (
+    credential_binding_from_raw_auth,
+    host_matches,
+    make_guarded_client,
+    validate_endpoint,
+)
 from forge_security.oidc.principal import Principal
 from pydantic import ValidationError
 
@@ -247,17 +258,23 @@ async def apply_overlay_mutation(
             _reject_unrestored_redactions(new_overlay_content)
 
             # SECURITY (Phase-1 field-level split): the load-bearing
-            # STRUCTURAL gate. A base-only FIELD -- a tool/openapi
-            # DESTINATION (url/base_url/endpoint), a SECRET binding
+            # STRUCTURAL gate -- STRUCTURAL meaning "un-representable in a
+            # valid OverlayDocument", so it is rejected here at parse time
+            # with a clear promote-via-git 400 (routing the UI to the export
+            # flow) instead of being silently applied as an exfil/SSRF
+            # primitive. Covers: a SECRET binding
             # (api_key/auth/SecretRef/secret header), the
-            # llm.litellm.model_list/endpoint/mode registry, a peer
-            # endpoint (i.e. peer creation), or a requires_approval
-            # downgrade -- is un-representable in a valid OverlayDocument,
-            # so it is rejected here with a clear promote-via-git 400
-            # (routing the UI to the export flow) instead of being silently
-            # applied as an exfil/SSRF primitive. This runs on BOTH the
-            # granular handlers AND the wholesale PUT /config full_replace
-            # path (the former primary bypass).
+            # llm.litellm.model_list/endpoint/mode registry, a peer endpoint
+            # (i.e. peer creation), and a requires_approval downgrade. Runs
+            # on BOTH the granular handlers AND the wholesale PUT /config
+            # full_replace path (the former primary bypass).
+            #
+            # NOT covered: a tool/openapi DESTINATION
+            # (url/base_url/endpoint). Since SLICE 7 that IS representable in
+            # the overlay -- it is GATED ~25 lines below by
+            # _enforce_destination_binding, which is the only write-time
+            # check standing between a config:write caller and an arbitrary
+            # destination.
             try:
                 validate_overlay_content(new_overlay_content)
             except OverlayFieldError as e:
@@ -698,11 +715,16 @@ def _reject_secret_refs_in_overlay(overlay_content: dict[str, Any]) -> None:
     EITHER encoding, anywhere.
 
     ROOT CAUSE (Phase-1 final). After the field-level split, NO
-    overlay-editable field is a legitimate secret SINK: every destination and
-    secret binding (``api_key``/``auth``/``headers``/``model_list``/
-    ``endpoint``) is base-only and structurally un-representable in a valid
-    ``OverlayDocument`` (already rejected upstream by
-    :func:`validate_overlay_content`). The only fields that remain editable are
+    overlay-editable field is a legitimate secret SINK. Every SECRET binding
+    (``api_key``/``auth``/``headers``/``model_list``) is base-only and
+    STRUCTURALLY un-representable in a valid ``OverlayDocument`` (already
+    rejected upstream by :func:`validate_overlay_content`) -- that is what
+    makes a blanket reject of every secret reference correct here rather than
+    over-strict. (A tool/openapi DESTINATION is NOT structural since slice 7;
+    it is overlay-representable and GATED by
+    :func:`_enforce_destination_binding`. It is still not a secret sink,
+    which is all this function depends on.) The only fields that remain
+    editable are
     inert free text -- an ``AgentDef.system_prompt``/``description``, a
     ``ManualTool``/``Workflow`` ``ParameterDef.default``, a
     ``WorkflowStep.params`` value, ``metadata.description``. A ``${VAR}`` /
@@ -809,11 +831,14 @@ def _validate_overlay_peers(overlay_content: dict[str, Any], principal: Principa
     the overlay writes -- not only the dedicated ``create_peer``/
     ``patch_peer`` handlers.
 
-    A wholesale ``PUT /config`` (``full_replace``) writes ``agents.peers``
-    straight from the incoming payload, so without this the dedicated
-    handlers' ``validate_peer_endpoint`` check is bypassed and a caller can
-    add a peer pointed at ``169.254.169.254`` / ``kubernetes.default`` /
-    ``*.svc`` and drive SSRF via peer ping/call.
+    The ``endpoint`` branch is DEFENSE-IN-DEPTH, not the primary gate: a
+    ``peers[].endpoint`` is STRUCTURAL (un-representable in
+    ``OverlayDocument``), so today :func:`validate_overlay_content` fires
+    first and ``split_overlay_editable`` drops ``endpoint`` from a wholesale
+    ``PUT /config`` before this runs. The check stays because it is the
+    behaviour that must hold if the schema ever admits ``endpoint``: without
+    it a caller could add a peer pointed at ``169.254.169.254`` /
+    ``kubernetes.default`` / ``*.svc`` and drive SSRF via peer ping/call.
 
     Also constrains two self-assignable identity fields (SECURITY round 2):
     a ``config:write`` caller may not raise a peer's ``trust_level`` above
@@ -886,10 +911,10 @@ def _validate_overlay_peers(overlay_content: dict[str, Any], principal: Principa
 
 # --- SLICE 7: runtime-editable destinations, binding-gated ---
 #
-# Phase 1 made tool destinations (url/base_url/endpoint) structurally
+# Phase 1 made tool destinations (url/base_url/endpoint) STRUCTURALLY
 # BASE-ONLY. SLICE 7 relaxes the OverlayDocument schema to ALLOW those
-# destination fields at runtime, and moves the safety from "structurally
-# un-representable" to this WRITE-TIME gate: a destination edit may never
+# destination fields at runtime, moving them from STRUCTURAL to GATED --
+# i.e. from "un-representable" to this WRITE-TIME gate: a destination edit may never
 # become an SSRF or credential-exfiltration primitive.
 #
 # Two independent checks per repointed destination:
@@ -917,20 +942,31 @@ def _index_by_name(items: Any) -> dict[str, Any]:
     return result
 
 
-def _resolved_host_from_manual_api(api: dict[str, Any]) -> tuple[str | None, str | None]:
-    """Return ``(hostname, resolved_url)`` for a manual-tool ``api`` dict,
-    mirroring ``ManualToolAPI.resolved_url`` (``base_url`` + ``endpoint``
-    take precedence over ``url``)."""
+#: The manual-tool ``api`` fields that name an outbound DESTINATION. GATED
+#: (overlay-representable, policed at write time), not STRUCTURAL.
+_DESTINATION_FIELDS: tuple[str, ...] = ("url", "base_url", "endpoint")
+
+
+def _resolved_host_from_manual_api(api: Any) -> tuple[str | None, str | None]:
+    """Return ``(hostname, resolved_url)`` for a manual-tool ``api`` dict.
+
+    Delegates the ``base_url`` + ``endpoint`` vs ``url`` precedence to the
+    REAL schema property (``ManualToolAPI.resolved_url``) rather than
+    re-implementing it, so a change to that rule cannot silently skip the
+    write-time gate. An ``api`` dict that does not validate (no destination
+    yet, or a malformed one) yields ``(None, None)`` -- the caller then has
+    nothing to gate.
+    """
     if not isinstance(api, dict):
         return (None, None)
-    base_url = api.get("base_url")
-    endpoint = api.get("endpoint")
-    url = api.get("url")
-    if isinstance(base_url, str) and isinstance(endpoint, str):
-        target = base_url.rstrip("/") + endpoint
-    elif isinstance(url, str):
-        target = url
-    else:
+    # Validate ONLY the three destination fields, never the whole api dict: a
+    # malformed UNRELATED field (a bad auth.type in BASE, say) must not make
+    # this return "no destination" and thereby skip the gate -- that would be
+    # a fail-open.
+    destination = {k: api[k] for k in _DESTINATION_FIELDS if k in api}
+    try:
+        target = ManualToolAPI.model_validate(destination).resolved_url
+    except ValidationError:
         return (None, None)
     return (urlsplit(target).hostname, target)
 
@@ -938,44 +974,30 @@ def _resolved_host_from_manual_api(api: dict[str, Any]) -> tuple[str | None, str
 def _manual_credential_binding(base_tool: dict[str, Any] | None) -> tuple[bool, frozenset[str]]:
     """``(has_credential, bound_hosts)`` for a BASE manual tool.
 
-    A tool "carries a credential" iff its BASE ``api.auth.type`` is not
-    ``none``. The bound host set is ``auth.allowed_hosts`` (lowercased) when
-    non-empty, else the single BASE-declared origin host.
+    A thin adapter over the SHARED predicate
+    :func:`~forge_security.egress.binding.credential_binding_from_raw_auth`
+    (the same one the connect-time ``resolve_bound_credential`` uses), passing
+    the BASE-declared origin host as the fallback binding.
     """
     if not isinstance(base_tool, dict):
         return (False, frozenset())
     api = base_tool.get("api")
     if not isinstance(api, dict):
         return (False, frozenset())
-    auth = api.get("auth")
-    if not isinstance(auth, dict):
-        return (False, frozenset())
-    if (auth.get("type") or "none") == "none":
-        return (False, frozenset())
-    allowed = auth.get("allowed_hosts")
-    if isinstance(allowed, list) and allowed:
-        return (True, frozenset(str(h).lower() for h in allowed))
-    origin = _resolved_host_from_manual_api(api)[0]
-    return (True, frozenset({origin.lower()}) if origin else frozenset())
+    return credential_binding_from_raw_auth(
+        api.get("auth"), declared_host=_resolved_host_from_manual_api(api)[0]
+    )
 
 
 def _openapi_credential_binding(base_src: dict[str, Any] | None) -> tuple[bool, frozenset[str]]:
-    """``(has_credential, bound_hosts)`` for a BASE OpenAPI source -- the
-    same rule as :func:`_manual_credential_binding`, with the origin taken
-    from the BASE-declared ``url`` host."""
+    """``(has_credential, bound_hosts)`` for a BASE OpenAPI source -- the same
+    shared predicate as :func:`_manual_credential_binding`, with the origin
+    taken from the BASE-declared ``url`` host."""
     if not isinstance(base_src, dict):
         return (False, frozenset())
-    auth = base_src.get("auth")
-    if not isinstance(auth, dict):
-        return (False, frozenset())
-    if (auth.get("type") or "none") == "none":
-        return (False, frozenset())
-    allowed = auth.get("allowed_hosts")
-    if isinstance(allowed, list) and allowed:
-        return (True, frozenset(str(h).lower() for h in allowed))
     url = base_src.get("url")
     origin = urlsplit(url).hostname if isinstance(url, str) else None
-    return (True, frozenset({origin.lower()}) if origin else frozenset())
+    return credential_binding_from_raw_auth(base_src.get("auth"), declared_host=origin)
 
 
 def _reject_internal_destination(name: Any, url: str) -> None:
@@ -1019,7 +1041,7 @@ def _enforce_destination_binding(overlay_content: dict[str, Any], base_raw: dict
         api = entry.get("api")
         if not isinstance(api, dict):
             continue
-        if not any(k in api for k in ("url", "base_url", "endpoint")):
+        if not any(k in api for k in _DESTINATION_FIELDS):
             continue
         name = entry.get("name")
         base_tool = base_manual.get(name) if isinstance(name, str) else None
@@ -1896,6 +1918,9 @@ async def patch_peer(
     if _config is None or not any(p.name == name for p in _config.agents.peers):
         raise HTTPException(status_code=404, detail=f"Peer '{name}' not found")
 
+    # Nicer-error PRE-CHECK, not the enforcement point: a peer ``endpoint``
+    # is STRUCTURAL (un-representable in OverlayDocument), so the mutation
+    # choke point rejects it regardless. This just returns a targeted message.
     endpoint = entity.get("endpoint")
     if endpoint is not None and not validate_peer_endpoint(endpoint):
         raise HTTPException(
@@ -1977,10 +2002,19 @@ async def ping_peer(name: str) -> AdminPeerPingResponse:
         )
 
     import httpx  # noqa: PLC0415
+    from forge_config.schema import EgressPolicy  # noqa: PLC0415
+
+    # ADR-0006: ``validate_peer_endpoint`` above is the non-authoritative
+    # write-time plane -- it resolves the name once and is therefore TOCTOU-
+    # vulnerable to a DNS rebind between that check and this connect. The
+    # authoritative control is the connect-time pinned-IP guard, so the ping
+    # leg is built by ``make_guarded_client`` with the deployment's egress
+    # policy (matching ``preview_tools``), never a raw client.
+    egress_policy = _config.security.egress if _config is not None else EgressPolicy()
 
     start = time.monotonic()
     try:
-        async with httpx.AsyncClient() as client:
+        async with make_guarded_client(policy=egress_policy) as client:
             resp = await client.get(
                 peer.endpoint.rstrip("/") + "/health/live",
                 timeout=5.0,

@@ -14,6 +14,7 @@ from typing import Any
 import httpcore
 import httpx
 import pytest
+from forge_config.schema import EgressPolicy
 from forge_security.egress import transport as transport_mod
 from forge_security.egress.transport import (
     GuardedBackend,
@@ -161,6 +162,78 @@ class TestPinningAndRebind:
         backend = GuardedBackend(policy=None, inner=FakeBackend(_http_response()))
         with pytest.raises(SSRFConnectBlocked):
             await backend.connect_tcp("metadata.google.internal", 80)
+
+
+class TestEnabledPolicyAllowList:
+    """The authoritative plane with an ENABLED policy carrying an allow-list.
+
+    Every other test in this module passes ``policy=None``, so without these
+    the whole ``policy.enabled + allowed_hosts`` arm of ``connect_tcp`` -- and
+    the config->transport policy plumbing feeding it -- is unexercised.
+    """
+
+    async def test_allow_listed_host_connects(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(transport_mod, "candidate_ips", lambda h: [_ip("93.184.216.34")])
+        fake = FakeBackend(_http_response())
+        policy = EgressPolicy(enabled=True, allowed_hosts=["api.example.com"])
+        backend = GuardedBackend(policy=policy, inner=fake)
+        await backend.connect_tcp("api.example.com", 443)
+        # Pinned to the validated literal IP, not the hostname.
+        assert fake.connect_calls == [("93.184.216.34", 443)]
+
+    async def test_host_not_in_allow_list_is_blocked(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(transport_mod, "candidate_ips", lambda h: [_ip("93.184.216.34")])
+        policy = EgressPolicy(enabled=True, allowed_hosts=["api.example.com"])
+        backend = GuardedBackend(policy=policy, inner=FakeBackend(_http_response()))
+        with pytest.raises(SSRFConnectBlocked, match="allow-list"):
+            await backend.connect_tcp("evil.example", 443)
+
+    async def test_wildcard_allow_list_admits_subdomain_and_apex(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(transport_mod, "candidate_ips", lambda h: [_ip("93.184.216.34")])
+        fake = FakeBackend(_http_response())
+        policy = EgressPolicy(enabled=True, allowed_hosts=["*.example.com"])
+        backend = GuardedBackend(policy=policy, inner=fake)
+        await backend.connect_tcp("a.example.com", 443)
+        await backend.connect_tcp("example.com", 443)
+        assert fake.connect_calls == [("93.184.216.34", 443), ("93.184.216.34", 443)]
+
+    async def test_internal_ip_blocked_even_when_host_allow_listed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Defense in depth: the allow-list is a permit, never an override of
+        the IP-layer deny. An allow-listed name that rebinds to metadata is
+        still refused at the socket."""
+        monkeypatch.setattr(transport_mod, "candidate_ips", lambda h: [_ip("169.254.169.254")])
+        policy = EgressPolicy(enabled=True, allowed_hosts=["api.example.com"])
+        backend = GuardedBackend(policy=policy, inner=FakeBackend(_http_response()))
+        with pytest.raises(SSRFConnectBlocked, match="internal address"):
+            await backend.connect_tcp("api.example.com", 443)
+
+    async def test_disabled_policy_does_not_impose_allow_list(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(transport_mod, "candidate_ips", lambda h: [_ip("93.184.216.34")])
+        fake = FakeBackend(_http_response())
+        policy = EgressPolicy(enabled=False, allowed_hosts=["api.example.com"])
+        backend = GuardedBackend(policy=policy, inner=fake)
+        await backend.connect_tcp("other.example", 443)
+        assert fake.connect_calls == [("93.184.216.34", 443)]
+
+    async def test_make_guarded_client_plumbs_policy_to_backend(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The config->transport seam: a policy handed to ``make_guarded_client``
+        must actually reach the backend that enforces it."""
+        monkeypatch.setattr(transport_mod, "candidate_ips", lambda h: [_ip("93.184.216.34")])
+        policy = EgressPolicy(enabled=True, allowed_hosts=["api.example.com"])
+        client = make_guarded_client(policy=policy)
+        backend = client._transport._pool._network_backend  # type: ignore[attr-defined]
+        backend._inner = FakeBackend(_http_response())
+        async with client:
+            with pytest.raises(httpx.ConnectError, match="allow-list"):
+                await client.get("https://evil.example/x")
 
 
 class TestSniHostAndRedirect:

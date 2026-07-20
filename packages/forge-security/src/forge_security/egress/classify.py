@@ -119,6 +119,29 @@ def candidate_ips(host: str) -> list[_IpAddress]:
     return ips
 
 
+def host_matches(host: str, patterns: frozenset[str]) -> bool:
+    """Case-insensitive host match against a set of patterns.
+
+    A pattern is an exact host, a ``host:port`` (the port is ignored -- the
+    caller passes a bare hostname), or a ``*.suffix`` wildcard that matches
+    both the apex (``example.com``) and any subdomain (``a.example.com``).
+    """
+    if not host:
+        return False
+    hl = host.lower()
+    for p in patterns:
+        pl = p.lower()
+        if pl.startswith("*."):
+            if hl == pl[2:] or hl.endswith(pl[1:]):
+                return True
+        elif ":" in pl:
+            if hl == pl.split(":", 1)[0]:
+                return True
+        elif hl == pl:
+            return True
+    return False
+
+
 def is_blocked_hostname(host: str) -> bool:
     """True if *host* is an obvious internal name (empty, a blocked literal,
     or a blocked suffix). Network-free."""
@@ -157,10 +180,11 @@ def validate_endpoint(url: str, policy: EgressPolicy | None = None) -> bool:
     if base and policy is not None and policy.enabled:
         if policy.require_https and parsed.scheme != "https":
             return False
-        if policy.allowed_hosts and not any(
-            host == p.lower() or (p.startswith("*.") and host.endswith(p[1:].lower()))
-            for p in policy.allowed_hosts
-        ):
+        # ONE matcher across both planes: this first-line gate and the
+        # authoritative connect-time ``GuardedBackend`` / ``enforce_binding``
+        # must agree on what ``allowed_hosts`` means, or the same config
+        # silently means two different things depending on which gate sees it.
+        if policy.allowed_hosts and not host_matches(host, frozenset(policy.allowed_hosts)):
             return False
 
     return base

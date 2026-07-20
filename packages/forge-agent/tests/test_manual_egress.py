@@ -140,7 +140,10 @@ class TestSocketLevelRebind:
             _tool("https://api.example.com/data", AuthConfig(type=AuthType.NONE)),
             egress_policy=EgressPolicy(),
         ).build()
-        with pytest.raises(httpx.ConnectError):
+        # Match the GUARD's message, not merely "a ConnectError": this host
+        # does not resolve, so a revert to a raw client would also raise
+        # ConnectError (a DNS failure) and pass spuriously.
+        with pytest.raises(httpx.ConnectError, match="internal address"):
             await tool.function()
 
 

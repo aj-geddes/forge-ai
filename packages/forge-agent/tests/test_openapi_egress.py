@@ -162,7 +162,7 @@ class TestSpecFetchIsSocketGuarded:
             _source(AuthConfig(type=AuthType.NONE), url="https://192.168.0.10/openapi.json"),
             egress_policy=EgressPolicy(),
         )
-        with pytest.raises(httpx.ConnectError):
+        with pytest.raises(httpx.ConnectError, match="internal address"):
             await builder.build()
 
     async def test_fetch_rebind_to_metadata_blocked(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -175,5 +175,7 @@ class TestSpecFetchIsSocketGuarded:
             _source(AuthConfig(type=AuthType.NONE)),
             egress_policy=EgressPolicy(),
         )
-        with pytest.raises(httpx.ConnectError):
+        # Match the GUARD's message: api.example.com does not resolve, so a
+        # revert to a raw client would raise ConnectError too.
+        with pytest.raises(httpx.ConnectError, match="internal address"):
             await builder.build()

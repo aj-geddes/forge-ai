@@ -537,7 +537,7 @@ class TestPeerPingSsrfProtection:
         mock_http.__aenter__.return_value = mock_http
         mock_http.__aexit__.return_value = None
 
-        with unittest.mock.patch("httpx.AsyncClient", return_value=mock_http):
+        with unittest.mock.patch.object(admin, "make_guarded_client", return_value=mock_http):
             resp = await async_client.post("/v1/admin/peers/peer1/ping", headers=auth_headers)
         assert resp.status_code == 200
         data = resp.json()
@@ -1644,7 +1644,7 @@ class TestPingPeerEdgeCases:
         mock_http.__aenter__ = AsyncMock(return_value=mock_http)
         mock_http.__aexit__ = AsyncMock(return_value=None)
 
-        with unittest.mock.patch("httpx.AsyncClient", return_value=mock_http):
+        with unittest.mock.patch.object(admin, "make_guarded_client", return_value=mock_http):
             resp = await async_client.post("/v1/admin/peers/peer1/ping", headers=auth_headers)
 
         assert resp.status_code == 200
@@ -1683,7 +1683,7 @@ class TestPingPeerEdgeCases:
         mock_http.__aenter__ = AsyncMock(return_value=mock_http)
         mock_http.__aexit__ = AsyncMock(return_value=None)
 
-        with unittest.mock.patch("httpx.AsyncClient", return_value=mock_http):
+        with unittest.mock.patch.object(admin, "make_guarded_client", return_value=mock_http):
             resp = await async_client.post(
                 "/v1/admin/peers/peer-timeout/ping", headers=auth_headers
             )
@@ -1733,7 +1733,7 @@ class TestPingPeerEdgeCases:
         mock_http.__aenter__ = AsyncMock(return_value=mock_http)
         mock_http.__aexit__ = AsyncMock(return_value=None)
 
-        with unittest.mock.patch("httpx.AsyncClient", return_value=mock_http):
+        with unittest.mock.patch.object(admin, "make_guarded_client", return_value=mock_http):
             resp = await async_client.post("/v1/admin/peers/peer-500/ping", headers=auth_headers)
 
         assert resp.status_code == 200
@@ -2003,7 +2003,7 @@ class TestPingPeerLatency:
         mock_http.__aenter__.return_value = mock_http
         mock_http.__aexit__.return_value = None
 
-        with unittest.mock.patch("httpx.AsyncClient", return_value=mock_http):
+        with unittest.mock.patch.object(admin, "make_guarded_client", return_value=mock_http):
             resp = await async_client.post("/v1/admin/peers/peer1/ping", headers=auth_headers)
 
         assert resp.status_code == 200
@@ -2024,7 +2024,7 @@ class TestPingPeerLatency:
         mock_http.__aenter__ = AsyncMock(return_value=mock_http)
         mock_http.__aexit__ = AsyncMock(return_value=None)
 
-        with unittest.mock.patch("httpx.AsyncClient", return_value=mock_http):
+        with unittest.mock.patch.object(admin, "make_guarded_client", return_value=mock_http):
             resp = await async_client.post("/v1/admin/peers/peer1/ping", headers=auth_headers)
 
         assert resp.status_code == 200
@@ -2104,3 +2104,139 @@ class TestPreviewToolsEgressGuard:
             assert resp.json()["detail"] == "failed to preview OpenAPI source"
         finally:
             self._teardown()
+
+
+# =========================================================================
+# 21. POST /v1/admin/peers/{name}/ping -- the outbound leg must go through
+#     the connect-time SSRF guard, not a raw httpx client (ADR-0006).
+# =========================================================================
+
+
+@pytest.mark.usefixtures("_wire_auth")
+class TestPingPeerUsesGuardedClient:
+    """``validate_peer_endpoint`` alone is the non-authoritative, TOCTOU-prone
+    write-time plane; it cannot stop a DNS rebind between validate and connect.
+    The ping leg must therefore be built by ``make_guarded_client`` so the
+    connect-time pinned-IP guard applies.
+    """
+
+    async def test_ping_builds_client_via_guarded_factory_with_egress_policy(
+        self,
+        async_client: httpx.AsyncClient,
+        auth_headers: dict[str, str],
+    ) -> None:
+        import unittest.mock
+        from unittest.mock import AsyncMock
+
+        config = ForgeConfig(
+            agents=AgentsConfig(
+                peers=[
+                    PeerAgent(
+                        name="peer1",
+                        endpoint="http://peer1.example.com:8000",
+                        capabilities=["search"],
+                    )
+                ]
+            ),
+        )
+        config.security.egress.allowed_hosts = ["peer1.example.com"]
+        admin.set_state(config=config, config_path="/tmp/test.yaml", agent=None)  # noqa: S108
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.raise_for_status = MagicMock()
+        mock_http = AsyncMock()
+        mock_http.get = AsyncMock(return_value=mock_resp)
+        mock_http.__aenter__.return_value = mock_http
+        mock_http.__aexit__.return_value = None
+
+        with unittest.mock.patch.object(
+            admin, "make_guarded_client", return_value=mock_http
+        ) as factory:
+            resp = await async_client.post("/v1/admin/peers/peer1/ping", headers=auth_headers)
+
+        assert resp.status_code == 200
+        factory.assert_called_once()
+        # The deployment's egress policy must actually reach the transport.
+        assert factory.call_args.kwargs["policy"] is config.security.egress
+
+        admin.set_state(config=None, config_path="", agent=None, overlay_store=None, base_path="")
+
+    async def test_ping_falls_back_to_default_policy_when_no_config(self) -> None:
+        """Mirrors ``preview_tools``: a safe default policy rather than an
+        unguarded client when module state has no config."""
+        from unittest.mock import AsyncMock, patch
+
+        from forge_config.schema import EgressPolicy
+
+        admin.set_state(
+            config=ForgeConfig(
+                agents=AgentsConfig(
+                    peers=[
+                        PeerAgent(name="p", endpoint="http://p.example.com:8000", capabilities=[])
+                    ]
+                )
+            ),
+            config_path="/tmp/t.yaml",  # noqa: S108
+            agent=None,
+        )
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.raise_for_status = MagicMock()
+        mock_http = AsyncMock()
+        mock_http.get = AsyncMock(return_value=mock_resp)
+        mock_http.__aenter__.return_value = mock_http
+        mock_http.__aexit__.return_value = None
+
+        with patch.object(admin, "make_guarded_client", return_value=mock_http) as factory:
+            await admin.ping_peer("p")
+
+        assert isinstance(factory.call_args.kwargs["policy"], EgressPolicy)
+        admin.set_state(config=None, config_path="", agent=None, overlay_store=None, base_path="")
+
+    async def test_ping_to_rebound_metadata_host_is_blocked_at_the_socket(
+        self,
+        async_client: httpx.AsyncClient,
+        auth_headers: dict[str, str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The regression the global ``httpx.AsyncClient`` patch could not
+        express: a peer endpoint that looks PUBLIC to ``validate_peer_endpoint``
+        but resolves to AWS IMDS at connect time must be refused at the socket.
+        No client is mocked here -- the real guarded transport runs.
+        """
+        import ipaddress
+
+        from forge_security.egress import transport as transport_mod
+
+        config = ForgeConfig(
+            agents=AgentsConfig(
+                peers=[
+                    PeerAgent(
+                        name="rebinder",
+                        endpoint="http://rebind.example.com:8000",
+                        capabilities=[],
+                    )
+                ]
+            )
+        )
+        admin.set_state(config=config, config_path="/tmp/test.yaml", agent=None)  # noqa: S108
+
+        # Public at validate time...
+        assert auth_module.validate_peer_endpoint("http://rebind.example.com:8000") is True
+        # ...metadata at connect time.
+        monkeypatch.setattr(
+            transport_mod,
+            "candidate_ips",
+            lambda h: [ipaddress.ip_address("169.254.169.254")],
+        )
+
+        resp = await async_client.post("/v1/admin/peers/rebinder/ping", headers=auth_headers)
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "unreachable"
+        # Refused by the SSRF guard, not by an ordinary connection failure.
+        assert "internal address" in data["error"].lower()
+
+        admin.set_state(config=None, config_path="", agent=None, overlay_store=None, base_path="")

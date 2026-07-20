@@ -7,6 +7,7 @@ import socket
 
 import pytest
 from forge_config.schema import EgressAction, EgressPolicy
+from forge_security.egress.binding import host_matches
 from forge_security.egress.classify import (
     candidate_ips,
     is_blocked_hostname,
@@ -152,3 +153,77 @@ class TestValidateEndpointPolicyBranch:
         policy = EgressPolicy(enabled=False, require_https=True, default_action=EgressAction.DROP)
         # http allowed because policy disabled -> parity with policy=None.
         assert validate_endpoint("http://api.example.com", policy) is True
+
+
+# ---------------------------------------------------------------------------
+# Cross-plane allow-list consistency (ADR-0006)
+# ---------------------------------------------------------------------------
+
+#: (host, patterns, expected_match). ``allowed_hosts`` must mean exactly ONE
+#: thing everywhere it is honoured, so this table is asserted against BOTH the
+#: binding/transport matcher (``host_matches``) and the first-line classifier
+#: (``validate_endpoint``). The semantics are ``host_matches``' documented,
+#: operator-facing ones: exact host, ``host:port`` (port ignored), and
+#: ``*.suffix`` matching the apex as well as any subdomain.
+_ALLOW_LIST_CASES = [
+    ("api.example.com", ["api.example.com"], True),
+    ("API.Example.COM", ["api.example.com"], True),
+    ("api.example.com", ["API.EXAMPLE.COM"], True),
+    ("evil.example", ["api.example.com"], False),
+    ("a.example.com", ["*.example.com"], True),
+    ("deep.a.example.com", ["*.example.com"], True),
+    ("example.com", ["*.example.com"], True),
+    ("notexample.com", ["*.example.com"], False),
+    ("api.foo.com", ["api.foo.com:8443"], True),
+    ("other.foo.com", ["api.foo.com:8443"], False),
+    ("b.example.com", ["api.other.com", "*.example.com"], True),
+]
+
+
+class TestAllowListCrossPlaneConsistency:
+    """``allowed_hosts`` is honoured by two planes -- the connect-time
+    ``GuardedBackend``/``enforce_binding`` matcher and the first-line
+    ``validate_endpoint``. They previously diverged (the apex of a
+    ``*.suffix`` pattern and any ``host:port`` pattern were matched by one and
+    not the other), so the same config meant different things depending on
+    which gate saw it. Both planes now share one matcher; this table pins that.
+    """
+
+    @pytest.mark.parametrize(("host", "patterns", "expected"), _ALLOW_LIST_CASES)
+    def test_host_matches_agrees_with_table(
+        self, host: str, patterns: list[str], expected: bool
+    ) -> None:
+        assert host_matches(host, frozenset(patterns)) is expected
+
+    @pytest.mark.parametrize(("host", "patterns", "expected"), _ALLOW_LIST_CASES)
+    def test_validate_endpoint_agrees_with_table(
+        self,
+        host: str,
+        patterns: list[str],
+        expected: bool,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Isolate the allow-list decision from DNS: no candidate IPs means the
+        # IP-layer verdict is "safe", so the policy arm is what is under test.
+        monkeypatch.setattr("forge_security.egress.classify.candidate_ips", lambda h: [])
+        policy = EgressPolicy(enabled=True, allowed_hosts=patterns, require_https=True)
+        assert validate_endpoint(f"https://{host}/path", policy) is expected
+
+    def test_allow_list_never_overrides_the_ip_layer_deny(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Loosening the allow-list matcher must not let an internal target
+        through: the policy arm can only ever turn a True into a False."""
+        monkeypatch.setattr(
+            "forge_security.egress.classify.candidate_ips",
+            lambda h: [ipaddress.ip_address("169.254.169.254")],
+        )
+        policy = EgressPolicy(enabled=True, allowed_hosts=["*.example.com"], require_https=True)
+        assert validate_endpoint("https://example.com/", policy) is False
+
+    def test_require_https_still_enforced_alongside_allow_list(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("forge_security.egress.classify.candidate_ips", lambda h: [])
+        policy = EgressPolicy(enabled=True, allowed_hosts=["*.example.com"], require_https=True)
+        assert validate_endpoint("http://example.com/", policy) is False

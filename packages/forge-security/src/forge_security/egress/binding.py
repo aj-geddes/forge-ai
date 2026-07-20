@@ -19,32 +19,62 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Any
 from urllib.parse import urlsplit
 
 from forge_config.schema import EgressAction, EgressPolicy
 
+from forge_security.egress.classify import host_matches
 
-def host_matches(host: str, patterns: frozenset[str]) -> bool:
-    """Case-insensitive host match against a set of patterns.
+#: Re-exported so ``allowed_hosts`` has exactly one matcher: the binding and
+#: transport planes and the first-line classifier all resolve to this symbol.
+__all__ = [
+    "BoundCredential",
+    "EgressViolationError",
+    "credential_binding_from_raw_auth",
+    "enforce_binding",
+    "host_matches",
+]
 
-    A pattern is an exact host, a ``host:port`` (the port is ignored -- the
-    caller passes a bare hostname), or a ``*.suffix`` wildcard that matches
-    both the apex (``example.com``) and any subdomain (``a.example.com``).
+#: The ``auth.type`` value meaning "this config carries no credential".
+_AUTH_TYPE_NONE = "none"
+
+
+def credential_binding_from_raw_auth(
+    auth: Any, *, declared_host: str | None
+) -> tuple[bool, frozenset[str]]:
+    """THE single implementation of the credential-binding rule (ADR-0006):
+    "does this auth config carry a credential, and which hosts is it bound to".
+
+    Two gates ask this question about the same invariant and must never
+    diverge: the WRITE-time overlay gate in ``forge_gateway.routes.admin``
+    (which sees RAW BASE yaml dicts) and the CONNECT-time
+    ``forge_agent.builder.openapi.resolve_bound_credential`` (which sees a
+    typed ``AuthConfig``). Both delegate here.
+
+    The rule: an ``auth.type`` of ``none`` (or an absent/unparseable auth
+    block) carries no credential. Otherwise the credential is bound to
+    ``allowed_hosts`` when that is non-empty, else pinned to *declared_host*
+    -- the BASE-declared destination ("pin to where you were pointed"), so
+    every pre-existing config is safe with no rewrite.
+
+    Args:
+        auth: The raw auth mapping (anything else is treated as "no auth").
+        declared_host: Host of the BASE-declared destination URL, if any.
+
+    Returns:
+        ``(has_credential, bound_hosts)``, with every host lowercased.
     """
-    if not host:
-        return False
-    hl = host.lower()
-    for p in patterns:
-        pl = p.lower()
-        if pl.startswith("*."):
-            if hl == pl[2:] or hl.endswith(pl[1:]):
-                return True
-        elif ":" in pl:
-            if hl == pl.split(":", 1)[0]:
-                return True
-        elif hl == pl:
-            return True
-    return False
+    if not isinstance(auth, Mapping):
+        return (False, frozenset())
+    if (auth.get("type") or _AUTH_TYPE_NONE) == _AUTH_TYPE_NONE:
+        return (False, frozenset())
+    allowed = auth.get("allowed_hosts")
+    if isinstance(allowed, list) and allowed:
+        return (True, frozenset(str(h).lower() for h in allowed))
+    if declared_host:
+        return (True, frozenset({declared_host.lower()}))
+    return (True, frozenset())
 
 
 @dataclass(frozen=True)

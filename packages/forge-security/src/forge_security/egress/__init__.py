@@ -5,11 +5,13 @@ builders (forge-agent) and the gateway admin routes (forge-gateway). Three
 cooperating planes:
 
 * ``classify`` -- pure host/IP classification (``validate_endpoint``,
-  ``is_internal_ip``, ``candidate_ips``).
+  ``is_internal_ip``, ``candidate_ips``) plus ``host_matches``, the single
+  ``allowed_hosts`` matcher every allow-list-honouring plane delegates to.
 * ``transport`` -- ``GuardedBackend`` / ``SSRFGuardedTransport`` /
   ``make_guarded_client``: connect-time pinned-IP enforcement.
-* ``binding`` -- ``BoundCredential`` / ``enforce_binding``: secret ->
-  destination binding to stop confused-deputy exfiltration.
+* ``binding`` -- ``BoundCredential`` / ``enforce_binding`` /
+  ``credential_binding_from_raw_auth``: secret -> destination binding to stop
+  confused-deputy exfiltration.
 """
 
 from __future__ import annotations
@@ -17,11 +19,12 @@ from __future__ import annotations
 from forge_security.egress.binding import (
     BoundCredential,
     EgressViolationError,
+    credential_binding_from_raw_auth,
     enforce_binding,
-    host_matches,
 )
 from forge_security.egress.classify import (
     candidate_ips,
+    host_matches,
     is_blocked_hostname,
     is_internal_ip,
     validate_endpoint,
@@ -39,6 +42,7 @@ __all__ = [
     "is_internal_ip",
     "candidate_ips",
     "is_blocked_hostname",
+    "host_matches",
     # transport
     "GuardedBackend",
     "SSRFGuardedTransport",
@@ -48,5 +52,5 @@ __all__ = [
     "BoundCredential",
     "EgressViolationError",
     "enforce_binding",
-    "host_matches",
+    "credential_binding_from_raw_auth",
 ]

@@ -484,3 +484,86 @@ class TestLoadEffectiveConfig:
         assert names_after == ["echo"]  # no duplication
         echo_after = next(t for t in config_after.tools.manual_tools if t.name == "echo")
         assert echo_after.description == "new"
+
+
+class TestPruneNoopOverlayLlmAndMetadataArms:
+    """The ``llm`` and ``metadata`` arms of the prune.
+
+    These matter for GitOps integrity for the same reason the ``tools``/
+    ``agents`` arm does: a promoted overlay entry that is never pruned lingers
+    as permanent drift and SHADOWS later BASE edits. For ``llm`` that means a
+    model/provider change committed to git could be silently masked by stale
+    overlay state.
+    """
+
+    def test_promoted_llm_block_is_pruned_once_base_matches(self) -> None:
+        old_base = {"llm": {"default_model": "gpt-4o-mini"}}
+        stale_rev = compute_base_rev(old_base)
+        overlay_content = {"llm": {"default_model": "claude-sonnet"}}
+        # A human promoted the overlay's llm block into git; BASE now matches.
+        new_base = {"llm": {"default_model": "claude-sonnet"}}
+
+        result = prune_noop_overlay(
+            overlay_content, base_editable=new_base, overlay_base_rev=stale_rev
+        )
+        assert result == {}
+
+    def test_unpromoted_llm_block_survives_the_prune(self) -> None:
+        old_base = {"llm": {"default_model": "gpt-4o-mini"}}
+        stale_rev = compute_base_rev(old_base)
+        overlay_content = {"llm": {"default_model": "claude-sonnet"}}
+        # BASE moved for an unrelated reason -- the overlay's llm edit is still
+        # a real, unpromoted override and must NOT be dropped.
+        new_base = {"llm": {"default_model": "gpt-4o"}}
+
+        result = prune_noop_overlay(
+            overlay_content, base_editable=new_base, overlay_base_rev=stale_rev
+        )
+        assert result == overlay_content
+
+    def test_later_base_llm_edit_is_not_shadowed_by_stale_overlay(self) -> None:
+        """The stakes, stated directly: once promoted, the overlay copy is gone,
+        so a subsequent git-side llm change is what takes effect."""
+        stale_rev = compute_base_rev({"llm": {"default_model": "a"}})
+        overlay_content = {"llm": {"default_model": "b"}}
+        promoted_base = {"llm": {"default_model": "b"}}
+        assert (
+            prune_noop_overlay(
+                overlay_content, base_editable=promoted_base, overlay_base_rev=stale_rev
+            )
+            == {}
+        )
+
+    def test_promoted_metadata_description_is_pruned(self) -> None:
+        stale_rev = compute_base_rev({"metadata": {"description": "old"}})
+        overlay_content = {"metadata": {"description": "new"}}
+        new_base = {"metadata": {"description": "new"}}
+        result = prune_noop_overlay(
+            overlay_content, base_editable=new_base, overlay_base_rev=stale_rev
+        )
+        assert result == {}
+
+    def test_unpromoted_metadata_description_survives(self) -> None:
+        stale_rev = compute_base_rev({"metadata": {"description": "old"}})
+        overlay_content = {"metadata": {"description": "overlay-only"}}
+        new_base = {"metadata": {"description": "something-else"}}
+        result = prune_noop_overlay(
+            overlay_content, base_editable=new_base, overlay_base_rev=stale_rev
+        )
+        assert result == overlay_content
+
+    def test_non_dict_metadata_overlay_is_kept(self) -> None:
+        stale_rev = compute_base_rev({"metadata": {"description": "old"}})
+        overlay_content = {"metadata": "not-a-dict"}
+        result = prune_noop_overlay(
+            overlay_content,
+            base_editable={"metadata": {"description": "old"}},
+            overlay_base_rev=stale_rev,
+        )
+        assert result == overlay_content
+
+    def test_metadata_prune_tolerates_base_without_metadata(self) -> None:
+        stale_rev = compute_base_rev({"llm": {"default_model": "a"}})
+        overlay_content = {"metadata": {"description": "only-in-overlay"}}
+        result = prune_noop_overlay(overlay_content, base_editable={}, overlay_base_rev=stale_rev)
+        assert result == overlay_content

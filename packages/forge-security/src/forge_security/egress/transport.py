@@ -26,8 +26,12 @@ import httpcore
 import httpx
 from httpcore._backends.auto import AutoBackend
 
-from forge_security.egress.binding import host_matches
-from forge_security.egress.classify import candidate_ips, is_blocked_hostname, is_internal_ip
+from forge_security.egress.classify import (
+    candidate_ips,
+    host_matches,
+    is_blocked_hostname,
+    is_internal_ip,
+)
 
 if TYPE_CHECKING:
     from forge_config.schema import EgressPolicy

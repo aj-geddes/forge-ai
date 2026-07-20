@@ -19,7 +19,12 @@ import httpx
 from forge_config.exceptions import SecretResolutionError
 from forge_config.schema import AuthConfig, AuthType, EgressPolicy, OpenAPISource
 from forge_config.secret_resolver import SecretResolver
-from forge_security.egress import BoundCredential, enforce_binding, make_guarded_client
+from forge_security.egress import (
+    BoundCredential,
+    credential_binding_from_raw_auth,
+    enforce_binding,
+    make_guarded_client,
+)
 from pydantic_ai.tools import Tool
 
 from forge_agent.active.gate import ToolGate
@@ -771,10 +776,15 @@ def resolve_bound_credential(
     """Resolve auth headers once (fail-fast) and compute the destination host
     set the resulting credential is bound to (ADR-0006).
 
-    If ``auth.allowed_hosts`` is set it wins; otherwise the credential is
-    pinned to ``declared_host`` -- the BASE-declared destination -- so every
-    existing config is safe with no rewrite ("pin to where you were pointed").
-    A no-auth config yields ``BoundCredential.none()``.
+    The binding RULE itself lives in
+    ``forge_security.egress.binding.credential_binding_from_raw_auth`` -- the
+    SAME predicate the write-time overlay gate in
+    ``forge_gateway.routes.admin`` applies to raw BASE yaml -- so the
+    connect-time and write-time answers cannot diverge. In short: if
+    ``auth.allowed_hosts`` is set it wins; otherwise the credential is pinned
+    to ``declared_host`` -- the BASE-declared destination -- so every existing
+    config is safe with no rewrite ("pin to where you were pointed"). A
+    no-auth config yields ``BoundCredential.none()``.
 
     Args:
         auth: The authentication configuration.
@@ -791,12 +801,10 @@ def resolve_bound_credential(
     headers = _resolve_auth_headers(auth, resolver)
     if not headers:
         return BoundCredential.none()
-    if auth.allowed_hosts:
-        allowed = frozenset(h.lower() for h in auth.allowed_hosts)
-    elif declared_host:
-        allowed = frozenset({declared_host.lower()})
-    else:
-        allowed = frozenset()
+    _, allowed = credential_binding_from_raw_auth(
+        {"type": auth.type.value, "allowed_hosts": list(auth.allowed_hosts)},
+        declared_host=declared_host,
+    )
     return BoundCredential(
         headers=headers,
         allowed_hosts=allowed,
